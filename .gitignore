@@ -1,0 +1,35 @@
+# Keil / MDK build outputs
+**/Objects/
+**/Listings/
+**/Debug/
+**/Release/
+**/Exe/
+**/Obj/
+
+# Keil user/session generated files
+*.uvguix.*
+*.uvgui.*
+*.uvoptx
+*.scvd
+JLinkSettings.ini
+
+# Local editor and tool caches
+**/.vscode/
+.playwright-mcp/
+.codex/
+
+# Logs and temporary files
+*.log
+*.tmp
+*.bak
+*.orig
+*.pyc
+__pycache__/
+
+# Local screenshots / visual evidence
+openmv*.png
+openart*.png
+*.bmp
+
+# Large vendor/product package kept locally only
+OpenART_Plus_Product/
