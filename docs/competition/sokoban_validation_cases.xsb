@@ -1,0 +1,80 @@
+; V01_straight_push
+; expected_lurd: rR
+#######
+#@ $.#
+#######
+
+; V02_push_down
+; expected_lurd: rrD
+#######
+#@    #
+#  $  #
+#  .  #
+#######
+
+; V03_turn_then_push
+; expected_lurd: drRRurD
+########
+#@     #
+#  $   #
+#  # . #
+#      #
+########
+
+; V04_two_boxes
+; expected_lurd: dRRddRR
+#########
+#@      #
+# $ .   #
+#       #
+#   $ . #
+#########
+
+; V05_unsolvable_wall_slide
+; expected_lurd: <no solution>
+######
+#@   #
+#$   #
+#  . #
+######
+
+; V06_three_boxes_sequential
+; expected_lurd: dRRddRRddRR
+###########
+#@        #
+# $ .     #
+#         #
+#   $ .   #
+#         #
+#     $ . #
+###########
+
+; V07_four_boxes_sequential
+; expected_lurd: dRRddRRddRRddRR
+#############
+#@          #
+# $ .       #
+#           #
+#   $ .     #
+#           #
+#     $ .   #
+#           #
+#       $ . #
+#############
+
+; ZF01_seekfree_minus_map1_pure
+; source: OpenART_Plus_Product\【软件】上位机等\map_file\-map1.txt
+; fixed_player: row=1 col=1
+; expected_lurd: dddrrrrrRRdlldRRRdrUU
+################
+#@             #
+#              #
+#              #
+#      $ ..    #
+#              #
+#      $       #
+#              #
+#              #
+#              #
+#              #
+################

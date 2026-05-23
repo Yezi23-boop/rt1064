@@ -394,6 +394,26 @@
               <FileType>1</FileType>
               <FilePath>..\user\src\main.c</FilePath>
             </File>
+            <File>
+              <FileName>sokoban_app.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>..\user\src\sokoban_app.c</FilePath>
+            </File>
+            <File>
+              <FileName>sokoban_maps.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>..\user\src\sokoban_maps.c</FilePath>
+            </File>
+            <File>
+              <FileName>sokoban_motion.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>..\user\src\sokoban_motion.c</FilePath>
+            </File>
+            <File>
+              <FileName>sokoban_solver.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>..\user\src\sokoban_solver.c</FilePath>
+            </File>
           </Files>
         </Group>
         <Group>
@@ -403,6 +423,31 @@
               <FileName>isr.h</FileName>
               <FileType>5</FileType>
               <FilePath>..\user\inc\isr.h</FilePath>
+            </File>
+            <File>
+              <FileName>sokoban_app.h</FileName>
+              <FileType>5</FileType>
+              <FilePath>..\user\inc\sokoban_app.h</FilePath>
+            </File>
+            <File>
+              <FileName>sokoban_maps.h</FileName>
+              <FileType>5</FileType>
+              <FilePath>..\user\inc\sokoban_maps.h</FilePath>
+            </File>
+            <File>
+              <FileName>sokoban_motion.h</FileName>
+              <FileType>5</FileType>
+              <FilePath>..\user\inc\sokoban_motion.h</FilePath>
+            </File>
+            <File>
+              <FileName>sokoban_solver.h</FileName>
+              <FileType>5</FileType>
+              <FilePath>..\user\inc\sokoban_solver.h</FilePath>
+            </File>
+            <File>
+              <FileName>sokoban_types.h</FileName>
+              <FileType>5</FileType>
+              <FilePath>..\user\inc\sokoban_types.h</FilePath>
             </File>
           </Files>
         </Group>
