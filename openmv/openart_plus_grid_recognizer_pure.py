@@ -1,33 +1,24 @@
 import sensor
 import time
 
-try:
-    from machine import UART
-except Exception:
-    UART = None
-
-try:
-    import cmm_load
-    cmm_load.load()
-except Exception as exc:
-    print("cmm_load skipped or failed:", repr(exc))
-
 # ==================== 墙体识别 ===================
-IMG_WIDTH = 320
-IMG_HEIGHT = 240
+USE_VGA = True
+FRAME_SCALE = 2 if USE_VGA else 1
+IMG_WIDTH = 320 * FRAME_SCALE
+IMG_HEIGHT = 240 * FRAME_SCALE
 GRID_COLS = 16
 GRID_ROWS = 12
 
 # 地图ROI
-MAP_ROI = (25, 15, 270, 210)
+MAP_ROI = (25 * FRAME_SCALE, 15 * FRAME_SCALE, 270 * FRAME_SCALE, 210 * FRAME_SCALE)
 
 # 采样点配置
-COL_STEP = 17
-ROW_STEP = 17
-DOT_START_X = 35
-DOT_START_Y = 25
-SAMPLE_OFFSET_X = -6
-SAMPLE_OFFSET_Y = -6
+COL_STEP = 17 * FRAME_SCALE
+ROW_STEP = 17 * FRAME_SCALE
+DOT_START_X = 35 * FRAME_SCALE
+DOT_START_Y = 25 * FRAME_SCALE
+SAMPLE_OFFSET_X = -6 * FRAME_SCALE
+SAMPLE_OFFSET_Y = -6 * FRAME_SCALE
 
 # 元素映射
 ELEMENT_CODE = {
@@ -59,11 +50,12 @@ DRAW_COLOR = {
 
 # ==================== 调试开关 ===================
 DEBUG_ENABLE = True
+DEBUG_DRAW_ROI = True
+DEBUG_DRAW_POINTS = True
 DEBUG_PRINT_PERIOD_MS = 500
-UART_ENABLE = False
-UART_ID = 12
-UART_BAUDRATE = 115200
-UART_SEND_PERIOD_MS = 50
+ENABLE_BOMB = False
+CAMERA_MANUAL_EXPOSURE = False
+CAMERA_EXPOSURE_US = 1000
 
 
 def get_average_pixel(img, x, y, size=2):
@@ -108,13 +100,11 @@ def classify_element(img, row_idx, col_idx, x, y):
 
     r, g, b = get_average_pixel(img, x, y)
 
-    # 过滤屏幕上可能盖住采样点的黑色圆点。
     if r < 60 and g < 60 and b < 60:
         r, g, b = get_average_pixel(img, x + 3, y + 3)
         if r < 60 and g < 60 and b < 60:
             return "space"
 
-    # 【最高优先级1：所有黄色箱子识别（含亮黄色反光）】
     if (
         r > b + 15 and
         g > b + 15 and
@@ -123,11 +113,9 @@ def classify_element(img, row_idx, col_idx, x, y):
     ):
         return "box"
 
-    # 【最高优先级2：角色识别】
     if g > r + 12 and g > b + 12:
         return "player"
 
-    # 【最高优先级3：目标点识别】
     if (
         r > g + 30 and b > g + 30 and
         r > 110 and b > 110 and
@@ -136,15 +124,12 @@ def classify_element(img, row_idx, col_idx, x, y):
     ):
         return "goal"
 
-    # 【最高优先级4：炸弹识别】
-    if r > g + 25 and r > b + 25:
+    if ENABLE_BOMB and r > g + 25 and r > b + 25:
         return "bomb"
 
-    # 把空地条件大幅收紧：B必须比R和G高35以上
     if b > r + 140 and b > g + 35:
         return "space"
 
-    # 【兜底：其他所有情况全部判定为墙体】
     return "wall"
 
 
@@ -158,7 +143,8 @@ def recognize_map(img, grid_points):
         element = classify_element(img, row_idx, col_idx, x, y)
         map_matrix[row_idx][col_idx] = ELEMENT_CODE[element]
         char_matrix[row_idx][col_idx] = ELEMENT_CHAR[element]
-        img.draw_circle(x, y, 3, color=DRAW_COLOR[element], fill=True)
+        if DEBUG_ENABLE and DEBUG_DRAW_POINTS:
+            img.draw_circle(x, y, 3, color=DRAW_COLOR[element], fill=True)
 
     return map_matrix, char_matrix
 
@@ -174,72 +160,45 @@ def print_map(map_matrix, char_matrix, fps):
     print("FPS %.2f" % fps)
 
 
-def send_binary_map(uart, map_matrix):
-    buf = [0xAA, 0x55]
-    for row in map_matrix:
-        buf.extend(row)
-    buf.append(0x55)
-    buf.append(0xAA)
-    uart.write(bytes(buf))
-    return len(buf)
-
-
 def init_camera():
     sensor.reset()
     sensor.set_pixformat(sensor.RGB565)
-    sensor.set_framesize(sensor.QVGA)
+    sensor.set_framesize(sensor.VGA if USE_VGA else sensor.QVGA)
+
+    if CAMERA_MANUAL_EXPOSURE:
+        try:
+            sensor.set_auto_exposure(False, exposure_us=CAMERA_EXPOSURE_US)
+        except Exception as exc:
+            print("set_auto_exposure skipped:", repr(exc))
+
     sensor.skip_frames(time=2000)
-
-    try:
-        sensor.set_brightness(400)
-    except Exception as exc:
-        print("set_brightness skipped:", repr(exc))
-
-    try:
-        sensor.set_contrast(2)
-    except Exception as exc:
-        print("set_contrast skipped:", repr(exc))
-
-
-def init_uart():
-    if not UART_ENABLE:
-        return None
-    if UART is None:
-        print("UART module unavailable; UART disabled")
-        return None
-    return UART(UART_ID, baudrate=UART_BAUDRATE)
 
 
 def main():
     init_camera()
-    uart = init_uart()
     grid_points = build_grid_points()
 
     clock = time.clock()
     last_print_ms = time.ticks_ms()
 
     print("OPENART_GRID_RECOGNIZER_READY")
+    print("FRAME_MODE=%s" % ("VGA" if USE_VGA else "QVGA"))
     print("GRID_ROWS=%d GRID_COLS=%d" % (GRID_ROWS, GRID_COLS))
     print("MAP_ROI=%s" % str(MAP_ROI))
     print("DOT_START_X=%d DOT_START_Y=%d COL_STEP=%d ROW_STEP=%d OFFSET=(%d,%d)" %
           (DOT_START_X, DOT_START_Y, COL_STEP, ROW_STEP, SAMPLE_OFFSET_X, SAMPLE_OFFSET_Y))
-    print("UART_ENABLE=%s UART_ID=%d UART_BAUDRATE=%d" %
-          (str(UART_ENABLE), UART_ID, UART_BAUDRATE))
-
-    last_send_ms = time.ticks_ms()
+    print("CAMERA_MANUAL_EXPOSURE=%s CAMERA_EXPOSURE_US=%d" %
+          (str(CAMERA_MANUAL_EXPOSURE), CAMERA_EXPOSURE_US))
 
     while True:
         clock.tick()
         img = sensor.snapshot()
         now_ms = time.ticks_ms()
 
-        img.draw_rectangle(MAP_ROI, color=(0, 255, 0), thickness=2)
+        if DEBUG_ENABLE and DEBUG_DRAW_ROI:
+            img.draw_rectangle(MAP_ROI, color=(0, 255, 0), thickness=2)
 
         map_matrix, char_matrix = recognize_map(img, grid_points)
-
-        if uart is not None and time.ticks_diff(now_ms, last_send_ms) >= UART_SEND_PERIOD_MS:
-            send_binary_map(uart, map_matrix)
-            last_send_ms = now_ms
 
         if DEBUG_ENABLE and time.ticks_diff(now_ms, last_print_ms) >= DEBUG_PRINT_PERIOD_MS:
             print_map(map_matrix, char_matrix, clock.fps())

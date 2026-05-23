@@ -217,6 +217,38 @@ MAP_FRAME_SENT 2
 ...
 ```
 
+## 当前 OpenART #1 地图识别脚本
+
+路径：
+
+```text
+D:\rt1064\RT1064_Library\SeekFree_RT1064_Opensource_Library\openmv\openart_plus_grid_recognizer.py
+```
+
+这个脚本用于 OpenART #1 识别屏幕左侧地图，不再走全局色块检测或自动 ROI 搜索，而是按固定安装后的 12 行 x 16 列采样网格打点取色。
+
+这里的前提是摄像头和屏幕都固定在同一套支架上，相对位置不会在运行中变化。也就是说，这个方案不是“每帧重新找屏幕”，而是“先一次性校准，再按固定采样点直接取色”。`GRID_START_X/Y`、`CELL_W/H`、`DOT_START_X/Y`、`SAMPLE_OFFSET_X/Y` 都属于这种安装后的标定参数。
+
+核心校准参数在脚本顶部：
+
+```python
+GRID_START_X = 42.0
+GRID_START_Y = 52.0
+CELL_W = 38.0
+CELL_H = 38.0
+GRID_ROTATION_DEG = 0.0
+BARREL_K = 0.0
+```
+
+调试时先保持 `DEBUG_ENABLE = True`，确认每个采样点落在格子中心。当前阶段先不进行通讯，离线识别时关闭调试输出和绘制，UART 也保持关闭：
+
+```python
+DEBUG_ENABLE = False
+UART_ENABLE = False
+```
+
+识别端内部当前直接按 12 行 x 16 列解析地图，并按这一顺序输出 `code_matrix`。如果后续 RT1064 侧需要接收二进制地图帧，再把 `UART_ENABLE` 打开即可；目前默认不发送。
+
 ## 当前最小 RT1064 程序
 
 路径：
