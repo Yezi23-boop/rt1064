@@ -23,6 +23,9 @@
 - 当前 OpenART Plus 到 RT1064 UART 最小通信经验文档：
   - `docs/competition/openart_plus_rt1064_uart_experience.md`
 - 如果问题涉及第 21 届智能视觉组整体规则、OpenART/RT1064 分工、16x12 地图识别、推箱子 BFS 或双 OpenART Plus 方案，优先结合逐飞公众号原文和本仓库 `docs/competition` 下的整理文档判断，不要只凭聊天记忆下结论。
+- 遇到 OpenART / OpenMV 脚本、图像处理、相机初始化、串口终端或官方 API 用法问题时，先查 OpenMV 官方文档 `https://docs.openmv.io/`，优先看总览页和对应模块 API，再决定是否自己补封装或改代码。
+- 写 OpenMV / ART 代码前，先确认 OpenMV 官方已经提供了哪些现成能力，常见优先查看 `sensor`、`image`、`machine`、`display`、`ml`、`csi`、`network` 和 OpenMV IDE Overview，避免重复造轮子。
+- 尤其先看 OpenMV 官方库索引页 `https://docs.openmv.io/library/index.html`，从函数和模块总表里筛出能直接复用的能力；必要时再下钻到对应模块页和示例代码。
 
 ## Agent skills
 
