@@ -63,7 +63,8 @@
 #define m_interrupts_size              0x00000400
 
 #define m_text_start                   0x70002400
-#define m_text_size                    0x003FDC00
+; Reserve the final 32KB sector for runtime Flash settings.
+#define m_text_size                    0x003F5C00
 
 
 ;SDRAM IVT_TABLE
@@ -124,13 +125,13 @@ LR_m_text m_flash_config_start m_text_start+m_text_size-m_flash_config_start {  
   }
 
 
-  ; ÔÚFALSHÖÐµÄÖÐ¶ÏÏòÁ¿±í
+  ; ï¿½ï¿½FALSHï¿½Ðµï¿½ï¿½Ð¶ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½
   VECTOR_ROM m_interrupts_start FIXED m_interrupts_size { ; load address = execution address
   * (.isr_vector,+FIRST)
   }
   
-  ; * (InRoot$$Sections)ÊÇ__mainÖÐ´Ó¼ÓÔØÓò¸´ÖÆ´úÂëµ½Ö´ÐÐÓòµÄ³ÌÐòscatter_copy£¬
-  ; Æô¶¯Ê±ÔËÐÐµÄstartup_mimxrt1064tºÍsystem_mimxrt1064ÖÐµÄ´úÂëÒª´æ·ÅÔÚFLASHÖÐ
+  ; * (InRoot$$Sections)ï¿½ï¿½__mainï¿½Ð´Ó¼ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Æ´ï¿½ï¿½ëµ½Ö´ï¿½ï¿½ï¿½ï¿½Ä³ï¿½ï¿½ï¿½scatter_copyï¿½ï¿½
+  ; ï¿½ï¿½ï¿½ï¿½Ê±ï¿½ï¿½ï¿½Ðµï¿½startup_mimxrt1064tï¿½ï¿½system_mimxrt1064ï¿½ÐµÄ´ï¿½ï¿½ï¿½Òªï¿½ï¿½ï¿½ï¿½ï¿½FLASHï¿½ï¿½
   ER_m_text m_text_start FIXED m_text_size { ; load address = execution address
 	* (InRoot$$Sections)
 	startup_mimxrt1064.o(+RO)
@@ -138,12 +139,12 @@ LR_m_text m_flash_config_start m_text_start+m_text_size-m_flash_config_start {  
 	
   } 
 
-  ;	EMPTY±íÊ¾Õâ¶Î¿Õ¼äÁô¿Õ£¬·ÀÖ¹ÆäËüÓ¦ÓÃÕ¼ÓÃ»ò±àÒëÌáÊ¾warning
+  ;	EMPTYï¿½ï¿½Ê¾ï¿½ï¿½Î¿Õ¼ï¿½ï¿½ï¿½ï¿½Õ£ï¿½ï¿½ï¿½Ö¹ï¿½ï¿½ï¿½ï¿½Ó¦ï¿½ï¿½Õ¼ï¿½Ã»ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ê¾warning
   VECTOR_RAM m_ram_interrupts_start EMPTY m_ram_interrupts_size { ;execution address
 
   }
 
-  ;´æ·ÅÖ÷Ìå³ÌÐòµÄSDRAM¿Õ¼ä£¬ÓÉ__mainº¯Êý´ÓFLASHÖÐ¼ÓÔØ
+  ;ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½SDRAMï¿½Õ¼ä£¬ï¿½ï¿½__mainï¿½ï¿½ï¿½ï¿½ï¿½ï¿½FLASHï¿½Ð¼ï¿½ï¿½ï¿½
   ER_m_ram_text m_ram_text_start m_ram_text_size { ;execution address
     .ANY (+RO)
 	* (SDRAM_CACHE.init)
@@ -183,3 +184,4 @@ LR_m_text m_flash_config_start m_text_start+m_text_size-m_flash_config_start {  
     * (*SDRAM_NonCacheable)
   }
 }
+

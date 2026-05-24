@@ -35,6 +35,7 @@
 
 #include "zf_common_headfile.h"
 #include "zf_common_debug.h"
+#include "drive_control.h"
 #include "isr.h"
 
 
@@ -51,11 +52,13 @@ void PIT_IRQHandler(void)
     if(pit_flag_get(PIT_CH0))
     {
         pit_flag_clear(PIT_CH0);
+        update_imu_5ms();
     }
     
     if(pit_flag_get(PIT_CH1))
     {
         pit_flag_clear(PIT_CH1);
+        update_control_20ms();
     }
     
     if(pit_flag_get(PIT_CH2))
@@ -207,7 +210,6 @@ void GPIO3_Combined_0_15_IRQHandler(void)
 {
     if(exti_flag_get(IMU660RC_INT2_PIN))
     {
-		imu660rc_callback();
         exti_flag_clear(IMU660RC_INT2_PIN);// 清除中断标志位
     }
     if(exti_flag_get(D4))

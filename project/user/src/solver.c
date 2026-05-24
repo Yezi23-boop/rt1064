@@ -1,28 +1,28 @@
-#include "sokoban_solver.h"
+#include "solver.h"
 #include <string.h>
 
-static uint8 bfs_visited[SOKOBAN_STATE_COUNT];
-static uint16 bfs_parent[SOKOBAN_STATE_COUNT];
-static uint16 bfs_queue[SOKOBAN_STATE_COUNT];
-static char bfs_action[SOKOBAN_STATE_COUNT];
-static char single_path[SOKOBAN_MAX_SINGLE_PATH + 1];
+static uint8 bfs_visited[SEARCH_STATE_COUNT];
+static uint16 bfs_parent[SEARCH_STATE_COUNT];
+static uint16 bfs_queue[SEARCH_STATE_COUNT];
+static char bfs_action[SEARCH_STATE_COUNT];
+static char single_path[MAX_SINGLE_PATH + 1];
 
 static uint16 cell_index(uint8 row, uint8 col)
 {
-    return (uint16)(row * SOKOBAN_MAP_COLS + col);
+    return (uint16)(row * MAP_COLS + col);
 }
 
 static uint8 cell_row(uint16 cell)
 {
-    return (uint8)(cell / SOKOBAN_MAP_COLS);
+    return (uint8)(cell / MAP_COLS);
 }
 
 static uint8 cell_col(uint16 cell)
 {
-    return (uint8)(cell % SOKOBAN_MAP_COLS);
+    return (uint8)(cell % MAP_COLS);
 }
 
-static void set_message(sokoban_result_struct *result, const char *message)
+static void set_message(solve_result_struct *result, const char *message)
 {
     uint32 i = 0;
 
@@ -34,35 +34,35 @@ static void set_message(sokoban_result_struct *result, const char *message)
     result->message[i] = '\0';
 }
 
-void sokoban_result_clear(sokoban_result_struct *result)
+void clear_result(solve_result_struct *result)
 {
     memset(result, 0, sizeof(*result));
     set_message(result, "Not solved");
 }
 
-static uint8 map_load(const offline_map_struct *source, sokoban_map_struct *map, sokoban_result_struct *result)
+static uint8 map_load(const map_source_struct *source, map_state_struct *map, solve_result_struct *result)
 {
     uint8 row;
     uint8 col;
     char value;
 
     memset(map, 0, sizeof(*map));
-    map->player = SOKOBAN_STATE_NONE;
+    map->player = INVALID_STATE;
 
-    for(row = 0; row < SOKOBAN_MAP_ROWS; row++)
+    for(row = 0; row < MAP_ROWS; row++)
     {
-        if(SOKOBAN_MAP_COLS != strlen(source->rows[row]))
+        if(MAP_COLS != strlen(source->rows[row]))
         {
             set_message(result, "Bad map width");
             return 0;
         }
 
-        for(col = 0; col < SOKOBAN_MAP_COLS; col++)
+        for(col = 0; col < MAP_COLS; col++)
         {
             value = source->rows[row][col];
             map->grid[row][col] = '.';
 
-            if(SOKOBAN_MAP_FORMAT_SEEKFREE == source->format)
+            if(MAP_FORMAT_SEEKFREE == source->format)
             {
                 if('#' == value)
                 {
@@ -74,7 +74,7 @@ static uint8 map_load(const offline_map_struct *source, sokoban_map_struct *map,
                 }
                 else if('$' == value)
                 {
-                    if(SOKOBAN_MAX_BOXES <= map->box_count)
+                    if(MAX_BOXES <= map->box_count)
                     {
                         set_message(result, "Too many boxes");
                         return 0;
@@ -83,7 +83,7 @@ static uint8 map_load(const offline_map_struct *source, sokoban_map_struct *map,
                 }
                 else if('.' == value)
                 {
-                    if(SOKOBAN_MAX_BOXES <= map->target_count)
+                    if(MAX_BOXES <= map->target_count)
                     {
                         set_message(result, "Too many targets");
                         return 0;
@@ -110,7 +110,7 @@ static uint8 map_load(const offline_map_struct *source, sokoban_map_struct *map,
             }
             else if('B' == value)
             {
-                if(SOKOBAN_MAX_BOXES <= map->box_count)
+                if(MAX_BOXES <= map->box_count)
                 {
                     set_message(result, "Too many boxes");
                     return 0;
@@ -119,7 +119,7 @@ static uint8 map_load(const offline_map_struct *source, sokoban_map_struct *map,
             }
             else if('T' == value)
             {
-                if(SOKOBAN_MAX_BOXES <= map->target_count)
+                if(MAX_BOXES <= map->target_count)
                 {
                     set_message(result, "Too many targets");
                     return 0;
@@ -134,7 +134,7 @@ static uint8 map_load(const offline_map_struct *source, sokoban_map_struct *map,
         }
     }
 
-    if(SOKOBAN_STATE_NONE == map->player)
+    if(INVALID_STATE == map->player)
     {
         set_message(result, "No car");
         return 0;
@@ -147,7 +147,7 @@ static uint8 map_load(const offline_map_struct *source, sokoban_map_struct *map,
     return 1;
 }
 
-static uint8 cell_has_other_box(const sokoban_map_struct *map, uint16 cell, uint8 selected_box)
+static uint8 cell_has_other_box(const map_state_struct *map, uint16 cell, uint8 selected_box)
 {
     uint8 i;
 
@@ -161,7 +161,7 @@ static uint8 cell_has_other_box(const sokoban_map_struct *map, uint16 cell, uint
     return 0;
 }
 
-static uint8 cell_is_free_for_player(const sokoban_map_struct *map, uint16 cell, uint16 selected_box_cell, uint8 selected_box)
+static uint8 cell_is_free_for_player(const map_state_struct *map, uint16 cell, uint16 selected_box_cell, uint8 selected_box)
 {
     if('#' == map->grid[cell_row(cell)][cell_col(cell)])
     {
@@ -178,7 +178,7 @@ static uint8 cell_is_free_for_player(const sokoban_map_struct *map, uint16 cell,
     return 1;
 }
 
-static uint8 cell_is_free_for_box(const sokoban_map_struct *map, uint16 cell, uint8 selected_box)
+static uint8 cell_is_free_for_box(const map_state_struct *map, uint16 cell, uint8 selected_box)
 {
     if('#' == map->grid[cell_row(cell)][cell_col(cell)])
     {
@@ -196,7 +196,7 @@ static uint8 step_cell(uint16 cell, int8 dr, int8 dc, uint16 *next_cell)
     int16 row = (int16)cell_row(cell) + dr;
     int16 col = (int16)cell_col(cell) + dc;
 
-    if((0 > row) || (SOKOBAN_MAP_ROWS <= row) || (0 > col) || (SOKOBAN_MAP_COLS <= col))
+    if((0 > row) || (MAP_ROWS <= row) || (0 > col) || (MAP_COLS <= col))
     {
         return 0;
     }
@@ -205,7 +205,7 @@ static uint8 step_cell(uint16 cell, int8 dr, int8 dc, uint16 *next_cell)
     return 1;
 }
 
-static uint8 solve_single_box(const sokoban_map_struct *map, uint8 box_index, uint8 target_index, char *path, uint16 *path_len)
+static uint8 solve_single_box(const map_state_struct *map, uint8 box_index, uint8 target_index, char *path, uint16 *path_len)
 {
     static const int8 dr[4] = {-1, 1, 0, 0};
     static const int8 dc[4] = {0, 0, -1, 1};
@@ -215,7 +215,7 @@ static uint8 solve_single_box(const sokoban_map_struct *map, uint8 box_index, ui
     uint16 start_state;
     uint16 read_index = 0;
     uint16 write_index = 0;
-    uint16 found_state = SOKOBAN_STATE_NONE;
+    uint16 found_state = INVALID_STATE;
     uint16 state;
     uint16 player;
     uint16 box;
@@ -224,20 +224,20 @@ static uint8 solve_single_box(const sokoban_map_struct *map, uint8 box_index, ui
     uint16 next_state;
     uint16 reverse_len = 0;
     uint8 dir;
-    char reverse_path[SOKOBAN_MAX_SINGLE_PATH + 1];
+    char reverse_path[MAX_SINGLE_PATH + 1];
 
     memset(bfs_visited, 0, sizeof(bfs_visited));
 
-    start_state = (uint16)(map->player * SOKOBAN_MAP_CELLS + map->boxes[box_index]);
+    start_state = (uint16)(map->player * MAP_CELLS + map->boxes[box_index]);
     bfs_visited[start_state] = 1;
-    bfs_parent[start_state] = SOKOBAN_STATE_NONE;
+    bfs_parent[start_state] = INVALID_STATE;
     bfs_queue[write_index++] = start_state;
 
     while(read_index < write_index)
     {
         state = bfs_queue[read_index++];
-        player = (uint16)(state / SOKOBAN_MAP_CELLS);
-        box = (uint16)(state % SOKOBAN_MAP_CELLS);
+        player = (uint16)(state / MAP_CELLS);
+        box = (uint16)(state % MAP_CELLS);
 
         if(box == map->targets[target_index])
         {
@@ -263,7 +263,7 @@ static uint8 solve_single_box(const sokoban_map_struct *map, uint8 box_index, ui
                 {
                     continue;
                 }
-                next_state = (uint16)(next_player * SOKOBAN_MAP_CELLS + next_box);
+                next_state = (uint16)(next_player * MAP_CELLS + next_box);
                 if(0 == bfs_visited[next_state])
                 {
                     bfs_visited[next_state] = 1;
@@ -278,7 +278,7 @@ static uint8 solve_single_box(const sokoban_map_struct *map, uint8 box_index, ui
                 {
                     continue;
                 }
-                next_state = (uint16)(next_player * SOKOBAN_MAP_CELLS + box);
+                next_state = (uint16)(next_player * MAP_CELLS + box);
                 if(0 == bfs_visited[next_state])
                 {
                     bfs_visited[next_state] = 1;
@@ -290,15 +290,15 @@ static uint8 solve_single_box(const sokoban_map_struct *map, uint8 box_index, ui
         }
     }
 
-    if(SOKOBAN_STATE_NONE == found_state)
+    if(INVALID_STATE == found_state)
     {
         return 0;
     }
 
     state = found_state;
-    while(SOKOBAN_STATE_NONE != bfs_parent[state])
+    while(INVALID_STATE != bfs_parent[state])
     {
-        if(SOKOBAN_MAX_SINGLE_PATH <= reverse_len)
+        if(MAX_SINGLE_PATH <= reverse_len)
         {
             return 0;
         }
@@ -315,9 +315,9 @@ static uint8 solve_single_box(const sokoban_map_struct *map, uint8 box_index, ui
     return 1;
 }
 
-static uint8 result_append_action(sokoban_result_struct *result, char action)
+static uint8 result_append_action(solve_result_struct *result, char action)
 {
-    if(SOKOBAN_MAX_TOTAL_ACTIONS <= result->action_count)
+    if(MAX_TOTAL_ACTIONS <= result->action_count)
     {
         set_message(result, "Action overflow");
         return 0;
@@ -328,9 +328,9 @@ static uint8 result_append_action(sokoban_result_struct *result, char action)
     return 1;
 }
 
-static uint8 result_append_waypoint(sokoban_result_struct *result, uint16 player_cell, char action)
+static uint8 result_append_waypoint(solve_result_struct *result, uint16 player_cell, char action)
 {
-    if(SOKOBAN_MAX_WAYPOINTS <= result->waypoint_count)
+    if(MAX_WAYPOINTS <= result->waypoint_count)
     {
         set_message(result, "Waypoint overflow");
         return 0;
@@ -354,7 +354,7 @@ static void remove_cell_from_list(uint16 *list, uint8 *count, uint8 index)
     (*count)--;
 }
 
-static uint8 apply_path_to_runtime(sokoban_map_struct *map, uint8 box_index, uint8 target_index, const char *path, uint16 path_len, sokoban_result_struct *result)
+static uint8 apply_path_to_runtime(map_state_struct *map, uint8 box_index, uint8 target_index, const char *path, uint16 path_len, solve_result_struct *result)
 {
     uint16 player = map->player;
     uint16 box = map->boxes[box_index];
@@ -428,10 +428,10 @@ static uint8 apply_path_to_runtime(sokoban_map_struct *map, uint8 box_index, uin
     return 1;
 }
 
-uint8 sokoban_solve_map_multi_box(const offline_map_struct *source, sokoban_result_struct *result)
+uint8 solve_map(const map_source_struct *source, solve_result_struct *result)
 {
-    sokoban_map_struct map;
-    char best_path[SOKOBAN_MAX_SINGLE_PATH + 1];
+    map_state_struct map;
+    char best_path[MAX_SINGLE_PATH + 1];
     uint16 best_len;
     uint8 best_box;
     uint8 best_target;
@@ -440,7 +440,7 @@ uint8 sokoban_solve_map_multi_box(const offline_map_struct *source, sokoban_resu
     uint8 target_i;
     uint16 trial_len;
 
-    sokoban_result_clear(result);
+    clear_result(result);
     if(0 == map_load(source, &map, result))
     {
         return 0;

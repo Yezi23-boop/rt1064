@@ -20,6 +20,8 @@
 ## 项目文档优先
 
 - 遇到 OpenART Plus、RT1064、UART、SD 卡 `cmm_cfg/cmm_load`、REPL、串口终端、Keil 下载运行状态这类类似问题时，先查项目文档，再继续排查或改代码。
+- 当前仓库文件地图：
+  - `docs/agents/file-map.md`
 - 当前 OpenART Plus 到 RT1064 UART 最小通信经验文档：
   - `docs/competition/openart_plus_rt1064_uart_experience.md`
 - 如果问题涉及第 21 届智能视觉组整体规则、OpenART/RT1064 分工、16x12 地图识别、推箱子 BFS 或双 OpenART Plus 方案，优先结合逐飞公众号原文和本仓库 `docs/competition` 下的整理文档判断，不要只凭聊天记忆下结论。

@@ -1,7 +1,7 @@
 #include "zf_common_headfile.h"
-#include "sokoban_motion.h"
+#include "plan_output.h"
 
-void sokoban_motion_submit_plan(const sokoban_result_struct *result)
+void print_plan(const solve_result_struct *result)
 {
     uint16 i;
 

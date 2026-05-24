@@ -6,7 +6,7 @@ This is a single-context repo for the RT1064 / OpenART intelligent vision projec
 
 - `CONTEXT.md` at the repo root, if present.
 - `docs/adr/`, if present, for architectural decisions related to the area being changed.
-- `docs/competition/` for competition rules, OpenART/RT1064 division of work, UART notes, map recognition, and Sokoban planning context.
+- `docs/competition/` for competition rules, OpenART/RT1064 division of work, UART notes, map recognition, and Push Box planning context.
 
 If `CONTEXT.md` or `docs/adr/` does not exist, proceed silently. Do not block normal work just because those files are absent.
 

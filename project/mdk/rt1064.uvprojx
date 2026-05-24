@@ -385,6 +385,31 @@
           <GroupName>user_c</GroupName>
           <Files>
             <File>
+              <FileName>drive_config.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>..\user\src\drive_config.c</FilePath>
+            </File>
+            <File>
+              <FileName>drive_control.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>..\user\src\drive_control.c</FilePath>
+            </File>
+            <File>
+              <FileName>base_io.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>..\user\src\base_io.c</FilePath>
+            </File>
+            <File>
+              <FileName>motion_math.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>..\user\src\motion_math.c</FilePath>
+            </File>
+            <File>
+              <FileName>wheel_pid.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>..\user\src\wheel_pid.c</FilePath>
+            </File>
+            <File>
               <FileName>isr.c</FileName>
               <FileType>1</FileType>
               <FilePath>..\user\src\isr.c</FilePath>
@@ -395,24 +420,44 @@
               <FilePath>..\user\src\main.c</FilePath>
             </File>
             <File>
-              <FileName>sokoban_app.c</FileName>
+              <FileName>app.c</FileName>
               <FileType>1</FileType>
-              <FilePath>..\user\src\sokoban_app.c</FilePath>
+              <FilePath>..\user\src\app.c</FilePath>
             </File>
             <File>
-              <FileName>sokoban_maps.c</FileName>
+              <FileName>maps.c</FileName>
               <FileType>1</FileType>
-              <FilePath>..\user\src\sokoban_maps.c</FilePath>
+              <FilePath>..\user\src\maps.c</FilePath>
             </File>
             <File>
-              <FileName>sokoban_motion.c</FileName>
+              <FileName>plan_output.c</FileName>
               <FileType>1</FileType>
-              <FilePath>..\user\src\sokoban_motion.c</FilePath>
+              <FilePath>..\user\src\plan_output.c</FilePath>
             </File>
             <File>
-              <FileName>sokoban_solver.c</FileName>
+              <FileName>solver.c</FileName>
               <FileType>1</FileType>
-              <FilePath>..\user\src\sokoban_solver.c</FilePath>
+              <FilePath>..\user\src\solver.c</FilePath>
+            </File>
+            <File>
+              <FileName>settings.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>..\user\src\settings.c</FilePath>
+            </File>
+            <File>
+              <FileName>timebase.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>..\user\src\timebase.c</FilePath>
+            </File>
+            <File>
+              <FileName>screen.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>..\user\src\screen.c</FilePath>
+            </File>
+            <File>
+              <FileName>menu.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>..\user\src\menu.c</FilePath>
             </File>
           </Files>
         </Group>
@@ -420,34 +465,79 @@
           <GroupName>user_h</GroupName>
           <Files>
             <File>
+              <FileName>drive_config.h</FileName>
+              <FileType>5</FileType>
+              <FilePath>..\user\inc\drive_config.h</FilePath>
+            </File>
+            <File>
+              <FileName>drive_control.h</FileName>
+              <FileType>5</FileType>
+              <FilePath>..\user\inc\drive_control.h</FilePath>
+            </File>
+            <File>
+              <FileName>base_io.h</FileName>
+              <FileType>5</FileType>
+              <FilePath>..\user\inc\base_io.h</FilePath>
+            </File>
+            <File>
+              <FileName>motion_math.h</FileName>
+              <FileType>5</FileType>
+              <FilePath>..\user\inc\motion_math.h</FilePath>
+            </File>
+            <File>
+              <FileName>wheel_pid.h</FileName>
+              <FileType>5</FileType>
+              <FilePath>..\user\inc\wheel_pid.h</FilePath>
+            </File>
+            <File>
               <FileName>isr.h</FileName>
               <FileType>5</FileType>
               <FilePath>..\user\inc\isr.h</FilePath>
             </File>
             <File>
-              <FileName>sokoban_app.h</FileName>
+              <FileName>app.h</FileName>
               <FileType>5</FileType>
-              <FilePath>..\user\inc\sokoban_app.h</FilePath>
+              <FilePath>..\user\inc\app.h</FilePath>
             </File>
             <File>
-              <FileName>sokoban_maps.h</FileName>
+              <FileName>maps.h</FileName>
               <FileType>5</FileType>
-              <FilePath>..\user\inc\sokoban_maps.h</FilePath>
+              <FilePath>..\user\inc\maps.h</FilePath>
             </File>
             <File>
-              <FileName>sokoban_motion.h</FileName>
+              <FileName>plan_output.h</FileName>
               <FileType>5</FileType>
-              <FilePath>..\user\inc\sokoban_motion.h</FilePath>
+              <FilePath>..\user\inc\plan_output.h</FilePath>
             </File>
             <File>
-              <FileName>sokoban_solver.h</FileName>
+              <FileName>solver.h</FileName>
               <FileType>5</FileType>
-              <FilePath>..\user\inc\sokoban_solver.h</FilePath>
+              <FilePath>..\user\inc\solver.h</FilePath>
             </File>
             <File>
-              <FileName>sokoban_types.h</FileName>
+              <FileName>map_types.h</FileName>
               <FileType>5</FileType>
-              <FilePath>..\user\inc\sokoban_types.h</FilePath>
+              <FilePath>..\user\inc\map_types.h</FilePath>
+            </File>
+            <File>
+              <FileName>settings.h</FileName>
+              <FileType>5</FileType>
+              <FilePath>..\user\inc\settings.h</FilePath>
+            </File>
+            <File>
+              <FileName>timebase.h</FileName>
+              <FileType>5</FileType>
+              <FilePath>..\user\inc\timebase.h</FilePath>
+            </File>
+            <File>
+              <FileName>screen.h</FileName>
+              <FileType>5</FileType>
+              <FilePath>..\user\inc\screen.h</FilePath>
+            </File>
+            <File>
+              <FileName>menu.h</FileName>
+              <FileType>5</FileType>
+              <FilePath>..\user\inc\menu.h</FilePath>
             </File>
           </Files>
         </Group>

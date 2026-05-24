@@ -1,10 +1,10 @@
-#include "sokoban_maps.h"
+#include "maps.h"
 
-static const offline_map_struct offline_maps[] =
+static const map_source_struct offline_maps[] =
 {
     {
         "Easy single",
-        SOKOBAN_MAP_FORMAT_RT,
+        MAP_FORMAT_RT,
         {
             "################",
             "#..............#",
@@ -22,7 +22,7 @@ static const offline_map_struct offline_maps[] =
     },
     {
         "Wall turn",
-        SOKOBAN_MAP_FORMAT_RT,
+        MAP_FORMAT_RT,
         {
             "################",
             "#..............#",
@@ -40,7 +40,7 @@ static const offline_map_struct offline_maps[] =
     },
     {
         "Two boxes",
-        SOKOBAN_MAP_FORMAT_RT,
+        MAP_FORMAT_RT,
         {
             "################",
             "#..............#",
@@ -58,7 +58,7 @@ static const offline_map_struct offline_maps[] =
     },
     {
         "ZF -map1 pure",
-        SOKOBAN_MAP_FORMAT_SEEKFREE,
+        MAP_FORMAT_SEEKFREE,
         {
             "################",
             "#C-------------#",
@@ -76,7 +76,7 @@ static const offline_map_struct offline_maps[] =
     },
     {
         "ZF map1 classify",
-        SOKOBAN_MAP_FORMAT_SEEKFREE,
+        MAP_FORMAT_SEEKFREE,
         {
             "################",
             "#C-------------#",
@@ -94,7 +94,7 @@ static const offline_map_struct offline_maps[] =
     },
     {
         "ZF map2 classify",
-        SOKOBAN_MAP_FORMAT_SEEKFREE,
+        MAP_FORMAT_SEEKFREE,
         {
             "################",
             "#C#------------#",
@@ -112,7 +112,7 @@ static const offline_map_struct offline_maps[] =
     },
     {
         "ZF map3 bomb",
-        SOKOBAN_MAP_FORMAT_SEEKFREE,
+        MAP_FORMAT_SEEKFREE,
         {
             "################",
             "#C#---#--#----.#",
@@ -130,14 +130,14 @@ static const offline_map_struct offline_maps[] =
     },
 };
 
-uint8 offline_map_count_get(void)
+uint8 map_count(void)
 {
     return (uint8)(sizeof(offline_maps) / sizeof(offline_maps[0]));
 }
 
-const offline_map_struct *offline_map_get(uint8 index)
+const map_source_struct *map_get(uint8 index)
 {
-    uint8 count = offline_map_count_get();
+    uint8 count = map_count();
 
     if(index >= count)
     {

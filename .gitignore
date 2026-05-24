@@ -17,6 +17,7 @@ JLinkSettings.ini
 **/.vscode/
 .playwright-mcp/
 .codex/
+.codegraph/
 
 # Logs and temporary files
 *.log
