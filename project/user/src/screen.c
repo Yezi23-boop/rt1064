@@ -17,6 +17,31 @@
 #define CAR_COLOR               (RGB565_CYAN)
 #define EMPTY_COLOR             (RGB565_WHITE)
 #define GRID_COLOR              (RGB565_GRAY)
+#define FILL_BUFFER_PIXELS      (240u * LINE_H)
+
+typedef enum
+{
+    SCREEN_PAGE_NONE = 0,
+    SCREEN_PAGE_HOME,
+    SCREEN_PAGE_RUN,
+    SCREEN_PAGE_MODE_SELECT,
+    SCREEN_PAGE_PLAYBACK,
+    SCREEN_PAGE_DEMO,
+    SCREEN_PAGE_DEBUG,
+    SCREEN_PAGE_INFO,
+} screen_page_enum;
+
+static screen_page_enum active_page = SCREEN_PAGE_NONE;
+AT_SDRAM_SECTION_ALIGN(uint16 screen_fill_buffer[FILL_BUFFER_PIXELS], 64);
+
+static void begin_page(screen_page_enum page)
+{
+    if(active_page != page)
+    {
+        ips200_clear();
+        active_page = page;
+    }
+}
 
 static uint16 cell_index_local(uint8 row, uint8 col)
 {
@@ -35,11 +60,24 @@ static uint8 cell_col_local(uint16 cell)
 
 static void fill_rect(uint16 x, uint16 y, uint16 w, uint16 h, uint16 color)
 {
+    uint32 pixels = (uint32)w * h;
+    uint32 i;
     uint16 row;
 
-    for(row = 0; row < h; row++)
+    if(pixels <= FILL_BUFFER_PIXELS)
     {
-        ips200_draw_line(x, (uint16)(y + row), (uint16)(x + w - 1u), (uint16)(y + row), color);
+        for(i = 0; i < pixels; i++)
+        {
+            screen_fill_buffer[i] = color;
+        }
+        ips200_show_rgb565_image(x, y, screen_fill_buffer, w, h, w, h, 0);
+    }
+    else
+    {
+        for(row = 0; row < h; row++)
+        {
+            ips200_draw_line(x, (uint16)(y + row), (uint16)(x + w - 1u), (uint16)(y + row), color);
+        }
     }
 }
 
@@ -289,6 +327,7 @@ void screen_init(void)
     ips200_set_color(SCREEN_TEXT_COLOR, SCREEN_BG_COLOR);
     ips200_init(IPS200_TYPE);
     ips200_clear();
+    active_page = SCREEN_PAGE_NONE;
 }
 
 static uint16 count_visible_actions(const solve_result_struct *result)
@@ -326,7 +365,7 @@ void screen_draw_home(const char *const *items, uint8 item_count, uint8 cursor, 
     char line[40];
     uint8 i;
 
-    ips200_clear();
+    begin_page(SCREEN_PAGE_HOME);
     show_line(0, "Home");
     for(i = 0; i < item_count; i++)
     {
@@ -346,7 +385,7 @@ void screen_draw_run(uint8 current_map, uint8 candidate_map, run_mode_enum mode,
 {
     char line[48];
 
-    ips200_clear();
+    begin_page(SCREEN_PAGE_RUN);
     show_line(0, "Run");
     snprintf(line, sizeof(line), "Map : V%02d", current_map + 1);
     show_line(LINE_H, line);
@@ -369,7 +408,7 @@ void screen_draw_mode_select(run_mode_enum candidate_mode)
     uint8 i;
     char line[32];
 
-    ips200_clear();
+    begin_page(SCREEN_PAGE_MODE_SELECT);
     show_line(0, "Mode Select");
     for(i = 0; i < RUN_MODE_COUNT; i++)
     {
@@ -411,7 +450,7 @@ void screen_draw_playback(uint8 map_index, const map_source_struct *source, cons
     visible_step = count_visible_actions_to_step(result, step);
     visible_total = count_visible_actions(result);
 
-    ips200_clear();
+    begin_page(SCREEN_PAGE_PLAYBACK);
     snprintf(line, sizeof(line), "Playback V%02d", map_index + 1);
     show_line(0, line);
     snprintf(line, sizeof(line), "Step: %03u/%03u", visible_step, visible_total);
@@ -427,6 +466,10 @@ void screen_draw_playback(uint8 map_index, const map_source_struct *source, cons
     {
         show_line(LINE_H * 5u, result->message);
     }
+    else
+    {
+        clear_line(LINE_H * 5u);
+    }
     show_hint("K1 Prev K2 Next K3 Play", "K4 Run  K4L Home");
 }
 
@@ -434,7 +477,7 @@ void screen_draw_demo(uint8 index, uint8 total, uint8 ok_count, uint8 fail_count
 {
     char line[40];
 
-    ips200_clear();
+    begin_page(SCREEN_PAGE_DEMO);
     show_line(0, "Demo");
     snprintf(line, sizeof(line), "Map : %03d/%03d", index, total);
     show_line(LINE_H, line);
@@ -451,7 +494,7 @@ void screen_draw_demo(uint8 index, uint8 total, uint8 ok_count, uint8 fail_count
 
 void screen_draw_debug(void)
 {
-    ips200_clear();
+    begin_page(SCREEN_PAGE_DEBUG);
     show_line(0, "Debug");
     show_line(LINE_H, "Reserved");
     show_hint("K4 Home", "K4L Home");
@@ -461,7 +504,7 @@ void screen_draw_info(uint8 map_count_value, save_state_enum save_state)
 {
     char line[48];
 
-    ips200_clear();
+    begin_page(SCREEN_PAGE_INFO);
     show_line(0, "Info");
     snprintf(line, sizeof(line), "Map count: %d", map_count_value);
     show_line(LINE_H, line);
