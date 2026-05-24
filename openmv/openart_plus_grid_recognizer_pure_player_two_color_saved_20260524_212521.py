@@ -54,14 +54,6 @@ DRAW_COLOR = {
     "player": (0, 255, 0),
 }
 
-PLAYER_SAMPLE_OFFSETS = (
-    (0, 0),
-    (-4, 0),
-    (4, 0),
-    (0, -4),
-    (0, 4),
-)
-
 # ==================== 调试、识别与相机开关 ===================
 # 总调试开关。关闭后不画框、不画点、不周期打印地图，正式运行可关闭以提升 FPS。
 DEBUG_ENABLE = True
@@ -83,7 +75,7 @@ DEBUG_PRINT_PERIOD_MS = 500
 ENABLE_BOMB = False
 # 固定相机自动项，避免自动曝光把 snapshot() 帧周期拉长到几十毫秒。
 CAMERA_MANUAL_EXPOSURE = True
-# 仅在 CAMERA_MANUAL_EXPOSURE=True 时生效；先保留当前短曝光，避免中心区域过曝。
+# 仅在 CAMERA_MANUAL_EXPOSURE=True 时生效；QVGA 下 10000us 约对应 100FPS 以内的采集上限。
 CAMERA_EXPOSURE_US = 1000
 CAMERA_LOCK_GAIN = True
 CAMERA_LOCK_WHITEBAL = True
@@ -235,47 +227,6 @@ def draw_recognition_points(img, element_matrix, grid_points):
         img.draw_circle(x, y, 3, color=DRAW_COLOR[element], fill=True)
 
 
-def normalize_color(r, g, b):
-    color_sum = r + g + b
-    if color_sum < 30:
-        return (0, 0, 0, color_sum)
-    return (
-        r * 255 // color_sum,
-        g * 255 // color_sum,
-        b * 255 // color_sum,
-        color_sum,
-    )
-
-
-def is_player_color(rn, gn, bn, color_sum):
-    # 小车两半分别偏青色和黄绿色；用归一化比例减少局部亮暗影响。
-    if color_sum < 120 or gn < 95:
-        return False
-
-    cyan_half = 35 <= rn <= 75 and 85 <= gn <= 125 and 85 <= bn <= 130
-    yellow_green_half = 45 <= rn <= 95 and gn >= 130 and bn <= 60
-    return cyan_half or yellow_green_half
-
-
-def is_player_candidate(rn, gn, bn, color_sum):
-    return is_player_color(rn, gn, bn, color_sum)
-
-
-def sample_player_color(img, x, y, center_r, center_g, center_b):
-    # 小车格子可能一半青、一半黄绿，中心点落在边界时用周围点补采样。
-    center_rn, center_gn, center_bn, center_sum = normalize_color(
-        center_r, center_g, center_b)
-    if not is_player_candidate(center_rn, center_gn, center_bn, center_sum):
-        return False
-
-    for dx, dy in PLAYER_SAMPLE_OFFSETS:
-        r, g, b = get_average_pixel(img, x + dx, y + dy)
-        rn, gn, bn, color_sum = normalize_color(r, g, b)
-        if is_player_color(rn, gn, bn, color_sum):
-            return True
-    return False
-
-
 def classify_element(img, row_idx, col_idx, x, y):
     # 逐飞地图外圈固定为墙，强制处理可减少外圈纹理和边缘透视带来的误判。
     if (row_idx == 0 or row_idx == GRID_ROWS - 1 or
@@ -290,26 +241,25 @@ def classify_element(img, row_idx, col_idx, x, y):
         if r < 60 and g < 60 and b < 60:
             return "space"
 
-    if sample_player_color(img, x, y, r, g, b):
-        return "player"
-
-    rn, gn, bn, color_sum = normalize_color(r, g, b)
-
     # 黄色箱子优先判断，避免高亮黄色被误当作其他高亮色块。
     if (
-        color_sum > 120 and
-        rn > 90 and gn > 95 and
-        bn < 45 and
-        abs(rn - gn) < 40
+        r > b + 15 and
+        g > b + 15 and
+        r > 45 and g > 45 and
+        abs(r - g) < 65
     ):
         return "box"
 
+    # 角色为绿色，要求 G 通道明显领先另外两通道。
+    if g > r + 12 and g > b + 12:
+        return "player"
+
     # 目标点为品红色：R/B 同时较高且相近，G 明显较低。
     if (
-        color_sum > 120 and
-        rn > 90 and bn > 90 and
-        gn < 45 and
-        abs(rn - bn) < 45
+        r > g + 30 and b > g + 30 and
+        r > 110 and b > 110 and
+        g < 70 and
+        abs(r - b) < 30
     ):
         return "goal"
 
@@ -317,8 +267,8 @@ def classify_element(img, row_idx, col_idx, x, y):
     if ENABLE_BOMB and r > g + 25 and r > b + 25:
         return "bomb"
 
-    # 蓝色空地要求 B 通道比例明显占优，适配局部偏暗。
-    if color_sum > 90 and bn > 105 and bn > rn + 35 and bn > gn + 20:
+    # 蓝色空地要求 B 通道明显占优，剩余不确定区域统一按墙处理。
+    if b > r + 140 and b > g + 35:
         return "space"
 
     return "wall"
