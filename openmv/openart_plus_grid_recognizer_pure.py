@@ -20,6 +20,17 @@ DOT_START_Y = 25 * FRAME_SCALE
 SAMPLE_OFFSET_X = -6 * FRAME_SCALE
 SAMPLE_OFFSET_Y = -6 * FRAME_SCALE
 
+# 人工四角标定：四点为完整16x12地图外边界，顺序为左上、右上、右下、左下。
+# 初始值与当前固定步长网格近似等价；屏幕倾斜时只需改这里的四个点。
+# 下列坐标按 QVGA 图像填写，切换 USE_VGA 后需要重新标定。
+USE_QUAD_CALIBRATION = True
+MAP_CORNERS = (
+    (20.5, 10.5),
+    (292.5, 10.5),
+    (292.5, 214.5),
+    (20.5, 214.5),
+)
+
 # 元素映射
 ELEMENT_CODE = {
     "wall": 0,
@@ -28,6 +39,15 @@ ELEMENT_CODE = {
     "box": 3,
     "bomb": 4,
     "player": 5
+}
+
+CODE_ELEMENT = {
+    0: "wall",
+    1: "space",
+    2: "goal",
+    3: "box",
+    4: "bomb",
+    5: "player",
 }
 
 ELEMENT_CHAR = {
@@ -52,30 +72,12 @@ DRAW_COLOR = {
 DEBUG_ENABLE = True
 DEBUG_DRAW_ROI = True
 DEBUG_DRAW_POINTS = True
+SHOW_RECTIFIED_VIEW = True
+USE_RECTIFIED_RECOGNITION = True
 DEBUG_PRINT_PERIOD_MS = 500
 ENABLE_BOMB = False
 CAMERA_MANUAL_EXPOSURE = False
 CAMERA_EXPOSURE_US = 1000
-
-# ==================== 自动定位开关 ===================
-AUTO_LOCATE_ENABLE = True
-AUTO_LOCATE_ON_START = True
-AUTO_RELOCATE_ENABLE = False
-AUTO_RELOCATE_PERIOD_MS = 1000
-AUTO_LOCATE_RETRY_MS = 1000
-AUTO_RELOCATE_ON_BAD_FRAME = True
-ROI_STABLE_REQUIRED = 2
-ROI_STABLE_MAX_SHIFT = 6 * FRAME_SCALE
-ROI_STABLE_MAX_SIZE_DIFF = 10 * FRAME_SCALE
-ROI_ASPECT_TOLERANCE = 0.25
-WALL_SCAN_STEP = 8 * FRAME_SCALE
-WALL_CHROMA_MAX = 130
-WALL_MIN_BRIGHTNESS = 25
-WALL_MAX_BRIGHTNESS = 250
-WALL_ROW_HIT_RATIO = 0.30
-WALL_COL_HIT_RATIO = 0.30
-WALL_RUN_RATIO = 0.20
-LOCATE_SCAN_STEP = max(4, FRAME_SCALE * 4)
 
 
 def get_average_pixel(img, x, y, size=2):
@@ -101,37 +103,7 @@ def get_average_pixel(img, x, y, size=2):
     return (r_sum // count, g_sum // count, b_sum // count)
 
 
-def rgb_from_pixel(pixel):
-    if isinstance(pixel, tuple):
-        return (int(pixel[0]), int(pixel[1]), int(pixel[2]))
-
-    value = int(pixel)
-    red = ((value >> 11) & 0x1F) * 255 // 31
-    green = ((value >> 5) & 0x3F) * 255 // 63
-    blue = (value & 0x1F) * 255 // 31
-    return (red, green, blue)
-
-
-def wall_chroma(rgb):
-    avg = (rgb[0] + rgb[1] + rgb[2]) // 3
-    return (abs(rgb[0] - avg) +
-            abs(rgb[1] - avg) +
-            abs(rgb[2] - avg))
-
-
-def is_wall_candidate(rgb):
-    avg = (rgb[0] + rgb[1] + rgb[2]) // 3
-    if avg < WALL_MIN_BRIGHTNESS or avg > WALL_MAX_BRIGHTNESS:
-        return False
-    return wall_chroma(rgb) <= WALL_CHROMA_MAX
-
-
-def wall_sample_hit(img, x, y):
-    rgb = rgb_from_pixel(img.get_pixel(x, y))
-    return is_wall_candidate(rgb)
-
-
-def build_grid_points():
+def build_fixed_grid_points():
     grid_points = []
     for row in range(GRID_ROWS):
         for col in range(GRID_COLS):
@@ -143,236 +115,104 @@ def build_grid_points():
     return grid_points
 
 
-def build_grid_points_from_roi(roi):
-    roi_x = roi[0]
-    roi_y = roi[1]
-    roi_w = roi[2]
-    roi_h = roi[3]
+def build_quad_transform(corners):
+    x0, y0 = corners[0]
+    x1, y1 = corners[1]
+    x2, y2 = corners[2]
+    x3, y3 = corners[3]
+
+    dx1 = x1 - x2
+    dx2 = x3 - x2
+    dx3 = x0 - x1 + x2 - x3
+    dy1 = y1 - y2
+    dy2 = y3 - y2
+    dy3 = y0 - y1 + y2 - y3
+    denominator = dx1 * dy2 - dx2 * dy1
+
+    if abs(denominator) < 0.001:
+        return None
+
+    perspective_x = (dx3 * dy2 - dx2 * dy3) / denominator
+    perspective_y = (dx1 * dy3 - dx3 * dy1) / denominator
+
+    return (
+        x1 - x0 + perspective_x * x1,
+        x3 - x0 + perspective_y * x3,
+        x0,
+        y1 - y0 + perspective_x * y1,
+        y3 - y0 + perspective_y * y3,
+        y0,
+        perspective_x,
+        perspective_y,
+    )
+
+
+def project_grid_point(transform, u, v):
+    denominator = transform[6] * u + transform[7] * v + 1.0
+    x = (transform[0] * u + transform[1] * v + transform[2]) / denominator
+    y = (transform[3] * u + transform[4] * v + transform[5]) / denominator
+    return (int(x + 0.5), int(y + 0.5))
+
+
+def build_grid_points():
+    if not USE_QUAD_CALIBRATION:
+        return build_fixed_grid_points()
+
+    transform = build_quad_transform(MAP_CORNERS)
+    if transform is None:
+        print("MAP_CORNERS_INVALID_FALLBACK_FIXED")
+        return build_fixed_grid_points()
+
     grid_points = []
-
     for row in range(GRID_ROWS):
+        v = (row + 0.5) / GRID_ROWS
         for col in range(GRID_COLS):
-            x = int(roi_x + (col + 0.5) * roi_w / GRID_COLS + 0.5)
-            y = int(roi_y + (row + 0.5) * roi_h / GRID_ROWS + 0.5)
-            grid_points.append((x, y))
-
+            u = (col + 0.5) / GRID_COLS
+            grid_points.append(project_grid_point(transform, u, v))
     return grid_points
 
 
-def clamp_roi_to_image(roi, img_width, img_height):
-    roi_x = roi[0]
-    roi_y = roi[1]
-    roi_w = roi[2]
-    roi_h = roi[3]
-
-    if roi_x < 0:
-        roi_w += roi_x
-        roi_x = 0
-    if roi_y < 0:
-        roi_h += roi_y
-        roi_y = 0
-    if roi_x + roi_w > img_width:
-        roi_w = img_width - roi_x
-    if roi_y + roi_h > img_height:
-        roi_h = img_height - roi_y
-
-    if roi_w < 1:
-        roi_w = 1
-    if roi_h < 1:
-        roi_h = 1
-
-    return (roi_x, roi_y, roi_w, roi_h)
+def build_rectified_grid_points(img_width, img_height):
+    grid_points = []
+    for row in range(GRID_ROWS):
+        for col in range(GRID_COLS):
+            x = int(((col + 0.5) * img_width / GRID_COLS) + 0.5)
+            y = int(((row + 0.5) * img_height / GRID_ROWS) + 0.5)
+            grid_points.append((x, y))
+    return grid_points
 
 
-def expand_roi(roi, margin, img_width, img_height):
-    return clamp_roi_to_image(
-        (roi[0] - margin, roi[1] - margin, roi[2] + margin * 2, roi[3] + margin * 2),
-        img_width,
-        img_height)
+def build_quad_corner_list():
+    return [
+        (int(MAP_CORNERS[0][0] + 0.5), int(MAP_CORNERS[0][1] + 0.5)),
+        (int(MAP_CORNERS[1][0] + 0.5), int(MAP_CORNERS[1][1] + 0.5)),
+        (int(MAP_CORNERS[2][0] + 0.5), int(MAP_CORNERS[2][1] + 0.5)),
+        (int(MAP_CORNERS[3][0] + 0.5), int(MAP_CORNERS[3][1] + 0.5)),
+    ]
 
 
-def roi_is_similar(a, b):
-    return (abs(a[0] - b[0]) <= ROI_STABLE_MAX_SHIFT and
-            abs(a[1] - b[1]) <= ROI_STABLE_MAX_SHIFT and
-            abs(a[2] - b[2]) <= ROI_STABLE_MAX_SIZE_DIFF and
-            abs(a[3] - b[3]) <= ROI_STABLE_MAX_SIZE_DIFF)
+def draw_calibration_boundary(img, rectified=False):
+    if rectified:
+        img.draw_rectangle((0, 0, img.width(), img.height()), color=(0, 255, 0), thickness=2)
+        return
 
-
-def roi_has_valid_shape(roi):
-    if roi[2] <= 0 or roi[3] <= 0:
-        return False
-
-    aspect = roi[2] / roi[3]
-    expected = GRID_COLS / GRID_ROWS
-    return abs(aspect - expected) <= ROI_ASPECT_TOLERANCE
-
-
-def row_wall_score(img, y, x_start, x_end, step):
-    hits = 0
-    count = 0
-    best_run = 0
-    current_run = 0
-
-    for x in range(x_start, x_end + 1, step):
-        if wall_sample_hit(img, x, y):
-            hits += 1
-            current_run += 1
-            if current_run > best_run:
-                best_run = current_run
-        else:
-            current_run = 0
-        count += 1
-
-    return (hits, count, best_run)
-
-
-def col_wall_score(img, x, y_start, y_end, step):
-    hits = 0
-    count = 0
-    best_run = 0
-    current_run = 0
-
-    for y in range(y_start, y_end + 1, step):
-        if wall_sample_hit(img, x, y):
-            hits += 1
-            current_run += 1
-            if current_run > best_run:
-                best_run = current_run
-        else:
-            current_run = 0
-        count += 1
-
-    return (hits, count, best_run)
-
-
-def longest_segment(values, step):
-    if not values:
-        return None
-
-    best_start = values[0]
-    best_end = values[0]
-    best_len = 1
-
-    cur_start = values[0]
-    cur_end = values[0]
-
-    for value in values[1:]:
-        if value <= (cur_end + step):
-            cur_end = value
-        else:
-            cur_len = ((cur_end - cur_start) // step) + 1
-            if cur_len > best_len:
-                best_len = cur_len
-                best_start = cur_start
-                best_end = cur_end
-            cur_start = value
-            cur_end = value
-
-    cur_len = ((cur_end - cur_start) // step) + 1
-    if cur_len > best_len:
-        best_start = cur_start
-        best_end = cur_end
-
-    return (best_start, best_end)
-
-
-def find_horizontal_band(img, y_start, y_end, x_start, x_end, step):
-    sample_cols = ((x_end - x_start) // step) + 1
-    min_hits = int(sample_cols * WALL_ROW_HIT_RATIO)
-    if min_hits < 3:
-        min_hits = 3
-    min_run = int(sample_cols * WALL_RUN_RATIO)
-    if min_run < 3:
-        min_run = 3
-
-    candidates = []
-    for y in range(y_start, y_end + 1, LOCATE_SCAN_STEP):
-        hits, count, best_run = row_wall_score(img, y, x_start, x_end, step)
-        if count > 0 and hits >= min_hits and best_run >= min_run:
-            candidates.append(y)
-
-    return longest_segment(candidates, LOCATE_SCAN_STEP)
-
-
-def find_vertical_band(img, x_start, x_end, y_start, y_end, step):
-    sample_rows = ((y_end - y_start) // step) + 1
-    min_hits = int(sample_rows * WALL_COL_HIT_RATIO)
-    if min_hits < 3:
-        min_hits = 3
-    min_run = int(sample_rows * WALL_RUN_RATIO)
-    if min_run < 3:
-        min_run = 3
-
-    candidates = []
-    for x in range(x_start, x_end + 1, LOCATE_SCAN_STEP):
-        hits, count, best_run = col_wall_score(img, x, y_start, y_end, step)
-        if count > 0 and hits >= min_hits and best_run >= min_run:
-            candidates.append(x)
-
-    return longest_segment(candidates, LOCATE_SCAN_STEP)
-
-
-def locate_map_roi(img, hint_roi=None):
-    img_width = img.width()
-    img_height = img.height()
-
-    if hint_roi is None:
-        search_roi = (0, 0, img_width, img_height)
+    if USE_QUAD_CALIBRATION:
+        for idx in range(4):
+            start = MAP_CORNERS[idx]
+            end = MAP_CORNERS[(idx + 1) % 4]
+            img.draw_line(
+                (int(start[0]), int(start[1]), int(end[0]), int(end[1])),
+                color=(0, 255, 0), thickness=2)
     else:
-        search_roi = expand_roi(hint_roi, max(LOCATE_SCAN_STEP * 4, 12 * FRAME_SCALE), img_width, img_height)
+        img.draw_rectangle(MAP_ROI, color=(0, 255, 0), thickness=2)
 
-    search_x = search_roi[0]
-    search_y = search_roi[1]
-    search_w = search_roi[2]
-    search_h = search_roi[3]
-    search_x2 = search_x + search_w - 1
-    search_y2 = search_y + search_h - 1
 
-    top_band = find_horizontal_band(
-        img,
-        search_y,
-        search_y + search_h // 2,
-        search_x,
-        search_x2,
-        WALL_SCAN_STEP)
-    bottom_band = find_horizontal_band(
-        img,
-        search_y + search_h // 2,
-        search_y2,
-        search_x,
-        search_x2,
-        WALL_SCAN_STEP)
-    left_band = find_vertical_band(
-        img,
-        search_x,
-        search_x + search_w // 2,
-        search_y,
-        search_y2,
-        WALL_SCAN_STEP)
-    right_band = find_vertical_band(
-        img,
-        search_x + search_w // 2,
-        search_x2,
-        search_y,
-        search_y2,
-        WALL_SCAN_STEP)
-
-    if top_band is None or bottom_band is None or left_band is None or right_band is None:
-        return None
-
-    roi_x = left_band[0]
-    roi_y = top_band[0]
-    roi_w = right_band[1] - left_band[0] + 1
-    roi_h = bottom_band[1] - top_band[0] + 1
-
-    if roi_w < GRID_COLS * 8 or roi_h < GRID_ROWS * 8:
-        return None
-
-    roi = clamp_roi_to_image((roi_x, roi_y, roi_w, roi_h), img_width, img_height)
-    if not roi_has_valid_shape(roi):
-        return None
-
-    return roi
+def draw_recognition_points(img, map_matrix, grid_points):
+    for idx, (x, y) in enumerate(grid_points):
+        row_idx = idx // GRID_COLS
+        col_idx = idx % GRID_COLS
+        element = CODE_ELEMENT[map_matrix[row_idx][col_idx]]
+        img.draw_circle(x, y, 3, color=DRAW_COLOR[element], fill=True)
 
 
 def classify_element(img, row_idx, col_idx, x, y):
@@ -425,8 +265,6 @@ def recognize_map(img, grid_points):
         element = classify_element(img, row_idx, col_idx, x, y)
         map_matrix[row_idx][col_idx] = ELEMENT_CODE[element]
         char_matrix[row_idx][col_idx] = ELEMENT_CHAR[element]
-        if DEBUG_ENABLE and DEBUG_DRAW_POINTS:
-            img.draw_circle(x, y, 3, color=DRAW_COLOR[element], fill=True)
 
     return map_matrix, char_matrix
 
@@ -440,28 +278,6 @@ def print_map(map_matrix, char_matrix, fps):
     for row in char_matrix:
         print("".join(row))
     print("FPS %.2f" % fps)
-
-
-def frame_looks_suspicious(map_matrix):
-    inner_wall = 0
-    inner_space = 0
-    inner_cells = 0
-
-    for row in range(1, GRID_ROWS - 1):
-        for col in range(1, GRID_COLS - 1):
-            inner_cells += 1
-            if map_matrix[row][col] == ELEMENT_CODE["wall"]:
-                inner_wall += 1
-            elif map_matrix[row][col] == ELEMENT_CODE["space"]:
-                inner_space += 1
-
-    if inner_cells <= 0:
-        return True
-    if inner_wall >= int(inner_cells * 0.75):
-        return True
-    if inner_space < 4:
-        return True
-    return False
 
 
 def init_camera():
@@ -480,16 +296,12 @@ def init_camera():
 
 def main():
     init_camera()
-    fixed_grid_points = build_grid_points()
+    grid_points = build_grid_points()
+    rectified_grid_points = build_rectified_grid_points(IMG_WIDTH, IMG_HEIGHT)
+    quad_corners = build_quad_corner_list() if USE_QUAD_CALIBRATION else None
 
     clock = time.clock()
     last_print_ms = time.ticks_ms()
-    last_locate_ms = time.ticks_ms() - AUTO_LOCATE_RETRY_MS
-    active_roi = None
-    candidate_roi = None
-    candidate_streak = 0
-    pending_relocate = AUTO_LOCATE_ON_START
-    bad_frame_count = 0
 
     print("OPENART_GRID_RECOGNIZER_READY")
     print("FRAME_MODE=%s" % ("VGA" if USE_VGA else "QVGA"))
@@ -497,84 +309,66 @@ def main():
     print("MAP_ROI=%s" % str(MAP_ROI))
     print("DOT_START_X=%d DOT_START_Y=%d COL_STEP=%d ROW_STEP=%d OFFSET=(%d,%d)" %
           (DOT_START_X, DOT_START_Y, COL_STEP, ROW_STEP, SAMPLE_OFFSET_X, SAMPLE_OFFSET_Y))
+    print("USE_QUAD_CALIBRATION=%s MAP_CORNERS=%s" %
+          (str(USE_QUAD_CALIBRATION), str(MAP_CORNERS)))
+    print("SHOW_RECTIFIED_VIEW=%s USE_RECTIFIED_RECOGNITION=%s" %
+          (str(SHOW_RECTIFIED_VIEW), str(USE_RECTIFIED_RECOGNITION)))
     print("CAMERA_MANUAL_EXPOSURE=%s CAMERA_EXPOSURE_US=%d" %
           (str(CAMERA_MANUAL_EXPOSURE), CAMERA_EXPOSURE_US))
-    print("AUTO_LOCATE_ENABLE=%s AUTO_LOCATE_ON_START=%s AUTO_RELOCATE_ENABLE=%s" %
-          (str(AUTO_LOCATE_ENABLE), str(AUTO_LOCATE_ON_START), str(AUTO_RELOCATE_ENABLE)))
-    print("AUTO_RELOCATE_PERIOD_MS=%d AUTO_LOCATE_RETRY_MS=%d ROI_STABLE_REQUIRED=%d" %
-          (AUTO_RELOCATE_PERIOD_MS, AUTO_LOCATE_RETRY_MS, ROI_STABLE_REQUIRED))
+
+    rectified_view_active = SHOW_RECTIFIED_VIEW and USE_QUAD_CALIBRATION
+    rectified_recognition_active = USE_RECTIFIED_RECOGNITION and USE_QUAD_CALIBRATION
+    rectified_view_failed = False
+    rectified_recognition_failed = False
+    if (SHOW_RECTIFIED_VIEW or USE_RECTIFIED_RECOGNITION) and not USE_QUAD_CALIBRATION:
+        print("RECTIFIED_MODE_NEEDS_QUAD_CALIBRATION")
 
     while True:
         clock.tick()
         img = sensor.snapshot()
         now_ms = time.ticks_ms()
 
-        if AUTO_LOCATE_ENABLE:
-            should_locate = False
-            locate_hint = active_roi if active_roi is not None else MAP_ROI
+        recognition_img = img
+        recognition_points = grid_points
+        rectified_img = None
 
-            if active_roi is None:
-                should_locate = AUTO_LOCATE_ON_START and \
-                    (time.ticks_diff(now_ms, last_locate_ms) >= AUTO_LOCATE_RETRY_MS)
-            elif pending_relocate:
-                should_locate = time.ticks_diff(now_ms, last_locate_ms) >= AUTO_LOCATE_RETRY_MS
-            elif AUTO_RELOCATE_ENABLE and time.ticks_diff(now_ms, last_locate_ms) >= AUTO_RELOCATE_PERIOD_MS:
-                should_locate = True
+        if rectified_recognition_active and not rectified_recognition_failed and quad_corners is not None:
+            try:
+                recognition_img = img.copy()
+                recognition_img.rotation_corr(corners=quad_corners)
+                recognition_points = rectified_grid_points
+            except Exception as exc:
+                print("RECTIFIED_RECOGNITION_FAILED:", repr(exc))
+                rectified_recognition_failed = True
+                rectified_recognition_active = False
+                recognition_img = img
+                recognition_points = grid_points
 
-            if should_locate:
-                located_roi = locate_map_roi(img, locate_hint)
-                last_locate_ms = time.ticks_ms()
+        map_matrix, char_matrix = recognize_map(recognition_img, recognition_points)
 
-                if located_roi is not None:
-                    if candidate_roi is not None and roi_is_similar(candidate_roi, located_roi):
-                        candidate_streak += 1
-                    else:
-                        candidate_roi = located_roi
-                        candidate_streak = 1
-
-                    if candidate_streak >= ROI_STABLE_REQUIRED:
-                        active_roi = located_roi
-                        candidate_roi = None
-                        candidate_streak = 0
-                        pending_relocate = False
-                        bad_frame_count = 0
+        if SHOW_RECTIFIED_VIEW and not rectified_view_failed and quad_corners is not None:
+            try:
+                if rectified_recognition_active and not rectified_recognition_failed and recognition_img is not img:
+                    rectified_img = recognition_img
                 else:
-                    if active_roi is None and DEBUG_ENABLE:
-                        print("AUTO_ROI_NOT_FOUND")
-        else:
-            active_roi = MAP_ROI
+                    rectified_img = img.copy()
+                    rectified_img.rotation_corr(corners=quad_corners)
+            except Exception as exc:
+                print("RECTIFIED_VIEW_FAILED:", repr(exc))
+                rectified_view_failed = True
+                rectified_img = None
 
-        if active_roi is not None:
-            grid_points = build_grid_points_from_roi(active_roi) if AUTO_LOCATE_ENABLE else fixed_grid_points
-            if DEBUG_ENABLE and DEBUG_DRAW_ROI:
-                img.draw_rectangle(active_roi, color=(0, 255, 0), thickness=2)
-            if candidate_roi is not None and DEBUG_DRAW_ROI:
-                img.draw_rectangle(candidate_roi, color=(255, 255, 0), thickness=1)
+        display_img = rectified_img if rectified_img is not None else img
+        display_points = rectified_grid_points if rectified_img is not None else grid_points
 
-            map_matrix, char_matrix = recognize_map(img, grid_points)
+        if DEBUG_ENABLE and DEBUG_DRAW_ROI:
+            draw_calibration_boundary(display_img, rectified=(rectified_img is not None))
 
-            if AUTO_LOCATE_ENABLE and AUTO_RELOCATE_ON_BAD_FRAME:
-                if frame_looks_suspicious(map_matrix):
-                    bad_frame_count += 1
-                else:
-                    bad_frame_count = 0
-                if bad_frame_count >= ROI_STABLE_REQUIRED:
-                    pending_relocate = True
-        else:
-            if DEBUG_ENABLE and DEBUG_DRAW_ROI:
-                img.draw_rectangle(MAP_ROI, color=(0, 255, 0), thickness=2)
-            if DEBUG_ENABLE and time.ticks_diff(now_ms, last_print_ms) >= DEBUG_PRINT_PERIOD_MS:
-                print("WAIT_LOCATE FPS %.2f" % clock.fps())
-                last_print_ms = now_ms
-            continue
+        if DEBUG_ENABLE and DEBUG_DRAW_POINTS:
+            draw_recognition_points(display_img, map_matrix, display_points)
 
         if DEBUG_ENABLE and time.ticks_diff(now_ms, last_print_ms) >= DEBUG_PRINT_PERIOD_MS:
-            if active_roi is None:
-                print("FPS %.2f ACTIVE_ROI=None" % clock.fps())
-            else:
-                print("ACTIVE_ROI=%s pending=%s bad=%d candidate=%s" %
-                      (str(active_roi), str(pending_relocate), bad_frame_count, str(candidate_roi)))
-                print_map(map_matrix, char_matrix, clock.fps())
+            print_map(map_matrix, char_matrix, clock.fps())
             last_print_ms = now_ms
 
 
