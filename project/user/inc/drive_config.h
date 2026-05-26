@@ -17,16 +17,20 @@
 /** 电机 PWM 频率，单位为 Hz。 */
 #define PWM_FREQ_HZ              (17000)
 
-/** 姿态 PD 初值；输出为归一化旋转分量 vz。 */
+/** yaw 姿态 PD 比例系数；误差单位为 degree，输出为归一化旋转分量 vz。 */
 #define YAW_KP                   (0.020f)
+/** yaw 姿态 PD 微分系数；不加入积分项，避免静态角度误差累积导致过冲。 */
 #define YAW_KD                   (0.001f)
+/** 姿态环允许输出的最大归一化旋转分量。 */
 #define MAX_VZ                   (1.0f)
 /** 离散原地转向每次命令对应的最大目标角步进，单位为 degree。 */
 #define TURN_STEP_DEG            (10.0f)
 
-/** 四轮增量式速度 PID 初值；上板后根据 encoder count/20ms 反馈调整。 */
+/** 四轮增量式速度 PID 比例初值；上板后根据 encoder count/20ms 反馈调整。 */
 #define WHEEL_PID_KP             (10.0f)
+/** 四轮增量式速度 PID 积分初值；单位随 count/20ms 误差和 PWM 输出共同确定。 */
 #define WHEEL_PID_KI             (0.5f)
+/** 四轮增量式速度 PID 微分初值；第一版关闭微分。 */
 #define WHEEL_PID_KD             (0.0f)
 
 /** 底盘统一轮序，混控、硬件映射和调试输出均不得更换该顺序。 */

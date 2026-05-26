@@ -46,17 +46,30 @@ static const gpio_pin_enum motor_dir_pin[WHEEL_COUNT] =
 
 uint8 io_init(void)
 {
-    uint8 i;
     uint8 imu_state;
 
-    for(i = 0; i < WHEEL_COUNT; i++)
-    {
-        gpio_init(motor_dir_pin[i], GPO, GPIO_LOW, GPO_PUSH_PULL);
-        pwm_init(motor_pwm_pin[i], PWM_FREQ_HZ, 0);
-        encoder_quad_init(encoder_index[i], encoder_ch1[i], encoder_ch2[i]);
-        encoder_clear_count(encoder_index[i]);
-    }
+    // 四个轮子的初始化显式展开，方便按 LF/LB/RF/RB 对照接线和板测现象。
+    gpio_init(motor_dir_pin[WHEEL_LF], GPO, GPIO_LOW, GPO_PUSH_PULL);
+    pwm_init(motor_pwm_pin[WHEEL_LF], PWM_FREQ_HZ, 0);
+    encoder_quad_init(encoder_index[WHEEL_LF], encoder_ch1[WHEEL_LF], encoder_ch2[WHEEL_LF]);
+    encoder_clear_count(encoder_index[WHEEL_LF]);
 
+    gpio_init(motor_dir_pin[WHEEL_LB], GPO, GPIO_LOW, GPO_PUSH_PULL);
+    pwm_init(motor_pwm_pin[WHEEL_LB], PWM_FREQ_HZ, 0);
+    encoder_quad_init(encoder_index[WHEEL_LB], encoder_ch1[WHEEL_LB], encoder_ch2[WHEEL_LB]);
+    encoder_clear_count(encoder_index[WHEEL_LB]);
+
+    gpio_init(motor_dir_pin[WHEEL_RF], GPO, GPIO_LOW, GPO_PUSH_PULL);
+    pwm_init(motor_pwm_pin[WHEEL_RF], PWM_FREQ_HZ, 0);
+    encoder_quad_init(encoder_index[WHEEL_RF], encoder_ch1[WHEEL_RF], encoder_ch2[WHEEL_RF]);
+    encoder_clear_count(encoder_index[WHEEL_RF]);
+
+    gpio_init(motor_dir_pin[WHEEL_RB], GPO, GPIO_LOW, GPO_PUSH_PULL);
+    pwm_init(motor_pwm_pin[WHEEL_RB], PWM_FREQ_HZ, 0);
+    encoder_quad_init(encoder_index[WHEEL_RB], encoder_ch1[WHEEL_RB], encoder_ch2[WHEEL_RB]);
+    encoder_clear_count(encoder_index[WHEEL_RB]);
+
+    // IMU660RC 与 660RA 在本项目使用同接口同协议；这里直接启用驱动内置 240Hz 四元数解算。
     imu_state = imu660rc_init(IMU660RC_QUARTERNION_240HZ);
     stop_wheels();
 

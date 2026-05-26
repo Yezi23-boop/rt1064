@@ -2,6 +2,7 @@
 
 static const map_source_struct offline_maps[] =
 {
+    // 地图内容编译进固件常量表；Flash 菜单只保存选中的编号。
     {
         "Easy single",
         MAP_FORMAT_RT,

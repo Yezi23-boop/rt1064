@@ -3,12 +3,12 @@
 #include "maps.h"
 
 #define IPS200_TYPE             (IPS200_TYPE_SPI)
-#define LINE_H                  (16)
-#define MAP_X                   (8)
-#define MAP_Y                   (112)
-#define CELL_SIZE               (14)
-#define KEY_HINT_Y1             (288)
-#define KEY_HINT_Y2             (304)
+#define LINE_H                  (16)    // IPS200 8x16 字体的行高，单位 pixel。
+#define MAP_X                   (8)     // 地图左上角 X 坐标，单位 pixel。
+#define MAP_Y                   (112)   // 地图左上角 Y 坐标，避开 Run/Playback 顶部文字区。
+#define CELL_SIZE               (14)    // 12x16 地图在 240x320 屏上的单格边长，单位 pixel。
+#define KEY_HINT_Y1             (288)   // 底部按键提示第一行，单位 pixel。
+#define KEY_HINT_Y2             (304)   // 底部按键提示第二行，单位 pixel。
 #define SCREEN_TEXT_COLOR       (RGB565_BLACK)
 #define SCREEN_BG_COLOR         (RGB565_WHITE)
 #define WALL_COLOR              (RGB565_BLACK)
@@ -17,7 +17,7 @@
 #define CAR_COLOR               (RGB565_CYAN)
 #define EMPTY_COLOR             (RGB565_WHITE)
 #define GRID_COLOR              (RGB565_GRAY)
-#define FILL_BUFFER_PIXELS      (240u * LINE_H)
+#define FILL_BUFFER_PIXELS      (240u * LINE_H) // 单行文字清屏所需最大像素数，复用作小矩形填充缓存。
 
 typedef enum
 {
@@ -31,8 +31,8 @@ typedef enum
     SCREEN_PAGE_INFO,
 } screen_page_enum;
 
-static screen_page_enum active_page = SCREEN_PAGE_NONE;
-AT_SDRAM_SECTION_ALIGN(uint16 screen_fill_buffer[FILL_BUFFER_PIXELS], 64);
+static screen_page_enum active_page = SCREEN_PAGE_NONE; // 只在页面切换时整屏清空，减少白底页面刷新闪烁。
+AT_SDRAM_SECTION_ALIGN(uint16 screen_fill_buffer[FILL_BUFFER_PIXELS], 64); // 显示填充缓存不参与 BFS，放 cacheable SDRAM 减少片上 RAM 压力。
 
 static void begin_page(screen_page_enum page)
 {
@@ -70,14 +70,22 @@ static void fill_rect(uint16 x, uint16 y, uint16 w, uint16 h, uint16 color)
         {
             screen_fill_buffer[i] = color;
         }
-        ips200_show_rgb565_image(x, y, screen_fill_buffer, w, h, w, h, 0);
+        ips200_show_rgb565_image(x, y, screen_fill_buffer, w, h, w, h, 0); // 整块写入比逐点画线更适合地图色块刷新。
+        return;
     }
-    else
+
+    for(row = 0; row < h; row++)
     {
-        for(row = 0; row < h; row++)
-        {
-            ips200_draw_line(x, (uint16)(y + row), (uint16)(x + w - 1u), (uint16)(y + row), color);
-        }
+        ips200_draw_line(x, (uint16)(y + row), (uint16)(x + w - 1u), (uint16)(y + row), color);
+    }
+}
+
+static void add_cell(uint16 *cells, uint8 *count, uint8 row, uint8 col)
+{
+    if(*count < MAX_BOXES)
+    {
+        cells[*count] = cell_index_local(row, col);
+        (*count)++;
     }
 }
 
@@ -193,21 +201,13 @@ static void parse_source(const map_source_struct *source, char grid[MAP_ROWS][MA
             }
             else if(('B' == value) || ('$' == value))
             {
-                if(*box_count < MAX_BOXES)
-                {
-                    boxes[*box_count] = cell_index_local(row, col);
-                    (*box_count)++;
-                }
+                add_cell(boxes, box_count, row, col);
             }
             else if(('T' == value) || ('.' == value))
             {
                 if((MAP_FORMAT_SEEKFREE == source->format) || ('T' == value))
                 {
-                    if(*target_count < MAX_BOXES)
-                    {
-                        targets[*target_count] = cell_index_local(row, col);
-                        (*target_count)++;
-                    }
+                    add_cell(targets, target_count, row, col);
                 }
             }
             else if('*' == value)
@@ -273,6 +273,27 @@ static void apply_actions(uint16 *car, uint16 *boxes, uint8 *box_count, uint16 *
     }
 }
 
+static uint16 color_for_cell(char grid_value, uint16 cell, uint16 car, const uint16 *boxes, uint8 box_count, const uint16 *targets, uint8 target_count)
+{
+    if('#' == grid_value)
+    {
+        return WALL_COLOR;
+    }
+    if(car == cell)
+    {
+        return CAR_COLOR;
+    }
+    if(0 != is_box_cell(boxes, box_count, cell))
+    {
+        return BOX_COLOR;
+    }
+    if(0 != is_target_cell(targets, target_count, cell))
+    {
+        return TARGET_COLOR;
+    }
+    return EMPTY_COLOR;
+}
+
 static void draw_color_map(const map_source_struct *source, const solve_result_struct *result, uint16 step)
 {
     char grid[MAP_ROWS][MAP_COLS];
@@ -297,24 +318,7 @@ static void draw_color_map(const map_source_struct *source, const solve_result_s
         for(col = 0; col < MAP_COLS; col++)
         {
             cell = cell_index_local(row, col);
-            color = EMPTY_COLOR;
-            if('#' == grid[row][col])
-            {
-                color = WALL_COLOR;
-            }
-            else if(car == cell)
-            {
-                color = CAR_COLOR;
-            }
-            else if(0 != is_box_cell(boxes, box_count, cell))
-            {
-                color = BOX_COLOR;
-            }
-            else if(0 != is_target_cell(targets, target_count, cell))
-            {
-                color = TARGET_COLOR;
-            }
-
+            color = color_for_cell(grid[row][col], cell, car, boxes, box_count, targets, target_count);
             fill_rect((uint16)(MAP_X + col * CELL_SIZE), (uint16)(MAP_Y + row * CELL_SIZE), (CELL_SIZE - 1u), (CELL_SIZE - 1u), color);
         }
     }

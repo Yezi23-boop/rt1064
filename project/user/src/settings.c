@@ -2,25 +2,25 @@
 #include "settings.h"
 #include "maps.h"
 
-#define SETTINGS_SECTOR             (127)
-#define SETTINGS_PAGE               (FLASH_PAGE_0)
-#define SETTINGS_MAGIC              (0x5058424Du)
-#define SETTINGS_VERSION            (1u)
+#define SETTINGS_SECTOR             (127)          // 用户设置专用 Flash 扇区；只保存地图编号和模式，不保存地图内容。
+#define SETTINGS_PAGE               (FLASH_PAGE_0) // 当前只用一个 page，避免引入 sequence 和多副本选择逻辑。
+#define SETTINGS_MAGIC              (0x5058424Du)  // "PXBM"：用于区分未初始化 Flash 和本项目设置记录。
+#define SETTINGS_VERSION            (1u)           // 记录格式版本；字段布局变化时再递增。
 
 typedef struct
 {
-    uint32 magic;
-    uint16 version;
-    uint16 checksum;
-    uint8 current_map;
-    uint8 run_mode;
-    uint16 reserved;
+    uint32 magic;                       // 记录识别字，避免把空 Flash 当成有效设置。
+    uint16 version;                     // 结构版本，防止旧固件格式被误读。
+    uint16 checksum;                    // 简单字节和校验；用于发现擦写失败或半写入记录。
+    uint8 current_map;                  // 保存的地图编号，只是索引，不保存整张地图。
+    uint8 run_mode;                     // 保存的运行模式，取值为 run_mode_enum。
+    uint16 reserved;                    // 预留对齐字段，写入前固定为 0。
 } settings_record_struct;
 
-static uint8 current_map;
-static run_mode_enum run_mode;
-static uint8 flash_ready;
-static save_state_enum save_state = SAVE_STATE_EMPTY;
+static uint8 current_map;               // 主循环菜单写入并读取；不在 ISR 中访问。
+static run_mode_enum run_mode;          // 主循环菜单写入并读取；Flash 只保存最终确认值。
+static uint8 flash_ready;               // flash_init 成功后置 1，避免初始化失败后继续擦写。
+static save_state_enum save_state = SAVE_STATE_EMPTY; // 屏幕提示用状态，不作为控制安全条件。
 
 static uint16 checksum_record(const settings_record_struct *record)
 {
@@ -29,7 +29,7 @@ static uint16 checksum_record(const settings_record_struct *record)
     uint32 i;
     settings_record_struct temp = *record;
 
-    temp.checksum = 0;
+    temp.checksum = 0;                  // 校验字段自身不参与求和，否则每次计算都会改变结果。
     bytes = (const uint8 *)&temp;
     for(i = 0; i < sizeof(temp); i++)
     {
@@ -122,6 +122,7 @@ void settings_set_runtime(uint8 map, run_mode_enum mode)
     run_mode = mode;
     if(0 != flash_ready)
     {
+        // 切换地图或模式只标记 Dirty，真正写 Flash 由 Home 页 K4 短按触发。
         save_state = SAVE_STATE_DIRTY;
     }
 }

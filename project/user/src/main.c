@@ -15,6 +15,7 @@ int main(void)
     control_init_state = control_init();
     printf("CONTROL_INIT=%d\r\n", control_init_state);
 
+    // 应用层在底盘初始化后启动；菜单和屏幕只做非阻塞轮询，不影响 PIT 闭环节拍。
     app_init();
 
     while(1)

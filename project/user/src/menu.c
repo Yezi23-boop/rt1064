@@ -6,9 +6,9 @@
 #include "screen.h"
 #include "timebase.h"
 
-#define KEY_SCAN_PERIOD_MS      (5)
-#define PLAYBACK_STEP_MS        (300u)
-#define HOME_ITEM_COUNT         (3)
+#define KEY_SCAN_PERIOD_MS      (5)     // 按键扫描间隔，单位 ms；与逐飞 key_scanner 消抖节拍保持一致。
+#define PLAYBACK_STEP_MS        (300u)  // 回放自动步进间隔，单位 ms；只影响屏幕演示速度。
+#define HOME_ITEM_COUNT         (3)     // Home 一级菜单数量，必须与 home_item_names/home_item_pages 同步。
 
 typedef enum
 {
@@ -47,26 +47,26 @@ static const menu_page_enum home_item_pages[HOME_ITEM_COUNT] =
     MENU_PAGE_INFO,
 };
 
-static menu_page_enum current_page;
+static menu_page_enum current_page;     // 菜单主状态，只在主循环 menu_poll() 中写入。
 static uint8 home_cursor;
-static uint8 current_map;
-static uint8 candidate_map;
-static run_mode_enum run_mode;
-static run_mode_enum candidate_mode;
+static uint8 current_map;               // 已确认地图编号；Flash 保存的也是这个值。
+static uint8 candidate_map;             // Run 页面候选地图，按 K3 后才写入 current_map。
+static run_mode_enum run_mode;          // 已确认运行模式；切换模式后只标记 Dirty，不立即写 Flash。
+static run_mode_enum candidate_mode;    // Mode Select 页面候选模式，按 K3 后才确认。
 static solve_result_struct last_result;
-static uint32 last_elapsed_ms;
-static uint16 playback_step;
+static uint32 last_elapsed_ms;          // 最近一次 solve_map 耗时，单位 ms。
+static uint16 playback_step;            // 当前回放动作下标，包含内部任务分隔符的原始步数。
 static playback_state_enum playback_state;
-static uint32 playback_last_ms;
-static uint8 need_redraw;
-static uint8 key_long_used[KEY_NUMBER];
-static uint32 key_last_scan_ms;
+static uint32 playback_last_ms;         // 上一次自动回放步进时间，单位 ms。
+static uint8 need_redraw;               // 缓存刷新标志，避免每次轮询都重画整页。
+static uint8 key_long_used[KEY_NUMBER]; // 长按已消费标志，避免长按期间反复触发事件。
+static uint32 key_last_scan_ms;         // 上一次按键扫描时间，单位 ms。
 static uint8 demo_active;
 static uint8 demo_visible;
 static uint8 demo_index;
 static uint8 demo_ok_count;
 static uint8 demo_fail_count;
-static uint32 demo_last_elapsed_ms;
+static uint32 demo_last_elapsed_ms;     // Demo 最近一张地图求解耗时，单位 ms。
 static const char *run_state = "Idle";
 
 static void draw_current_page(void);
@@ -123,6 +123,7 @@ static key_event_enum key_read_event(void)
     key_last_scan_ms = now_ms;
     key_scanner();
 
+    // 先处理长按，避免同一次按住 K4 同时触发短按保存和长按返回 Home。
     for(key = KEY_1; key < KEY_NUMBER; key++)
     {
         state = key_get_state(key);
@@ -178,7 +179,7 @@ static void solve_current_map(void)
 
     run_state = "Running";
     mark_redraw();
-    draw_current_page();
+    draw_current_page();                // 先显示 Running，避免 BFS 耗时时屏幕仍停在旧状态。
     start_ms = time_ms();
     if(0 != solve_map(source, &last_result))
     {
@@ -220,7 +221,7 @@ static void start_demo(void)
     run_state = "Running";
     clear_result(&last_result);
     mark_redraw();
-    draw_current_page();
+    draw_current_page();                // Demo 会连续求解多张图，先刷新页面提示当前进入批量验证。
 }
 
 static void demo_tick(void)
@@ -290,6 +291,47 @@ static void handle_home(key_event_enum event)
     }
 }
 
+static void confirm_candidate_map(void)
+{
+    current_map = candidate_map;
+    settings_set_runtime(current_map, run_mode);
+    clear_result(&last_result);
+    last_elapsed_ms = 0;
+    run_state = "Idle";
+    mark_redraw();
+}
+
+static void browse_current_map(void)
+{
+    clear_result(&last_result);
+    last_elapsed_ms = 0;
+    run_state = "Browse";
+    mark_redraw();
+}
+
+static void confirm_run_action(void)
+{
+    if(candidate_map != current_map)
+    {
+        confirm_candidate_map();
+        return;
+    }
+
+    if(RUN_MODE_BROWSE == run_mode)
+    {
+        browse_current_map();
+        return;
+    }
+
+    if(RUN_MODE_DEMO == run_mode)
+    {
+        start_demo();
+        return;
+    }
+
+    solve_current_map();
+}
+
 static void handle_run(key_event_enum event)
 {
     if(0 != demo_visible)
@@ -324,30 +366,7 @@ static void handle_run(key_event_enum event)
     }
     else if(KEY_EVENT_K3_SHORT == event)
     {
-        if(candidate_map != current_map)
-        {
-            current_map = candidate_map;
-            settings_set_runtime(current_map, run_mode);
-            clear_result(&last_result);
-            last_elapsed_ms = 0;
-            run_state = "Idle";
-            mark_redraw();
-        }
-        else if(RUN_MODE_BROWSE == run_mode)
-        {
-            clear_result(&last_result);
-            last_elapsed_ms = 0;
-            run_state = "Browse";
-            mark_redraw();
-        }
-        else if(RUN_MODE_DEMO == run_mode)
-        {
-            start_demo();
-        }
-        else
-        {
-            solve_current_map();
-        }
+        confirm_run_action();
     }
     else if(KEY_EVENT_K4_SHORT == event)
     {
@@ -383,32 +402,50 @@ static void handle_mode_select(key_event_enum event)
     }
 }
 
+static void pause_playback_if_ready(void)
+{
+    if(PLAYBACK_STATE_FAIL != playback_state)
+    {
+        playback_state = PLAYBACK_STATE_PAUSED;
+    }
+}
+
+static void playback_step_prev(void)
+{
+    if(0 < playback_step)
+    {
+        playback_step--;
+    }
+    while((0 < playback_step) && ('|' == last_result.actions[playback_step - 1u]))
+    {
+        playback_step--;                // `|` 只是多箱任务分隔符，屏幕回放不把它显示为一步。
+    }
+}
+
+static void playback_step_next(void)
+{
+    if(playback_step < last_result.action_count)
+    {
+        playback_step++;
+    }
+    while((playback_step < last_result.action_count) && ('|' == last_result.actions[playback_step - 1u]))
+    {
+        playback_step++;                // 跳过任务分隔符，保持 K2/自动播放只推进真实动作。
+    }
+}
+
 static void handle_playback(key_event_enum event)
 {
     if(KEY_EVENT_K1_SHORT == event)
     {
-        if(0 < playback_step)
-        {
-            playback_step--;
-        }
-        while((0 < playback_step) && ('|' == last_result.actions[playback_step - 1u]))
-        {
-            playback_step--;
-        }
-        playback_state = (PLAYBACK_STATE_FAIL == playback_state) ? PLAYBACK_STATE_FAIL : PLAYBACK_STATE_PAUSED;
+        playback_step_prev();
+        pause_playback_if_ready();
         mark_redraw();
     }
     else if(KEY_EVENT_K2_SHORT == event)
     {
-        if(playback_step < last_result.action_count)
-        {
-            playback_step++;
-        }
-        while((playback_step < last_result.action_count) && ('|' == last_result.actions[playback_step - 1u]))
-        {
-            playback_step++;
-        }
-        playback_state = (PLAYBACK_STATE_FAIL == playback_state) ? PLAYBACK_STATE_FAIL : PLAYBACK_STATE_PAUSED;
+        playback_step_next();
+        pause_playback_if_ready();
         mark_redraw();
     }
     else if((KEY_EVENT_K3_SHORT == event) && (PLAYBACK_STATE_FAIL != playback_state))
@@ -443,14 +480,7 @@ static void playback_tick(void)
     if((now_ms - playback_last_ms) >= PLAYBACK_STEP_MS)
     {
         playback_last_ms = now_ms;
-        if(playback_step < last_result.action_count)
-        {
-            playback_step++;
-        }
-        while((playback_step < last_result.action_count) && ('|' == last_result.actions[playback_step - 1u]))
-        {
-            playback_step++;
-        }
+        playback_step_next();
         if(playback_step >= last_result.action_count)
         {
             playback_state = PLAYBACK_STATE_DONE;
@@ -464,6 +494,26 @@ static void handle_simple_back(key_event_enum event)
     if(KEY_EVENT_K4_SHORT == event)
     {
         go_home();
+    }
+}
+
+static void dispatch_key_event(key_event_enum event)
+{
+    if(KEY_EVENT_K4_LONG == event)
+    {
+        go_home();
+        return;
+    }
+
+    switch(current_page)
+    {
+        case MENU_PAGE_HOME:        handle_home(event); break;
+        case MENU_PAGE_RUN:         handle_run(event); break;
+        case MENU_PAGE_MODE_SELECT: handle_mode_select(event); break;
+        case MENU_PAGE_PLAYBACK:    handle_playback(event); break;
+        case MENU_PAGE_DEBUG:
+        case MENU_PAGE_INFO:        handle_simple_back(event); break;
+        default:                    go_home(); break;
     }
 }
 
@@ -541,23 +591,7 @@ void menu_poll(void)
 {
     key_event_enum event = key_read_event();
 
-    if(KEY_EVENT_K4_LONG == event)
-    {
-        go_home();
-    }
-    else
-    {
-        switch(current_page)
-        {
-            case MENU_PAGE_HOME:        handle_home(event); break;
-            case MENU_PAGE_RUN:         handle_run(event); break;
-            case MENU_PAGE_MODE_SELECT: handle_mode_select(event); break;
-            case MENU_PAGE_PLAYBACK:    handle_playback(event); break;
-            case MENU_PAGE_DEBUG:
-            case MENU_PAGE_INFO:        handle_simple_back(event); break;
-            default:                    go_home(); break;
-        }
-    }
+    dispatch_key_event(event);
 
     demo_tick();
     playback_tick();

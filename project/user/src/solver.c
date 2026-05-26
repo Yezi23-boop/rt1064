@@ -1,11 +1,11 @@
 #include "solver.h"
 #include <string.h>
 
-static uint8 bfs_visited[SEARCH_STATE_COUNT];
-static uint16 bfs_parent[SEARCH_STATE_COUNT];
-static uint16 bfs_queue[SEARCH_STATE_COUNT];
-static char bfs_action[SEARCH_STATE_COUNT];
-static char single_path[MAX_SINGLE_PATH + 1];
+static uint8 bfs_visited[SEARCH_STATE_COUNT];  // 单箱 BFS 访问表，索引为 player*MAP_CELLS+box。
+static uint16 bfs_parent[SEARCH_STATE_COUNT];  // 回溯父状态；INVALID_STATE 表示起点或未连接。
+static uint16 bfs_queue[SEARCH_STATE_COUNT];   // BFS 队列放片上 RAM，保证简单图和批量 Demo 求解速度。
+static char bfs_action[SEARCH_STATE_COUNT];    // 到达该状态的动作，小写移动、大写推箱。
+static char single_path[MAX_SINGLE_PATH + 1];  // 每次尝试一个 box-target 对的临时路径。
 
 static uint16 cell_index(uint8 row, uint8 col)
 {
@@ -226,13 +226,14 @@ static uint8 solve_single_box(const map_state_struct *map, uint8 box_index, uint
     uint8 dir;
     char reverse_path[MAX_SINGLE_PATH + 1];
 
-    memset(bfs_visited, 0, sizeof(bfs_visited));
+    memset(bfs_visited, 0, sizeof(bfs_visited)); // 每个 box-target 尝试独立 BFS，不能复用上一次访问状态。
 
     start_state = (uint16)(map->player * MAP_CELLS + map->boxes[box_index]);
     bfs_visited[start_state] = 1;
     bfs_parent[start_state] = INVALID_STATE;
     bfs_queue[write_index++] = start_state;
 
+    // 队列按先进先出扩展，同一个 box-target 子问题中第一次到达目标就是最短动作数。
     while(read_index < write_index)
     {
         state = bfs_queue[read_index++];
@@ -302,14 +303,14 @@ static uint8 solve_single_box(const map_state_struct *map, uint8 box_index, uint
         {
             return 0;
         }
-        reverse_path[reverse_len++] = bfs_action[state];
+        reverse_path[reverse_len++] = bfs_action[state]; // BFS 从终点沿父节点回溯，路径先得到反序。
         state = bfs_parent[state];
     }
 
     *path_len = reverse_len;
     for(state = 0; state < reverse_len; state++)
     {
-        path[state] = reverse_path[reverse_len - 1 - state];
+        path[state] = reverse_path[reverse_len - 1 - state]; // 翻转为从起点到目标的执行顺序。
     }
     path[reverse_len] = '\0';
     return 1;
@@ -484,6 +485,7 @@ uint8 solve_map(const map_source_struct *source, solve_result_struct *result)
 
         if(0 < map.box_count)
         {
+            // 分隔符标记一次单箱任务完成，屏幕回放会跳过它但保留任务边界。
             if(0 == result_append_action(result, '|'))
             {
                 return 0;

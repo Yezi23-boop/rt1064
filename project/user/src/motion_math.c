@@ -66,68 +66,58 @@ void command_to_velocity(motion_command_enum command, float move_speed, float tu
     switch(command)
     {
         case MOTION_FORWARD:
-        {
             *vy = move_speed;
-        }break;
+            break;
 
         case MOTION_BACKWARD:
-        {
             *vy = -move_speed;
-        }break;
+            break;
 
         case MOTION_LEFT:
-        {
             *vx = -move_speed;
-        }break;
+            break;
 
         case MOTION_RIGHT:
-        {
             *vx = move_speed;
-        }break;
+            break;
 
         case MOTION_LEFT_FRONT:
-        {
             *vx = -move_speed;
             *vy = move_speed;
-        }break;
+            break;
 
         case MOTION_LEFT_BACK:
-        {
             *vx = -move_speed;
             *vy = -move_speed;
-        }break;
+            break;
 
         case MOTION_RIGHT_FRONT:
-        {
             *vx = move_speed;
             *vy = move_speed;
-        }break;
+            break;
 
         case MOTION_RIGHT_BACK:
-        {
             *vx = move_speed;
             *vy = -move_speed;
-        }break;
+            break;
 
         case MOTION_TURN_LEFT:
-        {
             *vz = turn_speed;
-        }break;
+            break;
 
         case MOTION_TURN_RIGHT:
-        {
             *vz = -turn_speed;
-        }break;
+            break;
 
         case MOTION_STOP:
         default:
-        {
-        }break;
+            break;
     }
 }
 
 void mecanum_mix(float vx, float vy, float vz, float wheel_norm[WHEEL_COUNT])
 {
+    // 车体坐标约定：vx 向右、vy 向前、vz 逆时针；四轮顺序固定为 LF/LB/RF/RB。
     wheel_norm[WHEEL_LF] = vy - vx + vz;
     wheel_norm[WHEEL_LB] = vy + vx + vz;
     wheel_norm[WHEEL_RF] = vy + vx - vz;

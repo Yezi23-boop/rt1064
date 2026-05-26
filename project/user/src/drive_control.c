@@ -48,8 +48,8 @@ uint8 control_init(void)
     control_status.target_yaw = control_status.current_yaw;
     stop_motion();
 
-    pit_ms_init(PIT_CH0, 5);
-    pit_ms_init(PIT_CH1, CONTROL_PERIOD_MS);
+    pit_ms_init(PIT_CH0, 5);                    // 5ms 只更新 IMU/yaw，避免控制周期内重复读取姿态。
+    pit_ms_init(PIT_CH1, CONTROL_PERIOD_MS);    // 20ms 执行姿态环和四轮速度 PID，与 encoder count 单位一致。
 
     control_ready = (0 == hw_state) ? 1 : 0;
     return hw_state;

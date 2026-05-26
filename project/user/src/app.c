@@ -6,6 +6,7 @@
 
 void app_init(void)
 {
+    // 初始化顺序保持固定：时间基准先于菜单，菜单按键消抖和回放都依赖 time_ms()。
     timebase_init();
     settings_init();
     screen_init();
