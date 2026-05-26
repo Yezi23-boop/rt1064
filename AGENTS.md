@@ -125,3 +125,9 @@ Single-context repo: use root `CONTEXT.md` and root `docs/adr/` when present. Se
 - diff 中不必要的改动变少。
 - 因过度复杂而重写的次数变少。
 - 澄清问题发生在实现前，而不是错误发生后。
+
+### 6. Git 提交信息
+
+- Git commit message 使用中文，简洁说明本次改动。
+- 如果有英文专有名词、协议名、模块名或文件名，可以保留原文。
+- 优先写出能让人一眼知道改了什么的提交信息，不要只写空泛的“update”或“fix”。

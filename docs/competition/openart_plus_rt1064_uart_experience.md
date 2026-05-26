@@ -247,6 +247,10 @@ DEBUG_ENABLE = False
 UART_ENABLE = False
 ```
 
+如果四角标定后采样圆点仍然对不上格子中心，先按 `docs/competition/openart_grid_alignment_debug.md` 的顺序排查：画完整网格线、区分整体偏移/角点错误/镜头畸变，再决定是加边距微调、`lens_corr()`，还是多点标定。
+
+如果屏幕中心亮、边缘暗或局部模糊导致颜色误判，先按 `docs/competition/openart_color_robustness_plan.md` 的顺序处理：保留归一化颜色判断，将 `color_sum` 降级为极暗过滤，并修改黑点回看逻辑，避免暗墙体被直接判为空地。
+
 识别端内部当前直接按 12 行 x 16 列解析地图，并按这一顺序输出 `code_matrix`。如果后续 RT1064 侧需要接收二进制地图帧，再把 `UART_ENABLE` 打开即可；目前默认不发送。
 
 ## 当前最小 RT1064 程序
