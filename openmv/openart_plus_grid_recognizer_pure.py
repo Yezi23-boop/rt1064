@@ -56,10 +56,12 @@ DRAW_COLOR = {
 
 PLAYER_SAMPLE_OFFSETS = (
     (0, 0),
-    (-4, 0),
-    (4, 0),
-    (0, -4),
-    (0, 4),
+    (-5 * FRAME_SCALE, 0),
+    (5 * FRAME_SCALE, 0),
+    (-7 * FRAME_SCALE, 0),
+    (7 * FRAME_SCALE, 0),
+    (0, -4 * FRAME_SCALE),
+    (0, 4 * FRAME_SCALE),
 )
 
 # ==================== 调试、识别与相机开关 ===================
@@ -68,6 +70,9 @@ DEBUG_ENABLE = True
 # True 时绘制当前显示坐标系的绿色边界：
 # 原图显示时为人工四边形；拉正显示时为矫正后图像边框。
 DEBUG_DRAW_ROI = True
+# True 时绘制 16x12 完整网格线，用来判断采样点是否真的落在格子中心。
+# 网格线只用于调试显示，不参与识别；正式跑帧率时可关闭。
+DEBUG_DRAW_GRID_LINES = True
 # True 时绘制 192 个彩色实心圆点，圆点颜色代表该格子的识别结果。
 DEBUG_DRAW_POINTS = True
 # 只控制 OpenMV IDE 中看到的图像：
@@ -226,6 +231,53 @@ def draw_calibration_boundary(img, rectified=False):
         img.draw_rectangle(MAP_ROI, color=(0, 255, 0), thickness=2)
 
 
+def draw_grid_lines(img, rectified=False):
+    # 网格线跟随当前显示坐标系：拉正图画规则网格，原图画投影后的四边形网格。
+    color = (255, 255, 255)
+
+    if rectified:
+        width = img.width()
+        height = img.height()
+        for col in range(GRID_COLS + 1):
+            x = int((col * width / GRID_COLS) + 0.5)
+            if x >= width:
+                x = width - 1
+            img.draw_line((x, 0, x, height - 1), color=color, thickness=1)
+        for row in range(GRID_ROWS + 1):
+            y = int((row * height / GRID_ROWS) + 0.5)
+            if y >= height:
+                y = height - 1
+            img.draw_line((0, y, width - 1, y), color=color, thickness=1)
+        return
+
+    if USE_QUAD_CALIBRATION:
+        transform = build_quad_transform(MAP_CORNERS)
+        if transform is None:
+            return
+        for col in range(GRID_COLS + 1):
+            u = col / GRID_COLS
+            x0, y0 = project_grid_point(transform, u, 0.0)
+            x1, y1 = project_grid_point(transform, u, 1.0)
+            img.draw_line((x0, y0, x1, y1), color=color, thickness=1)
+        for row in range(GRID_ROWS + 1):
+            v = row / GRID_ROWS
+            x0, y0 = project_grid_point(transform, 0.0, v)
+            x1, y1 = project_grid_point(transform, 1.0, v)
+            img.draw_line((x0, y0, x1, y1), color=color, thickness=1)
+        return
+
+    left = DOT_START_X + SAMPLE_OFFSET_X - (COL_STEP / 2.0)
+    top = DOT_START_Y + SAMPLE_OFFSET_Y - (ROW_STEP / 2.0)
+    right = left + GRID_COLS * COL_STEP
+    bottom = top + GRID_ROWS * ROW_STEP
+    for col in range(GRID_COLS + 1):
+        x = int(left + col * COL_STEP + 0.5)
+        img.draw_line((x, int(top), x, int(bottom)), color=color, thickness=1)
+    for row in range(GRID_ROWS + 1):
+        y = int(top + row * ROW_STEP + 0.5)
+        img.draw_line((int(left), y, int(right), y), color=color, thickness=1)
+
+
 def draw_recognition_points(img, element_matrix, grid_points):
     # 只负责显示识别结论，不参与取色；避免调试圆点污染同一帧的颜色判断。
     for idx, (x, y) in enumerate(grid_points):
@@ -248,27 +300,51 @@ def normalize_color(r, g, b):
 
 
 def is_player_color(rn, gn, bn, color_sum):
-    # 小车两半分别偏青色和黄绿色；用归一化比例减少局部亮暗影响。
-    if color_sum < 120 or gn < 95:
+    # 小车格子由亮绿色和青色两半组成。参考图中实测主色约为：
+    # 绿色半边 RGB=(36,255,42)，青色半边 RGB=(36,255,255)。
+    # 这里用归一化比例判断，避免曝光变化导致 RGB 绝对值整体变亮或变暗。
+    if color_sum < 100:
         return False
 
-    cyan_half = 35 <= rn <= 75 and 85 <= gn <= 125 and 85 <= bn <= 130
-    yellow_green_half = 45 <= rn <= 95 and gn >= 130 and bn <= 60
-    return cyan_half or yellow_green_half
+    green_half = (
+        rn <= 60 and
+        gn >= 165 and
+        bn <= 90 and
+        gn > rn + 80 and
+        gn > bn + 60
+    )
 
+    cyan_half = (
+        rn <= 60 and
+        95 <= gn <= 160 and
+        95 <= bn <= 170 and
+        gn > rn + 45 and
+        bn > rn + 45 and
+        abs(gn - bn) <= 55
+    )
 
-def is_player_candidate(rn, gn, bn, color_sum):
-    return is_player_color(rn, gn, bn, color_sum)
+    # 真实摄像头可能把绿/青边界采成过渡色，保留一个窄的混合区间。
+    mixed_half = (
+        rn <= 60 and
+        gn >= 145 and
+        60 <= bn <= 125 and
+        gn > rn + 80 and
+        gn > bn + 25
+    )
+
+    return green_half or cyan_half or mixed_half
 
 
 def sample_player_color(img, x, y, center_r, center_g, center_b):
-    # 小车格子可能一半青、一半黄绿，中心点落在边界时用周围点补采样。
+    # 小车中心可能落在两色交界或模糊边缘；中心和周围点任一点命中即可。
     center_rn, center_gn, center_bn, center_sum = normalize_color(
         center_r, center_g, center_b)
-    if not is_player_candidate(center_rn, center_gn, center_bn, center_sum):
-        return False
+    if is_player_color(center_rn, center_gn, center_bn, center_sum):
+        return True
 
     for dx, dy in PLAYER_SAMPLE_OFFSETS:
+        if dx == 0 and dy == 0:
+            continue
         r, g, b = get_average_pixel(img, x + dx, y + dy)
         rn, gn, bn, color_sum = normalize_color(r, g, b)
         if is_player_color(rn, gn, bn, color_sum):
@@ -394,6 +470,8 @@ def main():
           (str(USE_QUAD_CALIBRATION), str(MAP_CORNERS)))
     print("SHOW_RECTIFIED_VIEW=%s USE_RECTIFIED_RECOGNITION=%s" %
           (str(SHOW_RECTIFIED_VIEW), str(USE_RECTIFIED_RECOGNITION)))
+    print("DEBUG_DRAW_ROI=%s DEBUG_DRAW_GRID_LINES=%s DEBUG_DRAW_POINTS=%s" %
+          (str(DEBUG_DRAW_ROI), str(DEBUG_DRAW_GRID_LINES), str(DEBUG_DRAW_POINTS)))
     print("CAMERA_MANUAL_EXPOSURE=%s CAMERA_EXPOSURE_US=%d" %
           (str(CAMERA_MANUAL_EXPOSURE), CAMERA_EXPOSURE_US))
     print("CAMERA_LOCK_GAIN=%s CAMERA_LOCK_WHITEBAL=%s" %
@@ -454,6 +532,9 @@ def main():
 
         if DEBUG_ENABLE and DEBUG_DRAW_ROI:
             draw_calibration_boundary(img, rectified=display_rectified)
+
+        if DEBUG_ENABLE and DEBUG_DRAW_GRID_LINES:
+            draw_grid_lines(img, rectified=display_rectified)
 
         if DEBUG_ENABLE and DEBUG_DRAW_POINTS:
             draw_recognition_points(img, element_matrix, display_points)
