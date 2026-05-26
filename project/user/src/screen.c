@@ -364,7 +364,7 @@ static uint16 count_visible_actions_to_step(const solve_result_struct *result, u
     return count;
 }
 
-void screen_draw_home(const char *const *items, uint8 item_count, uint8 cursor, uint8 current_map, run_mode_enum mode, save_state_enum save_state)
+void screen_draw_home(const char *const *items, uint8 item_count, uint8 cursor, uint8 current_map, run_mode_enum mode, save_state_enum save_state, const float encoder_count[WHEEL_COUNT])
 {
     char line[40];
     uint8 i;
@@ -382,6 +382,10 @@ void screen_draw_home(const char *const *items, uint8 item_count, uint8 cursor, 
     show_line(LINE_H * 6u, line);
     snprintf(line, sizeof(line), "Save: %s", save_state_name(save_state));
     show_line(LINE_H * 7u, line);
+    snprintf(line, sizeof(line), "Enc LF:%d LB:%d", (int16)encoder_count[WHEEL_LF], (int16)encoder_count[WHEEL_LB]);
+    show_line(LINE_H * 8u, line);
+    snprintf(line, sizeof(line), "Enc RF:%d RB:%d", (int16)encoder_count[WHEEL_RF], (int16)encoder_count[WHEEL_RB]);
+    show_line(LINE_H * 9u, line);
     show_hint("K1/K2 Move  K3 Enter", "K4 Save  K4L Home");
 }
 

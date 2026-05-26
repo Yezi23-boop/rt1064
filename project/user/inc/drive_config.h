@@ -16,6 +16,8 @@
 #define MAX_PWM_DUTY                     (3000)
 /** 电机 PWM 频率，单位为 Hz。 */
 #define PWM_FREQ_HZ              (17000)
+/** 当前调车阶段不使用 IMU；置 1 后才初始化 IMU660RC 并启用 yaw 姿态保持。 */
+#define DRIVE_USE_IMU            (0)
 
 /** yaw 姿态 PD 比例系数；误差单位为 degree，输出为归一化旋转分量 vz。 */
 #define YAW_KP                   (0.020f)

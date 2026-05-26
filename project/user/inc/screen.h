@@ -3,6 +3,7 @@
 
 #include "map_types.h"
 #include "settings.h"
+#include "drive_config.h"
 
 /**
  * @brief 求解结果回放状态。
@@ -33,8 +34,9 @@ void screen_init(void);
  * @param[in] current_map 当前已确认地图编号。
  * @param[in] mode 当前运行模式。
  * @param[in] save_state Flash 保存状态。
+ * @param[in] encoder_count 四轮编码器反馈增量，单位为 count/20ms，轮序为 LF/LB/RF/RB。
  */
-void screen_draw_home(const char *const *items, uint8 item_count, uint8 cursor, uint8 current_map, run_mode_enum mode, save_state_enum save_state);
+void screen_draw_home(const char *const *items, uint8 item_count, uint8 cursor, uint8 current_map, run_mode_enum mode, save_state_enum save_state, const float encoder_count[WHEEL_COUNT]);
 
 /**
  * @brief 绘制 Run 页面。

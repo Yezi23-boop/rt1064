@@ -20,8 +20,9 @@ typedef struct
 
 /**
  * @brief 初始化底盘硬件、姿态环、四轮 PID 和两级 PIT 周期任务。
- * @return 0 表示底盘可进入闭环；非 0 表示 IMU 初始化失败，周期回调将不输出控制量。
+ * @return 0 表示 IMU 可用或当前未启用 IMU；非 0 仅表示 IMU 初始化失败。
  * @note 应在主程序初始化阶段调用一次。
+ *       底盘编码器、电机和非姿态控制不依赖 IMU 初始化结果。
  */
 uint8 control_init(void);
 

@@ -1,5 +1,6 @@
 #include "zf_common_headfile.h"
 #include "drive_control.h"
+#include "base_io.h"
 #include "app.h"
 
 int main(void)
@@ -14,6 +15,11 @@ int main(void)
 
     control_init_state = control_init();
     printf("CONTROL_INIT=%d\r\n", control_init_state);
+
+    test_wheel(WHEEL_LF, 1500);
+    set_wheel_pwm(WHEEL_LB, 1500);
+    set_wheel_pwm(WHEEL_RF, 1500);
+    set_wheel_pwm(WHEEL_RB, 1500);
 
     // 应用层在底盘初始化后启动；菜单和屏幕只做非阻塞轮询，不影响 PIT 闭环节拍。
     app_init();

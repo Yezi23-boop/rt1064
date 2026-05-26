@@ -54,12 +54,49 @@ DRAW_COLOR = {
     "player": (0, 255, 0),
 }
 
+PLAYER_SAMPLE_OFFSETS = (
+    (0, 0),
+    (-5 * FRAME_SCALE, 0),
+    (5 * FRAME_SCALE, 0),
+    (-7 * FRAME_SCALE, 0),
+    (7 * FRAME_SCALE, 0),
+    (0, -4 * FRAME_SCALE),
+    (0, 4 * FRAME_SCALE),
+)
+
+MIN_SPACE_SUM = 45
+MIN_BOX_GOAL_SUM = 60
+MIN_PLAYER_SUM = 60
+DARK_PIXEL_THRESHOLD = 60
+DEBUG_PRINT_BRIGHTNESS = True
+
+# 拉正图上的有效采样区域边距。四角已经对齐但整张网格仍略偏时，只调这里。
+GRID_LEFT_MARGIN = 0 * FRAME_SCALE
+GRID_RIGHT_MARGIN = 0 * FRAME_SCALE
+GRID_TOP_MARGIN = 0 * FRAME_SCALE
+GRID_BOTTOM_MARGIN = 0 * FRAME_SCALE
+
+# 稳定输出地图：同一格连续多帧识别为新类型后才切换，过滤单帧跳动。
+STABILIZE_OUTPUT = True
+STABLE_CHANGE_COUNT = 2
+
+SPACE_CONFIRM_OFFSETS = (
+    (0, 0),
+    (-5 * FRAME_SCALE, -5 * FRAME_SCALE),
+    (5 * FRAME_SCALE, -5 * FRAME_SCALE),
+    (-5 * FRAME_SCALE, 5 * FRAME_SCALE),
+    (5 * FRAME_SCALE, 5 * FRAME_SCALE),
+)
+
 # ==================== 调试、识别与相机开关 ===================
 # 总调试开关。关闭后不画框、不画点、不周期打印地图，正式运行可关闭以提升 FPS。
 DEBUG_ENABLE = True
 # True 时绘制当前显示坐标系的绿色边界：
 # 原图显示时为人工四边形；拉正显示时为矫正后图像边框。
 DEBUG_DRAW_ROI = True
+# True 时绘制 16x12 完整网格线，用来判断采样点是否真的落在格子中心。
+# 网格线只用于调试显示，不参与识别；正式跑帧率时可关闭。
+DEBUG_DRAW_GRID_LINES = True
 # True 时绘制 192 个彩色实心圆点，圆点颜色代表该格子的识别结果。
 DEBUG_DRAW_POINTS = True
 # 只控制 OpenMV IDE 中看到的图像：
@@ -72,11 +109,11 @@ USE_RECTIFIED_RECOGNITION = True
 # 地图打印周期，单位毫秒。打印频繁会影响实际帧率。
 DEBUG_PRINT_PERIOD_MS = 500
 # 当前测试画面没有炸弹；关闭后红色区域不会被分类为 bomb。
-ENABLE_BOMB = False
+ENABLE_BOMB = True
 # 固定相机自动项，避免自动曝光把 snapshot() 帧周期拉长到几十毫秒。
 CAMERA_MANUAL_EXPOSURE = True
-# 仅在 CAMERA_MANUAL_EXPOSURE=True 时生效；QVGA 下 10000us 约对应 100FPS 以内的采集上限。
-CAMERA_EXPOSURE_US = 1000
+# 仅在 CAMERA_MANUAL_EXPOSURE=True 时生效；先保留当前短曝光，避免中心区域过曝。
+CAMERA_EXPOSURE_US = 500
 CAMERA_LOCK_GAIN = True
 CAMERA_LOCK_WHITEBAL = True
 
@@ -185,10 +222,16 @@ def build_grid_points():
 def build_rectified_grid_points(img_width, img_height):
     # 拉正图识别路径所用的采样点：地图已成为规则矩形，直接均匀分成 16x12。
     grid_points = []
+    left = GRID_LEFT_MARGIN
+    top = GRID_TOP_MARGIN
+    right = img_width - GRID_RIGHT_MARGIN
+    bottom = img_height - GRID_BOTTOM_MARGIN
+    width = right - left
+    height = bottom - top
     for row in range(GRID_ROWS):
         for col in range(GRID_COLS):
-            x = int(((col + 0.5) * img_width / GRID_COLS) + 0.5)
-            y = int(((row + 0.5) * img_height / GRID_ROWS) + 0.5)
+            x = int((left + (col + 0.5) * width / GRID_COLS) + 0.5)
+            y = int((top + (row + 0.5) * height / GRID_ROWS) + 0.5)
             grid_points.append((x, y))
     return grid_points
 
@@ -218,6 +261,77 @@ def draw_calibration_boundary(img, rectified=False):
         img.draw_rectangle(MAP_ROI, color=(0, 255, 0), thickness=2)
 
 
+def draw_grid_lines(img, rectified=False):
+    # 网格线跟随当前显示坐标系：拉正图画规则网格，原图画投影后的四边形网格。
+    color = (255, 255, 255)
+
+    if rectified:
+        width = img.width()
+        height = img.height()
+        left = GRID_LEFT_MARGIN
+        top = GRID_TOP_MARGIN
+        right = width - GRID_RIGHT_MARGIN
+        bottom = height - GRID_BOTTOM_MARGIN
+        grid_width = right - left
+        grid_height = bottom - top
+        if grid_width <= 0 or grid_height <= 0:
+            return
+        for col in range(GRID_COLS + 1):
+            x = int((left + col * grid_width / GRID_COLS) + 0.5)
+            if x < 0:
+                x = 0
+            if x >= width:
+                x = width - 1
+            y0 = top
+            y1 = bottom - 1
+            if y0 < 0:
+                y0 = 0
+            if y1 >= height:
+                y1 = height - 1
+            img.draw_line((x, y0, x, y1), color=color, thickness=1)
+        for row in range(GRID_ROWS + 1):
+            y = int((top + row * grid_height / GRID_ROWS) + 0.5)
+            if y < 0:
+                y = 0
+            if y >= height:
+                y = height - 1
+            x0 = left
+            x1 = right - 1
+            if x0 < 0:
+                x0 = 0
+            if x1 >= width:
+                x1 = width - 1
+            img.draw_line((x0, y, x1, y), color=color, thickness=1)
+        return
+
+    if USE_QUAD_CALIBRATION:
+        transform = build_quad_transform(MAP_CORNERS)
+        if transform is None:
+            return
+        for col in range(GRID_COLS + 1):
+            u = col / GRID_COLS
+            x0, y0 = project_grid_point(transform, u, 0.0)
+            x1, y1 = project_grid_point(transform, u, 1.0)
+            img.draw_line((x0, y0, x1, y1), color=color, thickness=1)
+        for row in range(GRID_ROWS + 1):
+            v = row / GRID_ROWS
+            x0, y0 = project_grid_point(transform, 0.0, v)
+            x1, y1 = project_grid_point(transform, 1.0, v)
+            img.draw_line((x0, y0, x1, y1), color=color, thickness=1)
+        return
+
+    left = DOT_START_X + SAMPLE_OFFSET_X - (COL_STEP / 2.0)
+    top = DOT_START_Y + SAMPLE_OFFSET_Y - (ROW_STEP / 2.0)
+    right = left + GRID_COLS * COL_STEP
+    bottom = top + GRID_ROWS * ROW_STEP
+    for col in range(GRID_COLS + 1):
+        x = int(left + col * COL_STEP + 0.5)
+        img.draw_line((x, int(top), x, int(bottom)), color=color, thickness=1)
+    for row in range(GRID_ROWS + 1):
+        y = int(top + row * ROW_STEP + 0.5)
+        img.draw_line((int(left), y, int(right), y), color=color, thickness=1)
+
+
 def draw_recognition_points(img, element_matrix, grid_points):
     # 只负责显示识别结论，不参与取色；避免调试圆点污染同一帧的颜色判断。
     for idx, (x, y) in enumerate(grid_points):
@@ -227,68 +341,215 @@ def draw_recognition_points(img, element_matrix, grid_points):
         img.draw_circle(x, y, 3, color=DRAW_COLOR[element], fill=True)
 
 
+def normalize_color(r, g, b):
+    color_sum = r + g + b
+    if color_sum < 30:
+        return (0, 0, 0, color_sum)
+    return (
+        r * 255 // color_sum,
+        g * 255 // color_sum,
+        b * 255 // color_sum,
+        color_sum,
+    )
+
+
+def is_space_color(rn, gn, bn, color_sum):
+    return (
+        color_sum > MIN_SPACE_SUM and
+        bn > 115 and
+        bn > rn + 45 and
+        bn > gn + 30
+    )
+
+
+def is_goal_color(rn, gn, bn, color_sum):
+    return (
+        color_sum > MIN_BOX_GOAL_SUM and
+        rn > 75 and
+        bn > 95 and
+        gn < 55 and
+        rn > gn + 45 and
+        bn > gn + 60 and
+        abs(rn - bn) < 85
+    )
+
+
+def is_player_color(rn, gn, bn, color_sum):
+    # 小车格子由亮绿色和青色两半组成。参考图中实测主色约为：
+    # 绿色半边 RGB=(36,255,42)，青色半边 RGB=(36,255,255)。
+    # 这里用归一化比例判断，避免曝光变化导致 RGB 绝对值整体变亮或变暗。
+    if color_sum < MIN_PLAYER_SUM:
+        return False
+
+    green_half = (
+        rn <= 60 and
+        gn >= 165 and
+        bn <= 90 and
+        gn > rn + 80 and
+        gn > bn + 60
+    )
+
+    cyan_half = (
+        rn <= 60 and
+        95 <= gn <= 160 and
+        95 <= bn <= 170 and
+        gn > rn + 45 and
+        bn > rn + 45 and
+        abs(gn - bn) <= 55
+    )
+
+    # 真实摄像头可能把绿/青边界采成过渡色，保留一个窄的混合区间。
+    mixed_half = (
+        rn <= 60 and
+        gn >= 145 and
+        60 <= bn <= 125 and
+        gn > rn + 80 and
+        gn > bn + 25
+    )
+
+    return green_half or cyan_half or mixed_half
+
+
+def is_player_candidate(rn, gn, bn, color_sum):
+    # 只有中心点已经接近小车色时才补采周围点，避免每个蓝地/墙格都多读像素。
+    if color_sum < MIN_PLAYER_SUM or rn > 85 or gn < 90:
+        return False
+    return gn > rn + 40 and (gn >= 125 or bn <= 130)
+
+
+def sample_player_color(img, x, y, center_r, center_g, center_b):
+    # 小车中心可能落在两色交界或模糊边缘；中心和周围点任一点命中即可。
+    center_rn, center_gn, center_bn, center_sum = normalize_color(
+        center_r, center_g, center_b)
+    if is_player_color(center_rn, center_gn, center_bn, center_sum):
+        return True
+    if not is_player_candidate(center_rn, center_gn, center_bn, center_sum):
+        return False
+
+    for dx, dy in PLAYER_SAMPLE_OFFSETS:
+        if dx == 0 and dy == 0:
+            continue
+        r, g, b = get_average_pixel(img, x + dx, y + dy)
+        rn, gn, bn, color_sum = normalize_color(r, g, b)
+        if is_player_color(rn, gn, bn, color_sum):
+            return True
+    return False
+
+
+def confirm_space_color(img, x, y, center_r, center_g, center_b):
+    # 墙体纹理可能有局部蓝点；空地需要多个分散采样点都呈蓝色。
+    center_rn, center_gn, center_bn, center_sum = normalize_color(
+        center_r, center_g, center_b)
+    if not is_space_color(center_rn, center_gn, center_bn, center_sum):
+        return False
+
+    blue_count = 1
+    for dx, dy in SPACE_CONFIRM_OFFSETS:
+        if dx == 0 and dy == 0:
+            continue
+        else:
+            r, g, b = get_average_pixel(img, x + dx, y + dy)
+        rn, gn, bn, color_sum = normalize_color(r, g, b)
+        if is_space_color(rn, gn, bn, color_sum):
+            blue_count += 1
+    return blue_count >= 3
+
+
 def classify_element(img, row_idx, col_idx, x, y):
     # 逐飞地图外圈固定为墙，强制处理可减少外圈纹理和边缘透视带来的误判。
     if (row_idx == 0 or row_idx == GRID_ROWS - 1 or
             col_idx == 0 or col_idx == GRID_COLS - 1):
-        return "wall"
+        return "wall", 0
 
     r, g, b = get_average_pixel(img, x, y)
 
-    # 若中心位置被黑色调试点或阴影覆盖，则向右下偏移一次重新读取。
-    if r < 60 and g < 60 and b < 60:
-        r, g, b = get_average_pixel(img, x + 3, y + 3)
-        if r < 60 and g < 60 and b < 60:
-            return "space"
+    # 若中心位置被黑色调试点或阴影覆盖，只尝试偏移重采样，不在这里定类。
+    if (r < DARK_PIXEL_THRESHOLD and g < DARK_PIXEL_THRESHOLD and
+            b < DARK_PIXEL_THRESHOLD):
+        rr, gg, bb = get_average_pixel(img, x + 3, y + 3)
+        if rr + gg + bb > r + g + b:
+            r, g, b = rr, gg, bb
+
+    if sample_player_color(img, x, y, r, g, b):
+        return "player", r + g + b
+
+    rn, gn, bn, color_sum = normalize_color(r, g, b)
 
     # 黄色箱子优先判断，避免高亮黄色被误当作其他高亮色块。
     if (
-        r > b + 15 and
-        g > b + 15 and
-        r > 45 and g > 45 and
-        abs(r - g) < 65
+        color_sum > MIN_BOX_GOAL_SUM and
+        rn > 90 and gn > 95 and
+        bn < 45 and
+        abs(rn - gn) < 40
     ):
-        return "box"
+        return "box", color_sum
 
-    # 角色为绿色，要求 G 通道明显领先另外两通道。
-    if g > r + 12 and g > b + 12:
-        return "player"
-
-    # 目标点为品红色：R/B 同时较高且相近，G 明显较低。
-    if (
-        r > g + 30 and b > g + 30 and
-        r > 110 and b > 110 and
-        g < 70 and
-        abs(r - b) < 30
-    ):
-        return "goal"
+    # 目标点为品红色：G 明显低，暗角/边缘允许 B 比 R 偏高。
+    if is_goal_color(rn, gn, bn, color_sum):
+        return "goal", color_sum
 
     # 当前场景没有炸弹，ENABLE_BOMB 默认关闭；以后有炸弹时再启用红色判定。
     if ENABLE_BOMB and r > g + 25 and r > b + 25:
-        return "bomb"
+        return "bomb", color_sum
 
-    # 蓝色空地要求 B 通道明显占优，剩余不确定区域统一按墙处理。
-    if b > r + 140 and b > g + 35:
-        return "space"
+    # 蓝色空地要求 B 通道比例明显占优，并通过分散采样确认不是墙体局部蓝纹理。
+    if is_space_color(rn, gn, bn, color_sum) and confirm_space_color(img, x, y, r, g, b):
+        return "space", color_sum
 
-    return "wall"
+    return "wall", color_sum
 
 
-def recognize_map(img, grid_points, element_matrix, char_matrix):
+def recognize_map(img, grid_points, raw_element_matrix, brightness_matrix):
     for idx, (x, y) in enumerate(grid_points):
         row_idx = idx // GRID_COLS
         col_idx = idx % GRID_COLS
-        element = classify_element(img, row_idx, col_idx, x, y)
-        element_matrix[row_idx][col_idx] = element
-        char_matrix[row_idx][col_idx] = ELEMENT_CHAR[element]
+        element, color_sum = classify_element(img, row_idx, col_idx, x, y)
+        raw_element_matrix[row_idx][col_idx] = element
+        brightness_matrix[row_idx][col_idx] = color_sum
 
 
-def print_map(char_matrix, fps, loop_fps, loop_us,
+def update_stable_map(raw_element_matrix, stable_element_matrix,
+                      pending_element_matrix, pending_count_matrix, char_matrix):
+    for row_idx in range(GRID_ROWS):
+        for col_idx in range(GRID_COLS):
+            raw_element = raw_element_matrix[row_idx][col_idx]
+            stable_element = stable_element_matrix[row_idx][col_idx]
+
+            if (not STABILIZE_OUTPUT or STABLE_CHANGE_COUNT <= 1 or
+                    stable_element == ""):
+                stable_element = raw_element
+                pending_element_matrix[row_idx][col_idx] = ""
+                pending_count_matrix[row_idx][col_idx] = 0
+            elif raw_element == stable_element:
+                pending_element_matrix[row_idx][col_idx] = ""
+                pending_count_matrix[row_idx][col_idx] = 0
+            else:
+                pending_element = pending_element_matrix[row_idx][col_idx]
+                if raw_element == pending_element:
+                    pending_count_matrix[row_idx][col_idx] += 1
+                else:
+                    pending_element_matrix[row_idx][col_idx] = raw_element
+                    pending_count_matrix[row_idx][col_idx] = 1
+
+                if pending_count_matrix[row_idx][col_idx] >= STABLE_CHANGE_COUNT:
+                    stable_element = raw_element
+                    pending_element_matrix[row_idx][col_idx] = ""
+                    pending_count_matrix[row_idx][col_idx] = 0
+
+            stable_element_matrix[row_idx][col_idx] = stable_element
+            char_matrix[row_idx][col_idx] = ELEMENT_CHAR[stable_element]
+
+
+def print_map(char_matrix, brightness_matrix, fps, loop_fps, loop_us,
               snapshot_us, rectify_us, recognize_us, display_us, exposure_us):
     print("=" * 40)
     print("当前识别字符地图：")
     for row in char_matrix:
         print("".join(row))
+    if DEBUG_PRINT_BRIGHTNESS:
+        print("当前格子亮度(color_sum)：")
+        for row in brightness_matrix:
+            print(" ".join("%3d" % value for value in row))
     print("CLK_FPS %.2f LOOP_FPS %.2f LOOP %dus EXP %dus" %
           (fps, loop_fps, loop_us, exposure_us))
     print("TIME CAP %dus RECT %dus REC %dus DISP %dus" %
@@ -328,8 +589,12 @@ def main():
     grid_points = build_grid_points()
     rectified_grid_points = build_rectified_grid_points(IMG_WIDTH, IMG_HEIGHT)
     quad_corners = build_quad_corner_list() if USE_QUAD_CALIBRATION else None
+    raw_element_matrix = [["" for _ in range(GRID_COLS)] for _ in range(GRID_ROWS)]
     element_matrix = [["" for _ in range(GRID_COLS)] for _ in range(GRID_ROWS)]
+    pending_element_matrix = [["" for _ in range(GRID_COLS)] for _ in range(GRID_ROWS)]
+    pending_count_matrix = [[0 for _ in range(GRID_COLS)] for _ in range(GRID_ROWS)]
     char_matrix = [["" for _ in range(GRID_COLS)] for _ in range(GRID_ROWS)]
+    brightness_matrix = [[0 for _ in range(GRID_COLS)] for _ in range(GRID_ROWS)]
 
     clock = time.clock()
     last_print_ms = time.ticks_ms()
@@ -344,6 +609,11 @@ def main():
           (str(USE_QUAD_CALIBRATION), str(MAP_CORNERS)))
     print("SHOW_RECTIFIED_VIEW=%s USE_RECTIFIED_RECOGNITION=%s" %
           (str(SHOW_RECTIFIED_VIEW), str(USE_RECTIFIED_RECOGNITION)))
+    print("GRID_MARGIN=(%d,%d,%d,%d) STABILIZE_OUTPUT=%s STABLE_CHANGE_COUNT=%d" %
+          (GRID_LEFT_MARGIN, GRID_RIGHT_MARGIN, GRID_TOP_MARGIN, GRID_BOTTOM_MARGIN,
+           str(STABILIZE_OUTPUT), STABLE_CHANGE_COUNT))
+    print("DEBUG_DRAW_ROI=%s DEBUG_DRAW_GRID_LINES=%s DEBUG_DRAW_POINTS=%s" %
+          (str(DEBUG_DRAW_ROI), str(DEBUG_DRAW_GRID_LINES), str(DEBUG_DRAW_POINTS)))
     print("CAMERA_MANUAL_EXPOSURE=%s CAMERA_EXPOSURE_US=%d" %
           (str(CAMERA_MANUAL_EXPOSURE), CAMERA_EXPOSURE_US))
     print("CAMERA_LOCK_GAIN=%s CAMERA_LOCK_WHITEBAL=%s" %
@@ -386,7 +656,12 @@ def main():
                 recognition_points = grid_points
 
         rectify_done_us = time.ticks_us()
-        recognize_map(recognition_img, recognition_points, element_matrix, char_matrix)
+        recognize_map(
+            recognition_img, recognition_points,
+            raw_element_matrix, brightness_matrix)
+        update_stable_map(
+            raw_element_matrix, element_matrix,
+            pending_element_matrix, pending_count_matrix, char_matrix)
         recognize_done_us = time.ticks_us()
 
         # 识别仍走原图、但 IDE 要看拉正图时，在识别完成后才改变 framebuffer。
@@ -405,6 +680,9 @@ def main():
         if DEBUG_ENABLE and DEBUG_DRAW_ROI:
             draw_calibration_boundary(img, rectified=display_rectified)
 
+        if DEBUG_ENABLE and DEBUG_DRAW_GRID_LINES:
+            draw_grid_lines(img, rectified=display_rectified)
+
         if DEBUG_ENABLE and DEBUG_DRAW_POINTS:
             draw_recognition_points(img, element_matrix, display_points)
         display_done_us = time.ticks_us()
@@ -414,6 +692,7 @@ def main():
             loop_fps = 1000000.0 / loop_us if loop_us > 0 else 0.0
             print_map(
                 char_matrix,
+                brightness_matrix,
                 clock.fps(),
                 loop_fps,
                 loop_us,

@@ -385,6 +385,16 @@
           <GroupName>user_c</GroupName>
           <Files>
             <File>
+              <FileName>main.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>..\user\src\main.c</FilePath>
+            </File>
+            <File>
+              <FileName>isr.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>..\user\src\isr.c</FilePath>
+            </File>
+            <File>
               <FileName>drive_config.c</FileName>
               <FileType>1</FileType>
               <FilePath>..\user\src\drive_config.c</FilePath>
@@ -408,16 +418,6 @@
               <FileName>wheel_pid.c</FileName>
               <FileType>1</FileType>
               <FilePath>..\user\src\wheel_pid.c</FilePath>
-            </File>
-            <File>
-              <FileName>isr.c</FileName>
-              <FileType>1</FileType>
-              <FilePath>..\user\src\isr.c</FilePath>
-            </File>
-            <File>
-              <FileName>main.c</FileName>
-              <FileType>1</FileType>
-              <FilePath>..\user\src\main.c</FilePath>
             </File>
             <File>
               <FileName>app.c</FileName>
@@ -465,6 +465,11 @@
           <GroupName>user_h</GroupName>
           <Files>
             <File>
+              <FileName>isr.h</FileName>
+              <FileType>5</FileType>
+              <FilePath>..\user\inc\isr.h</FilePath>
+            </File>
+            <File>
               <FileName>drive_config.h</FileName>
               <FileType>5</FileType>
               <FilePath>..\user\inc\drive_config.h</FilePath>
@@ -488,11 +493,6 @@
               <FileName>wheel_pid.h</FileName>
               <FileType>5</FileType>
               <FilePath>..\user\inc\wheel_pid.h</FilePath>
-            </File>
-            <File>
-              <FileName>isr.h</FileName>
-              <FileType>5</FileType>
-              <FilePath>..\user\inc\isr.h</FilePath>
             </File>
             <File>
               <FileName>app.h</FileName>
