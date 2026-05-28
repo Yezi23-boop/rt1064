@@ -14,8 +14,9 @@
    - `DRIVE_ATTITUDE_LOOP_TEST_ENABLE`
    - `DRIVE_TRANSLATE_TEST_ENABLE`
 3. 正式比赛前只需要确认这三个宏为 `0`，测试逻辑不会误启动。
-4. 速度环测试仍在 20ms 控制周期内执行，保持采样周期准确。
+4. 速度环测试执行函数迁到 `drive_test.c`，但仍由 20ms 控制周期调用，保持采样周期准确。
 5. 平移测试仍在主循环中发命令，避免把非实时状态机塞进 PIT 中断。
+6. 单轮点动 `test_wheel()` 也迁到 `drive_test.c`，让测试入口集中。
 
 ## 设计
 
@@ -32,6 +33,9 @@ float drive_test_speed_loop_target_count(void);
 
 uint8 drive_test_attitude_loop_enabled(void);
 float drive_test_attitude_target_offset_deg(void);
+
+void drive_test_update_speed_loop_20ms(void);
+void test_wheel(wheel_enum wheel, float signed_pwm);
 ```
 
 职责划分：
@@ -40,8 +44,10 @@ float drive_test_attitude_target_offset_deg(void);
 - `drive_test_poll()` 在主循环中执行平移测试状态机。
 - `drive_test_speed_loop_enabled()` 和 `drive_test_speed_loop_target_count()` 提供速度环测试开关和目标值。
 - `drive_test_attitude_loop_enabled()` 和 `drive_test_attitude_target_offset_deg()` 提供姿态测试开关和目标偏移。
+- `drive_test_update_speed_loop_20ms()` 承载速度环测试执行体，但只由 20ms 控制链路调用。
+- `test_wheel()` 承载单轮点动测试，进入点动后让 20ms 闭环暂停接管 PWM。
 
-`drive_test` 只负责“测试是否启用、测试目标是多少、主循环级测试什么时候发命令”，不直接访问 `wheel_pid`、`control_status` 或底层 PWM。
+`drive_test` 只负责测试逻辑，不直接访问 `wheel_pid` 或 `control_status` 变量本体；需要实时状态时通过 `drive_control` 提供的受控接口操作。
 
 ### `drive_control` 调整
 
@@ -59,9 +65,22 @@ float drive_test_attitude_target_offset_deg(void);
 变化点：
 
 - `update_control_20ms()` 不再直接判断 `DRIVE_SPEED_LOOP_TEST_ENABLE`，改为调用 `drive_test_speed_loop_enabled()`。
-- `update_speed_loop_test_20ms()` 保留在 `drive_control.c`，但目标值改为参数传入。
+- `update_speed_loop_test_20ms()` 从 `drive_control.c` 移到 `drive_test.c`，并改名为 `drive_test_update_speed_loop_20ms()`。
 - yaw 稳定锁定后，不再直接判断 `DRIVE_ATTITUDE_LOOP_TEST_ENABLE`，改为调用 `drive_test_attitude_loop_enabled()`。
 - `drive_control.c` 不管理平移测试状态机。
+- `test_wheel()` 从 `drive_control.c` 移到 `drive_test.c`，`drive_control.c` 只保留点动状态的支持接口。
+
+新增给测试模块使用的受控接口：
+
+```c
+void drive_control_set_point_test_enabled(uint8 enabled);
+uint8 drive_control_point_test_enabled(void);
+
+void drive_control_clear_motion_outputs(void);
+void drive_control_set_all_wheel_target_count(float target_count);
+void drive_control_update_wheel_speed_pid(void);
+void drive_control_output_wheel_pwm_with_start_ramp(void);
+```
 
 这样可以把实时执行留在控制层，把测试开关和测试目标集中到 `drive_test`。
 
@@ -118,7 +137,8 @@ pwm_lf,pwm_rf,pwm_lb,pwm_rb
 - 不改变 Home 页面显示内容。
 - 不改变 VOFA 字段顺序。
 - 不拆 `screen.c`、`menu.c` 或 `vofa.c`。
-- 不把 `wheel_pid`、`control_status` 或 PWM 输出函数暴露给 `drive_test`。
+- 不把 `wheel_pid` 或 `control_status` 变量本体暴露给 `drive_test`。
+- 不改变 `test_wheel()` 的公开函数名，避免影响已有调车调用。
 
 ## 验证标准
 
@@ -127,11 +147,14 @@ pwm_lf,pwm_rf,pwm_lb,pwm_rb
 3. `DRIVE_TRANSLATE_TEST_ENABLE=1` 时，平移测试仍按启动安全窗口后启动，到时自动停车。
 4. `DRIVE_SPEED_LOOP_TEST_ENABLE=1` 时，速度环测试仍保持 20ms 周期输出同目标 count。
 5. `DRIVE_ATTITUDE_LOOP_TEST_ENABLE=1` 时，姿态测试仍在 yaw 稳定锁定后设置目标偏移。
-6. Home 和 VOFA 仍能观察原来的 encoder、yaw、target、feedback、pwm 调试量。
+6. `test_wheel()` 仍能进入点动模式，20ms 闭环不覆盖人工 PWM。
+7. Home 和 VOFA 仍能观察原来的 encoder、yaw、target、feedback、pwm 调试量。
 
 ## 已确认决策
 
 - 使用 `drive_test.c/h` 集中管理测试逻辑。
 - 不增加 `DRIVE_TEST_ENABLE` 总开关。
-- 速度环测试和姿态环测试的开关/目标放进 `drive_test`，实时执行仍由 `drive_control` 在 20ms 链路中完成。
+- 速度环测试、姿态环测试和平移测试归 `drive_test` 管理。
+- 单轮点动 `test_wheel()` 也归 `drive_test` 实现。
+- 实时测试仍由 `drive_control` 在 20ms 链路中触发。
 - 平移测试从 `main.c` 挪到 `drive_test_poll()`。

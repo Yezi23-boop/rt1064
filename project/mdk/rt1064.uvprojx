@@ -395,14 +395,24 @@
               <FilePath>..\user\src\isr.c</FilePath>
             </File>
             <File>
-              <FileName>drive_config.c</FileName>
-              <FileType>1</FileType>
-              <FilePath>..\user\src\drive_config.c</FilePath>
-            </File>
-            <File>
               <FileName>drive_control.c</FileName>
               <FileType>1</FileType>
               <FilePath>..\user\src\drive_control.c</FilePath>
+            </File>
+            <File>
+              <FileName>drive_imu.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>..\user\src\drive_imu.c</FilePath>
+            </File>
+            <File>
+              <FileName>drive_output.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>..\user\src\drive_output.c</FilePath>
+            </File>
+            <File>
+              <FileName>drive_test.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>..\user\src\drive_test.c</FilePath>
             </File>
             <File>
               <FileName>base_io.c</FileName>
@@ -483,6 +493,21 @@
               <FileName>drive_control.h</FileName>
               <FileType>5</FileType>
               <FilePath>..\user\inc\drive_control.h</FilePath>
+            </File>
+            <File>
+              <FileName>drive_imu.h</FileName>
+              <FileType>5</FileType>
+              <FilePath>..\user\inc\drive_imu.h</FilePath>
+            </File>
+            <File>
+              <FileName>drive_output.h</FileName>
+              <FileType>5</FileType>
+              <FilePath>..\user\inc\drive_output.h</FilePath>
+            </File>
+            <File>
+              <FileName>drive_test.h</FileName>
+              <FileType>5</FileType>
+              <FilePath>..\user\inc\drive_test.h</FilePath>
             </File>
             <File>
               <FileName>base_io.h</FileName>
