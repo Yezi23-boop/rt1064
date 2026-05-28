@@ -4,6 +4,7 @@
 #include "screen.h"
 #include "menu.h"
 #include "vofa.h"
+#include "drive_test.h"
 
 void app_init(void)
 {
@@ -12,6 +13,7 @@ void app_init(void)
     settings_init();
     screen_init();
     vofa_init();
+    drive_test_init();
     menu_init();
 }
 
@@ -19,4 +21,5 @@ void app_poll(void)
 {
     menu_poll();
     vofa_service();
+    drive_test_poll();
 }

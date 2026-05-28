@@ -34,10 +34,6 @@
 #define IMU_YAW_DIR_SIGN (-1.0f)
 /** IMU yaw 零点偏置，单位 degree；只在需要让绝对朝向对齐车头时调整。 */
 #define IMU_YAW_ZERO_OFFSET_DEG (0.0f)
-/** 上电后用于锁定姿态目标的 yaw 采样次数；调试阶段取 1 次，避免平均值与瞬时值产生初始误差。 */
-#define IMU_YAW_ZERO_SAMPLE_COUNT (1)
-/** 上电 yaw 零点采样间隔，单位 ms；单次采样时不额外等待。 */
-#define IMU_YAW_ZERO_SAMPLE_INTERVAL_MS (0)
 /** 上电后等待 IMU yaw 稳定的时间，单位 ms；该时间同时作为电机非零 PWM 输出的安全门槛。 */
 #define IMU_YAW_STARTUP_STABLE_DELAY_MS (6000)
 
@@ -47,27 +43,6 @@
 #define WHEEL_PID_KI (0.3f)
 /** 四轮增量式速度 PID 微分初值；第一版关闭微分。 */
 #define WHEEL_PID_KD (0.0f)
-
-/** 速度环闭环测试开关；置 1 后 20ms 控制只给四轮同一个目标 count，不走 IMU/麦轮混控。 */
-#define DRIVE_SPEED_LOOP_TEST_ENABLE (0)
-/** 速度环闭环测试目标，单位为 encoder count/20ms；可改成负值检查反馈方向。 */
-#define DRIVE_SPEED_LOOP_TEST_TARGET_COUNT (100.0f)
-
-/** 原地姿态角闭环测试开关；置 1 后上电只给目标 yaw 偏移，不给 vx/vy 平移。 */
-#define DRIVE_ATTITUDE_LOOP_TEST_ENABLE (0)
-/** 原地姿态角闭环测试目标偏移，单位 degree；0 表示锁住上电当前 yaw，手拨后自动回正。 */
-#define DRIVE_ATTITUDE_LOOP_TEST_TARGET_OFFSET_DEG (0.0f)
-
-/** 平移保持姿态测试开关；置 1 后主循环会在启动安全窗口后自动发一次平移命令。 */
-#define DRIVE_TRANSLATE_TEST_ENABLE (1)
-/** 平移测试启动时间，单位 ms；默认等同上电 yaw 稳定/电机输出安全窗口。 */
-#define DRIVE_TRANSLATE_TEST_START_MS (IMU_YAW_STARTUP_STABLE_DELAY_MS)
-/** 平移测试持续时间，单位 ms；到时自动 stop_motion()。 */
-#define DRIVE_TRANSLATE_TEST_DURATION_MS (3000u)
-/** 平移测试方向；可改为 MOTION_BACKWARD/MOTION_LEFT/MOTION_RIGHT 分别测试四个基本方向。 */
-#define DRIVE_TRANSLATE_TEST_COMMAND (MOTION_LEFT_BACK)
-/** 平移测试速度幅值，范围 [0, 1]，先用低速观察姿态保持。 */
-#define DRIVE_TRANSLATE_TEST_SPEED (1.0f)
 
 /** 起步 PWM 阶梯限幅开关；置 1 后速度环输出会先从较低 PWM 窗口逐步放开。 */
 #define DRIVE_START_PWM_RAMP_ENABLE (1)
