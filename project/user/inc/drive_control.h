@@ -75,14 +75,6 @@ void set_motion_target(float vx, float vy, float yaw_target);
 void stop_motion(void);
 
 /**
- * @brief 对单个车轮施加低 PWM 点动输出以校验接线方向。
- * @param[in] wheel 待点动的车轮。
- * @param[in] signed_pwm 点动 PWM，正负号表示期望轮速方向。
- * @note 进入点动模式后 20ms 闭环暂停接管 PWM；调用正常控制接口或 `stop_motion()` 退出。
- */
-void test_wheel(wheel_enum wheel, float signed_pwm);
-
-/**
  * @brief 获取底盘控制状态快照的只读地址。
  * @return 内部状态地址，调用方不得修改其内容。
  * @note 状态在中断中更新，主循环读取时用于显示和调试，不保证跨字段原子快照。
