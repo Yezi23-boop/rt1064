@@ -364,7 +364,7 @@ static uint16 count_visible_actions_to_step(const solve_result_struct *result, u
     return count;
 }
 
-void screen_draw_home(const char *const *items, uint8 item_count, uint8 cursor, uint8 current_map, run_mode_enum mode, save_state_enum save_state, const float encoder_count[WHEEL_COUNT])
+void screen_draw_home(const char *const *items, uint8 item_count, uint8 cursor, uint8 current_map, run_mode_enum mode, save_state_enum save_state, const float encoder_count[WHEEL_COUNT], float imu_roll, float imu_pitch, float imu_yaw, float target_yaw, float yaw_error, float vz, float vzt)
 {
     char line[40];
     uint8 i;
@@ -382,10 +382,27 @@ void screen_draw_home(const char *const *items, uint8 item_count, uint8 cursor, 
     show_line(LINE_H * 6u, line);
     snprintf(line, sizeof(line), "Save: %s", save_state_name(save_state));
     show_line(LINE_H * 7u, line);
-    snprintf(line, sizeof(line), "Enc LF:%d LB:%d", (int16)encoder_count[WHEEL_LF], (int16)encoder_count[WHEEL_LB]);
+    snprintf(line, sizeof(line), "Enc LF:%d RF:%d", (int16)encoder_count[WHEEL_LF], (int16)encoder_count[WHEEL_RF]);
     show_line(LINE_H * 8u, line);
-    snprintf(line, sizeof(line), "Enc RF:%d RB:%d", (int16)encoder_count[WHEEL_RF], (int16)encoder_count[WHEEL_RB]);
+    snprintf(line, sizeof(line), "Enc LB:%d RB:%d", (int16)encoder_count[WHEEL_LB], (int16)encoder_count[WHEEL_RB]);
     show_line(LINE_H * 9u, line);
+    snprintf(line, sizeof(line), "IMU R:%d P:%d", (int16)imu_roll, (int16)imu_pitch);
+    show_line(LINE_H * 10u, line);
+    snprintf(line, sizeof(line), "IMU Y:%d", (int16)imu_yaw);
+    show_line(LINE_H * 11u, line);
+    clear_line(LINE_H * 12u);
+    ips200_show_string(0, LINE_H * 12u, "Yaw T:");
+    ips200_show_float(48, LINE_H * 12u, (double)target_yaw, 3, 1);
+    ips200_show_string(96, LINE_H * 12u, " C:");
+    ips200_show_float(120, LINE_H * 12u, (double)imu_yaw, 3, 1);
+
+    clear_line(LINE_H * 13u);
+    ips200_show_string(0, LINE_H * 13u, "E:");
+    ips200_show_float(16, LINE_H * 13u, (double)yaw_error, 3, 2);
+    ips200_show_string(72, LINE_H * 13u, " Z:");
+    ips200_show_float(96, LINE_H * 13u, (double)vz, 1, 2);
+    ips200_show_string(136, LINE_H * 13u, " T:");
+    ips200_show_float(160, LINE_H * 13u, (double)vzt, 1, 2);
     show_hint("K1/K2 Move  K3 Enter", "K4 Save  K4L Home");
 }
 

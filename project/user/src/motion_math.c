@@ -50,6 +50,14 @@ float attitude_pd_update(attitude_pd_struct *pid, float target_yaw, float curren
     float output;
 
     error = shortest_angle_error(target_yaw, current_yaw);
+    /* 硬死区内认为车头已经到位，直接清掉历史误差。
+     * 这样不会因为 0.x degree 的 IMU 抖动或旧 D 项让姿态环反复给轮子小输出。 */
+    if((error >= -YAW_DEADBAND_DEG) && (error <= YAW_DEADBAND_DEG))
+    {
+        pid->last_error = 0.0f;
+        return 0.0f;
+    }
+
     derivative = (error - pid->last_error) / pid->dt_s;
     output = pid->kp * error + pid->kd * derivative;
     pid->last_error = error;
@@ -115,13 +123,13 @@ void command_to_velocity(motion_command_enum command, float move_speed, float tu
     }
 }
 
-void mecanum_mix(float vx, float vy, float vz, float wheel_norm[WHEEL_COUNT])
+void mecanum_mix(float vx, float vy, float vz, float vzt, float wheel_norm[WHEEL_COUNT])
 {
-    // 车体坐标约定：vx 向右、vy 向前、vz 逆时针；四轮顺序固定为 LF/LB/RF/RB。
-    wheel_norm[WHEEL_LF] = vy - vx + vz;
-    wheel_norm[WHEEL_LB] = vy + vx + vz;
-    wheel_norm[WHEEL_RF] = vy + vx - vz;
-    wheel_norm[WHEEL_RB] = vy - vx - vz;
+    // 车体坐标约定：vx 向右、vy 向前、vz/vzt 逆时针；四轮顺序固定为 LF/LB/RF/RB。
+    wheel_norm[WHEEL_LF] = vy + vx - vz - vzt;
+    wheel_norm[WHEEL_LB] = vy - vx - vz - vzt;
+    wheel_norm[WHEEL_RF] = vy - vx + vz + vzt;
+    wheel_norm[WHEEL_RB] = vy + vx + vz + vzt;
 
     normalize_wheels(wheel_norm);
 }

@@ -12,16 +12,11 @@
 uint8 io_init(void);
 
 /**
- * @brief 读取一次 IMU660RC 内置四元数并刷新欧拉角全局量。
- * @note 仅由 PIT_CH0 的 5ms 中断路径调用；GPIO IMU 中断不得重复读取。
+ * @brief 设置底层电机 PWM 输出是否允许非零值。
+ * @param[in] enabled 0 表示强制非零 PWM 为 0，非 0 表示允许正常输出。
+ * @note 用于上电安全窗口；即使上层误发运动命令，窗口结束前电机仍不会动作。
  */
-void read_quaternion(void);
-
-/**
- * @brief 获取驱动已经解算出的当前航向角。
- * @return `imu660rc_yaw`，单位为 degree。
- */
-float read_yaw(void);
+void set_motor_output_enabled(uint8 enabled);
 
 /**
  * @brief 读取并清零四轮编码器增量。

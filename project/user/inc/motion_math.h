@@ -4,7 +4,7 @@
 #include "zf_common_typedef.h"
 #include "drive_config.h"
 
-/** 姿态 PD 状态；仅处理 yaw 误差到归一化旋转分量 vz 的转换。 */
+/** 姿态 PD 状态；仅处理 yaw 误差到归一化旋转修正分量 vzt 的转换。 */
 typedef struct
 {
     float kp;                            /**< yaw 比例系数。 */
@@ -42,7 +42,7 @@ float shortest_angle_error(float target_yaw, float current_yaw);
  * @param[in,out] pid 姿态 PD 状态。
  * @param[in] target_yaw 目标航向角，单位为 degree。
  * @param[in] current_yaw 当前航向角，单位为 degree。
- * @return 已限幅到 [-MAX_VZ, MAX_VZ] 的归一化 vz。
+ * @return 已限幅到 [-MAX_VZ, MAX_VZ] 的归一化姿态修正分量 vzt。
  */
 float attitude_pd_update(attitude_pd_struct *pid, float target_yaw, float current_yaw);
 
@@ -70,10 +70,11 @@ void command_to_velocity(motion_command_enum command, float move_speed, float tu
  * @brief 按 X 型麦轮公式混控并保持四轮输出比例。
  * @param[in] vx 车体右向归一化平移分量。
  * @param[in] vy 车体前向归一化平移分量。
- * @param[in] vz 逆时针归一化旋转分量。
+ * @param[in] vz 上层命令给出的逆时针归一化旋转分量。
+ * @param[in] vzt 姿态环给出的逆时针归一化旋转修正分量。
  * @param[out] wheel_norm 四轮归一化输出，轮序为 LF/LB/RF/RB。
  */
-void mecanum_mix(float vx, float vy, float vz, float wheel_norm[WHEEL_COUNT]);
+void mecanum_mix(float vx, float vy, float vz, float vzt, float wheel_norm[WHEEL_COUNT]);
 
 /**
  * @brief 将四轮混控结果等比缩放到 [-1, 1]。

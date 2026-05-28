@@ -11,12 +11,6 @@ void CSI_IRQHandler(void)
 
 void PIT_IRQHandler(void)
 {
-    if(pit_flag_get(PIT_CH0))
-    {
-        pit_flag_clear(PIT_CH0);
-        update_imu_5ms();        // 5ms 只刷新 IMU/yaw，控制输出留给 20ms 周期。
-    }
-
     if(pit_flag_get(PIT_CH1))
     {
         pit_flag_clear(PIT_CH1);
@@ -147,7 +141,8 @@ void GPIO3_Combined_0_15_IRQHandler(void)
 {
     if(exti_flag_get(IMU660RC_INT2_PIN))
     {
-        exti_flag_clear(IMU660RC_INT2_PIN); // IMU 姿态读取由 PIT_CH0 统一触发，这里只清外部中断标志。
+        exti_flag_clear(IMU660RC_INT2_PIN);
+        imu660rc_callback();      // 恢复 IMU660RC 驱动原始 INT2 中断触发读取四元数。
     }
     if(exti_flag_get(D4))
     {

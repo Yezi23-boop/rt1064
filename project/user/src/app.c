@@ -3,6 +3,7 @@
 #include "timebase.h"
 #include "screen.h"
 #include "menu.h"
+#include "vofa.h"
 
 void app_init(void)
 {
@@ -10,10 +11,12 @@ void app_init(void)
     timebase_init();
     settings_init();
     screen_init();
+    vofa_init();
     menu_init();
 }
 
 void app_poll(void)
 {
     menu_poll();
+    vofa_service();
 }

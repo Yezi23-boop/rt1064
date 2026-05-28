@@ -7,30 +7,28 @@
 /** 底盘闭环状态快照，轮数组顺序固定为 LF/LB/RF/RB。 */
 typedef struct
 {
-    float target_yaw;                   /**< 姿态环目标航向角，单位为 degree。 */
-    float current_yaw;                  /**< IMU660RC 当前航向角，单位为 degree。 */
-    float vx;                           /**< 车体右向平移分量，范围 [-1, 1]。 */
-    float vy;                           /**< 车体前向平移分量，范围 [-1, 1]。 */
-    float vz;                           /**< 姿态 PD 生成的逆时针旋转分量。 */
-    float wheel_norm[WHEEL_COUNT];          /**< 混控后的归一化轮速。 */
-    float wheel_target_count[WHEEL_COUNT];  /**< 轮速目标，单位 count/20ms。 */
-    float wheel_feedback_count[WHEEL_COUNT];/**< 编码器反馈，单位 count/20ms。 */
-    float signed_pwm[WHEEL_COUNT];          /**< 四轮 signed PWM 输出。 */
+    float target_yaw;                        /**< 姿态环目标航向角，单位为 degree。 */
+    float current_roll;                      /**< IMU660RC 当前横滚角，单位为 degree。 */
+    float current_pitch;                     /**< IMU660RC 当前俯仰角，单位为 degree。 */
+    float current_yaw;                       /**< IMU660RC 当前航向角，单位为 degree。 */
+    float yaw_error;                         /**< 目标 yaw 减当前 yaw 的最短角度差，单位为 degree。 */
+    float vx;                                /**< 车体右向平移分量，范围 [-1, 1]。 */
+    float vy;                                /**< 车体前向平移分量，范围 [-1, 1]。 */
+    float vz;                                /**< 上层命令给出的逆时针旋转分量，当前离散转向仍转成目标 yaw。 */
+    float vzt;                               /**< 姿态 PD 生成的逆时针旋转修正分量。 */
+    float wheel_norm[WHEEL_COUNT];           /**< 混控后的归一化轮速。 */
+    float wheel_target_count[WHEEL_COUNT];   /**< 轮速目标，单位 count/20ms。 */
+    float wheel_feedback_count[WHEEL_COUNT]; /**< 编码器反馈，单位 count/20ms。 */
+    float signed_pwm[WHEEL_COUNT];           /**< 四轮 signed PWM 输出。 */
 } control_status_struct;
 
 /**
- * @brief 初始化底盘硬件、姿态环、四轮 PID 和两级 PIT 周期任务。
- * @return 0 表示 IMU 可用或当前未启用 IMU；非 0 仅表示 IMU 初始化失败。
+ * @brief 初始化底盘硬件、姿态环、四轮 PID 和 20ms 控制周期任务。
+ * @return 0 表示 IMU 可用；非 0 仅表示 IMU 初始化失败。
  * @note 应在主程序初始化阶段调用一次。
  *       底盘编码器、电机和非姿态控制不依赖 IMU 初始化结果。
  */
 uint8 control_init(void);
-
-/**
- * @brief 执行 5ms IMU 四元数更新任务。
- * @note 仅由 PIT_CH0 ISR 调用；该入口是第一版 yaw 更新的唯一数据路径。
- */
-void update_imu_5ms(void);
 
 /**
  * @brief 执行 20ms 姿态环、麦轮混控和四轮速度闭环。
@@ -42,7 +40,7 @@ void update_control_20ms(void);
  * @brief 设置平移分量，同时保持当前目标航向角。
  * @param[in] vx 车体右向分量，输入会限幅到 [-1, 1]。
  * @param[in] vy 车体前向分量，输入会限幅到 [-1, 1]。
- * @note 调用后退出单轮点动模式。
+ * @note 调用后退出单轮点动模式，并清除上层主动旋转分量 `vz`。
  */
 void set_motion(float vx, float vy);
 
@@ -51,7 +49,7 @@ void set_motion(float vx, float vy);
  * @param[in] command 前后左右、斜向、离散转向或停止命令。
  * @param[in] move_speed 平移幅值，约定范围为 [0, 1]。
  * @param[in] turn_speed 转向步进比例，限幅到 [0, 1] 后乘以 `TURN_STEP_DEG`。
- * @note 左/右转命令每调用一次只追加一次目标 yaw 步进，实际旋转仍由姿态 PD 完成。
+ * @note 左/右转命令会写入主动旋转分量 `vz`，并同步追加一次目标 yaw 步进供姿态环修正。
  */
 void set_motion_command(motion_command_enum command, float move_speed, float turn_speed);
 
@@ -72,7 +70,7 @@ void set_motion_target(float vx, float vy, float yaw_target);
 
 /**
  * @brief 稳定停止底盘输出。
- * @note 函数将目标 yaw 更新为当前 yaw，并重置姿态/轮速状态，防止下一周期因旧目标重新转动。
+ * @note 函数将目标 yaw 更新为当前 yaw，并直接关闭电机输出，防止下一周期因旧目标重新转动。
  */
 void stop_motion(void);
 

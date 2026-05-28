@@ -39,6 +39,7 @@
 #include "zf_driver_gpio.h"
 #include "zf_driver_pwm.h"
 #include "zf_driver_uart.h"
+#include "zf_device_wireless_uart.h"
 
 #include "zf_common_debug.h"
 
@@ -315,7 +316,7 @@ PUTCHAR_PROTOTYPE
 {
     if(zf_debug_init_flag)
     {
-        uart_write_byte(DEBUG_UART_INDEX, (ch & 0xFF));
+        wireless_uart_send_byte((uint8)(ch & 0xFF));
     }
     return ch;
 }
@@ -332,7 +333,7 @@ GETCHAR_PROTOTYPE
 #else
 PUTCHAR_PROTOTYPE
 {
-    uart_write_buffer(DEBUG_UART_INDEX, buf, (char)size);
+    wireless_uart_send_buffer(buf, (uint32)size);
     return size;
 }
 
@@ -354,7 +355,7 @@ int32_t fputc (int32_t ch, FILE* f)
 {
     if(zf_debug_init_flag)
     {
-        uart_write_byte(DEBUG_UART_INDEX, (ch & 0xFF));
+        wireless_uart_send_byte((uint8)(ch & 0xFF));
     }
     return ch;
 }
