@@ -485,11 +485,6 @@
               <FilePath>..\user\src\vofa.c</FilePath>
             </File>
             <File>
-              <FileName>uart_map.c</FileName>
-              <FileType>1</FileType>
-              <FilePath>..\user\src\uart_map.c</FilePath>
-            </File>
-            <File>
               <FileName>openart_uart.c</FileName>
               <FileType>1</FileType>
               <FilePath>..\user\src\openart_uart.c</FilePath>
@@ -598,11 +593,6 @@
               <FileName>vofa.h</FileName>
               <FileType>5</FileType>
               <FilePath>..\user\inc\vofa.h</FilePath>
-            </File>
-            <File>
-              <FileName>uart_map.h</FileName>
-              <FileType>5</FileType>
-              <FilePath>..\user\inc\uart_map.h</FilePath>
             </File>
             <File>
               <FileName>openart_uart.h</FileName>
