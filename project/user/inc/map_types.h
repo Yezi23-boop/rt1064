@@ -21,21 +21,15 @@
 #define MAX_TOTAL_ACTIONS       (1024)
 /** 屏幕/执行层路径点上限，单位为格点。 */
 #define MAX_WAYPOINTS           (256)
-/** RT 内部地图格式：使用 C/B/T 等字符描述元素。 */
-#define MAP_FORMAT_RT           (0)
-/** 逐飞/XSB 风格地图格式：`.` 表示目标点，`$` 表示箱子。 */
-#define MAP_FORMAT_SEEKFREE     (1)
-
 /**
  * @brief 一张离线地图的只读来源。
  *
- * 地图内容在固件中以常量表保存，Flash 菜单只保存地图编号和模式，
- * 不保存整张地图数据。
+ * 地图统一使用 RT 字符：# 墙，. 空地，B 箱子，T 目标点，C 小车，X 炸弹/障碍。
+ * 地图内容在固件中以常量表保存，Flash 菜单只保存地图编号和模式，不保存整张地图数据。
  */
 typedef struct
 {
     const char *name;                   /**< 地图显示名，用于串口或调试输出。 */
-    uint8 format;                       /**< 地图字符格式，取值为 `MAP_FORMAT_RT` 或 `MAP_FORMAT_SEEKFREE`。 */
     const char *rows[MAP_ROWS];         /**< 12 行地图文本，每行至少包含 `MAP_COLS` 个字符。 */
 } map_source_struct;
 

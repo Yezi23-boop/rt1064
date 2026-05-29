@@ -1,16 +1,13 @@
 import sensor
 import time
-from pyb import UART
+from machine import UART
 
 # ==================== UART 地图发送配置 ===================
-# UART 地图发送开关；开启后每帧稳定地图通过 UART 发送到 RT1064。
 UART_MAP_SEND_ENABLE = True  # True=开启 UART 地图发送；False=关闭
-UART_MAP_SEND_INDEX = 5      # UART 编号，与 RT1064 接收端对应（OpenART 可用 UART(5) 等）
+UART_MAP_SEND_INDEX = 12     # UART 编号，OpenART Plus 用户串口使用 UART(12)
 UART_MAP_SEND_BAUD = 115200  # 波特率，与 RT1064 接收端一致
-# 发送周期限制，单位 ms；避免每帧都发导致 UART 拥塞。
-UART_MAP_SEND_PERIOD_MS = 200
-# 发送前等待上一帧发送完成的超时，单位 ms。
-UART_MAP_SEND_TIMEOUT_MS = 50
+UART_MAP_SEND_PERIOD_MS = 200  # 发送周期，单位 ms
+UART_MAP_DRAIN_RX = True     # True=清空 MCU 回包，避免 ACK 堆满 OpenART UART 接收缓冲
 
 # ==================== USER_SWITCHES：现场最常改 ===================
 # 调试开关：正式跑帧率时建议 DEBUG_ENABLE=False。
@@ -56,10 +53,10 @@ GRID_ROWS = 12
 # MAP_CORNERS 表示屏幕地图外边界，用于四角透视标定。
 # 四点按 左上、右上、右下、左下 填写，指向完整 16x12 地图外边界。
 MAP_CORNERS = (
-    (18, 11),
-    (307, 18),
-    (305, 223),
-    (16, 227),
+    (28, 12),
+    (312, 14),
+    (310, 218),
+    (28, 219),
 )
 
 # 拉正图上的有效采样区域边距。四角已对齐但整张网格略偏时，只调这里。
@@ -331,9 +328,9 @@ def normalize_color(r, g, b):
 def is_space_color(rn, gn, bn, color_sum):
     return (
         color_sum > MIN_SPACE_SUM and
-        bn > 115 and
-        bn > rn + 45 and
-        bn > gn + 30
+        bn > 135 and            # 提高蓝色门槛，减少墙面误判
+        bn > rn + 55 and        # 蓝色比红色差距加大
+        bn > gn + 40            # 蓝色比绿色差距加大
     )
 
 
@@ -596,6 +593,47 @@ def print_map(char_matrix, fps, loop_fps, loop_us,
           (snapshot_us, rectify_us, recognize_us, display_us))
 
 
+def init_uart_map():
+    if not UART_MAP_SEND_ENABLE:
+        print("UART_MAP_SEND_DISABLED")
+        return None
+    try:
+        uart = UART(UART_MAP_SEND_INDEX, baudrate=UART_MAP_SEND_BAUD)
+        uart.init(UART_MAP_SEND_BAUD, bits=8, parity=None, stop=1)
+        print("UART_MAP_SEND_READY index=%d baud=%d" % (UART_MAP_SEND_INDEX, UART_MAP_SEND_BAUD))
+        return uart
+    except Exception as exc:
+        print("UART_MAP_SEND_INIT_FAILED:", repr(exc))
+        return None
+
+
+def send_map_uart(uart, char_matrix):
+    if uart is None:
+        return
+    try:
+        drain_map_uart_rx(uart)
+        uart.write("MAP_BEGIN\n")
+        for row in char_matrix:
+            line = "".join(row) + "\n"
+            uart.write(line)
+        uart.write("MAP_END\n")
+        drain_map_uart_rx(uart)
+    except Exception as exc:
+        print("UART_MAP_SEND_ERROR:", repr(exc))
+
+
+def drain_map_uart_rx(uart):
+    if not UART_MAP_DRAIN_RX or uart is None:
+        return
+    try:
+        count = uart.any()
+        while count:
+            uart.read(count)
+            count = uart.any()
+    except Exception:
+        pass
+
+
 def init_camera():
     sensor.reset()
     sensor.set_pixformat(sensor.RGB565)
@@ -623,42 +661,9 @@ def init_camera():
     sensor.skip_frames(time=500)
 
 
-def init_uart_map():
-    """初始化 UART 地图发送通道。返回 UART 对象，关闭时返回 None。"""
-    if not UART_MAP_SEND_ENABLE:
-        return None
-    try:
-        uart = UART(UART_MAP_SEND_INDEX, UART_MAP_SEND_BAUD)
-        uart.init(UART_MAP_SEND_BAUD, bits=8, parity=None, stop=1)
-        print("UART_MAP_SEND_READY index=%d baud=%d" % (UART_MAP_SEND_INDEX, UART_MAP_SEND_BAUD))
-        return uart
-    except Exception as exc:
-        print("UART_MAP_SEND_INIT_FAILED:", repr(exc))
-        return None
-
-
-def send_map_uart(uart, char_matrix):
-    """通过 UART 发送 16x12 字符地图到 RT1064。
-    协议格式：
-        MAP_BEGIN\\n
-        XXXXXXXXXXXXXXXX\\n   （12 行，每行 16 字符，字符集：#.TBXC-）
-        MAP_END\\n
-    """
-    if uart is None:
-        return
-    try:
-        uart.write("MAP_BEGIN\n")
-        for row in char_matrix:
-            line = "".join(row) + "\n"
-            uart.write(line)
-        uart.write("MAP_END\n")
-    except Exception as exc:
-        print("UART_MAP_SEND_ERROR:", repr(exc))
-
-
 def main():
     init_camera()
-    uart_map = init_uart_map()
+    map_uart = init_uart_map()
     # 两套点阵均只在启动时生成一次：原图投影点阵与拉正后的规则点阵。
     grid_points = build_grid_points()
     if grid_points is None:
@@ -690,8 +695,6 @@ def main():
           (str(CAMERA_MANUAL_EXPOSURE), CAMERA_EXPOSURE_US))
     print("CAMERA_LOCK_GAIN=%s CAMERA_LOCK_WHITEBAL=%s" %
           (str(CAMERA_LOCK_GAIN), str(CAMERA_LOCK_WHITEBAL)))
-    print("UART_MAP_SEND=%s UART_INDEX=%d UART_BAUD=%d UART_PERIOD=%dms" %
-          (str(UART_MAP_SEND_ENABLE), UART_MAP_SEND_INDEX, UART_MAP_SEND_BAUD, UART_MAP_SEND_PERIOD_MS))
 
     rectified_view_active = SHOW_RECTIFIED_VIEW
     rectified_recognition_active = USE_RECTIFIED_RECOGNITION
@@ -732,11 +735,6 @@ def main():
             pending_element_matrix, pending_count_matrix, char_matrix)
         recognize_done_us = time.ticks_us()
 
-        # UART 地图发送：按周期将稳定后的字符地图发到 RT1064。
-        if uart_map is not None and time.ticks_diff(now_ms, last_uart_send_ms) >= UART_MAP_SEND_PERIOD_MS:
-            send_map_uart(uart_map, char_matrix)
-            last_uart_send_ms = now_ms
-
         # 识别仍走原图、但 IDE 要看拉正图时，在识别完成后才改变 framebuffer。
         # 因此显示操作不会反过来污染本帧的取色结果。
         if (rectified_view_active and not rectified_view_failed and
@@ -774,6 +772,10 @@ def main():
                 time.ticks_diff(display_done_us, recognize_done_us),
                 sensor.get_exposure_us())
             last_print_ms = now_ms
+
+        if UART_MAP_SEND_ENABLE and map_uart is not None and time.ticks_diff(now_ms, last_uart_send_ms) >= UART_MAP_SEND_PERIOD_MS:
+            send_map_uart(map_uart, char_matrix)
+            last_uart_send_ms = now_ms
 
 
 main()

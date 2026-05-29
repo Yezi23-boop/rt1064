@@ -198,7 +198,7 @@ static void parse_source(const map_source_struct *source, char grid[MAP_ROWS][MA
             value = source->rows[row][col];
             grid[row][col] = '.';
 
-            if('#' == value)
+            if(('#' == value) || ('X' == value))
             {
                 grid[row][col] = '#';
             }
@@ -206,20 +206,13 @@ static void parse_source(const map_source_struct *source, char grid[MAP_ROWS][MA
             {
                 *car = cell_index_local(row, col);
             }
-            else if(('B' == value) || ('$' == value))
+            else if('B' == value)
             {
                 add_cell(boxes, box_count, row, col);
             }
-            else if(('T' == value) || ('.' == value))
+            else if('T' == value)
             {
-                if((MAP_FORMAT_SEEKFREE == source->format) || ('T' == value))
-                {
-                    add_cell(targets, target_count, row, col);
-                }
-            }
-            else if('*' == value)
-            {
-                grid[row][col] = '#';
+                add_cell(targets, target_count, row, col);
             }
         }
     }
@@ -471,9 +464,11 @@ static void draw_home_status_labels(void)
 
     ips200_show_string(0, LINE_H * 14, "X:");
     ips200_show_string(96, LINE_H * 14, " Y:");
+
+    ips200_show_string(0, LINE_H * 15, "ART:");
 }
 
-static void draw_home_status_values(const float encoder_count[WHEEL_COUNT], float imu_roll, float imu_pitch, float imu_yaw, float target_yaw, float yaw_error, float vz, float vzt, float pose_x_cm, float pose_y_cm)
+static void draw_home_status_values(const float encoder_count[WHEEL_COUNT], float imu_roll, float imu_pitch, float imu_yaw, float target_yaw, float yaw_error, float vz, float vzt, float pose_x_cm, float pose_y_cm, uint32 openart_frame_count)
 {
     ips200_show_int(56, LINE_H * 8, (int16)encoder_count[WHEEL_LF], 5);
     ips200_show_int(136, LINE_H * 8, (int16)encoder_count[WHEEL_RF], 5);
@@ -495,9 +490,11 @@ static void draw_home_status_values(const float encoder_count[WHEEL_COUNT], floa
 
     ips200_show_float(16, LINE_H * 14, (double)pose_x_cm, 4, 1);
     ips200_show_float(120, LINE_H * 14, (double)pose_y_cm, 4, 1);
+
+    ips200_show_uint(32, LINE_H * 15, openart_frame_count, 5);
 }
 
-void screen_draw_home(const char *const *items, uint8 item_count, uint8 cursor, uint8 current_map, run_mode_enum mode, save_state_enum save_state, const float encoder_count[WHEEL_COUNT], float imu_roll, float imu_pitch, float imu_yaw, float target_yaw, float yaw_error, float vz, float vzt, float pose_x_cm, float pose_y_cm)
+void screen_draw_home(const char *const *items, uint8 item_count, uint8 cursor, uint8 current_map, run_mode_enum mode, save_state_enum save_state, const float encoder_count[WHEEL_COUNT], float imu_roll, float imu_pitch, float imu_yaw, float target_yaw, float yaw_error, float vz, float vzt, float pose_x_cm, float pose_y_cm, uint32 openart_frame_count)
 {
     uint8 i;
 
@@ -515,14 +512,14 @@ void screen_draw_home(const char *const *items, uint8 item_count, uint8 cursor, 
     ips200_show_string(0, LINE_H * 7, "Save: ");
     show_text_value(48, LINE_H * 7, save_state_name(save_state), 12);
     draw_home_status_labels();
-    draw_home_status_values(encoder_count, imu_roll, imu_pitch, imu_yaw, target_yaw, yaw_error, vz, vzt, pose_x_cm, pose_y_cm);
+    draw_home_status_values(encoder_count, imu_roll, imu_pitch, imu_yaw, target_yaw, yaw_error, vz, vzt, pose_x_cm, pose_y_cm, openart_frame_count);
     show_hint("K1/K2 Move  K3 Enter", "K4 Save  K4L Home");
 }
 
-void screen_draw_home_status(const float encoder_count[WHEEL_COUNT], float imu_roll, float imu_pitch, float imu_yaw, float target_yaw, float yaw_error, float vz, float vzt, float pose_x_cm, float pose_y_cm)
+void screen_draw_home_status(const float encoder_count[WHEEL_COUNT], float imu_roll, float imu_pitch, float imu_yaw, float target_yaw, float yaw_error, float vz, float vzt, float pose_x_cm, float pose_y_cm, uint32 openart_frame_count)
 {
     begin_page(SCREEN_PAGE_HOME);
-    draw_home_status_values(encoder_count, imu_roll, imu_pitch, imu_yaw, target_yaw, yaw_error, vz, vzt, pose_x_cm, pose_y_cm);
+    draw_home_status_values(encoder_count, imu_roll, imu_pitch, imu_yaw, target_yaw, yaw_error, vz, vzt, pose_x_cm, pose_y_cm, openart_frame_count);
 }
 
 void screen_draw_nav_cursor(uint8 previous_cursor, uint8 cursor)

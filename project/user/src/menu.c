@@ -8,6 +8,7 @@
 #include "timebase.h"
 #include "drive_control.h"
 #include "drive_pose.h"
+#include "openart_uart.h"
 
 #define MENU_KEY_SCAN_PERIOD_MS (5)
 #define PLAYBACK_STEP_MS        (300u)
@@ -701,7 +702,8 @@ static void draw_home_page(void)
         status->vz,
         status->vzt,
         pose->x_cm,
-        pose->y_cm);
+        pose->y_cm,
+        openart_uart_get_frame_count());
 }
 
 static void draw_debug_page(void)
@@ -745,7 +747,8 @@ static void refresh_home_page(void)
         status->vz,
         status->vzt,
         pose->x_cm,
-        pose->y_cm);
+        pose->y_cm,
+        openart_uart_get_frame_count());
 }
 
 static void refresh_debug_page(void)

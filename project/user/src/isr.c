@@ -37,7 +37,7 @@ void LPUART1_IRQHandler(void)
 {
     if(kLPUART_RxDataRegFullFlag & LPUART_GetStatusFlags(LPUART1))
     {
-        /* 将 UART1 接收到的字节送入 OpenART 解析器。 */
+        /* UART1 硬件由 debug_init 初始化；运行期接收字节归 OpenART 协议。 */
         uint8 data = LPUART_ReadByte(LPUART1);
         openart_uart_push_byte(data);
     }

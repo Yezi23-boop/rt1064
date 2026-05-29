@@ -44,15 +44,16 @@ void screen_init(void);
  * @param[in] vzt 姿态环输出的归一化旋转修正分量。
  * @param[in] pose_x_cm 全局定位 X 坐标，单位为 cm，右移为正。
  * @param[in] pose_y_cm 全局定位 Y 坐标，单位为 cm，前进为正。
+ * @param[in] openart_frame_count OpenART 地图接收成功帧数。
  */
-void screen_draw_home(const char *const *items, uint8 item_count, uint8 cursor, uint8 current_map, run_mode_enum mode, save_state_enum save_state, const float encoder_count[WHEEL_COUNT], float imu_roll, float imu_pitch, float imu_yaw, float target_yaw, float yaw_error, float vz, float vzt, float pose_x_cm, float pose_y_cm);
+void screen_draw_home(const char *const *items, uint8 item_count, uint8 cursor, uint8 current_map, run_mode_enum mode, save_state_enum save_state, const float encoder_count[WHEEL_COUNT], float imu_roll, float imu_pitch, float imu_yaw, float target_yaw, float yaw_error, float vz, float vzt, float pose_x_cm, float pose_y_cm, uint32 openart_frame_count);
 
 /**
  * @brief 局部刷新 Home 页面动态状态行。
  *
  * 只更新编码器、IMU、Yaw 和定位坐标，不重绘菜单和光标。
  */
-void screen_draw_home_status(const float encoder_count[WHEEL_COUNT], float imu_roll, float imu_pitch, float imu_yaw, float target_yaw, float yaw_error, float vz, float vzt, float pose_x_cm, float pose_y_cm);
+void screen_draw_home_status(const float encoder_count[WHEEL_COUNT], float imu_roll, float imu_pitch, float imu_yaw, float target_yaw, float yaw_error, float vz, float vzt, float pose_x_cm, float pose_y_cm, uint32 openart_frame_count);
 
 /**
  * @brief 只刷新列表页光标，不重绘整页。

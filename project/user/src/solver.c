@@ -62,45 +62,7 @@ static uint8 map_load(const map_source_struct *source, map_state_struct *map, so
             value = source->rows[row][col];
             map->grid[row][col] = '.';
 
-            if(MAP_FORMAT_SEEKFREE == source->format)
-            {
-                if('#' == value)
-                {
-                    map->grid[row][col] = '#';
-                }
-                else if('C' == value)
-                {
-                    map->player = cell_index(row, col);
-                }
-                else if('$' == value)
-                {
-                    if(MAX_BOXES <= map->box_count)
-                    {
-                        set_message(result, "Too many boxes");
-                        return 0;
-                    }
-                    map->boxes[map->box_count++] = cell_index(row, col);
-                }
-                else if('.' == value)
-                {
-                    if(MAX_BOXES <= map->target_count)
-                    {
-                        set_message(result, "Too many targets");
-                        return 0;
-                    }
-                    map->targets[map->target_count++] = cell_index(row, col);
-                }
-                else if('*' == value)
-                {
-                    map->grid[row][col] = '#';
-                }
-                else if('-' != value)
-                {
-                    set_message(result, "Bad map char");
-                    return 0;
-                }
-            }
-            else if('#' == value)
+            if(('#' == value) || ('X' == value))
             {
                 map->grid[row][col] = '#';
             }

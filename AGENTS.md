@@ -130,4 +130,5 @@ Single-context repo: use root `CONTEXT.md` and root `docs/adr/` when present. Se
 
 - Git commit message 使用中文，简洁说明本次改动。
 - 如果有英文专有名词、协议名、模块名或文件名，可以保留原文。
-- 优先写出能让人一眼知道改了什么的提交信息，不要只写空泛的“update”或“fix”。
+- 优先写出能让人一眼知道改了什么的提交信息，不要只写空泛的”update”或”fix”。
+- **不要主动提交 Git**：完成修改后，先向用户汇报修改内容，询问是否需要提交。用户确认后再执行 `git add` 和 `git commit`。
