@@ -10,6 +10,9 @@ This document helps future agents find the right files in this RT1064 / OpenART 
 - `docs/agents/file-map.md`  
   This file. Use it to locate project areas quickly.
 
+- `docs/agents/menu-extension-guide.md`  
+  Guide for adding IPS200 menu pages and dynamic variables using the current page-table refresh structure.
+
 - `docs/competition/openart_plus_rt1064_uart_experience.md`  
   Current OpenART Plus to RT1064 UART bring-up notes, Keil command-line notes, and serial / download experience.
 

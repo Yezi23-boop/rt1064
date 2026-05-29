@@ -1,6 +1,8 @@
 #include "zf_common_headfile.h"
 #include "zf_common_debug.h"
 #include "drive_control.h"
+#include "menu_key.h"
+#include "openart_uart.h"
 #include "isr.h"
 
 void CSI_IRQHandler(void)
@@ -20,6 +22,7 @@ void PIT_IRQHandler(void)
     if(pit_flag_get(PIT_CH2))
     {
         pit_flag_clear(PIT_CH2);
+        menu_key_tick_5ms();
     }
 
     if(pit_flag_get(PIT_CH3))
@@ -34,9 +37,9 @@ void LPUART1_IRQHandler(void)
 {
     if(kLPUART_RxDataRegFullFlag & LPUART_GetStatusFlags(LPUART1))
     {
-    #if DEBUG_UART_USE_INTERRUPT
-        debug_interrupr_handler();
-    #endif
+        /* 将 UART1 接收到的字节送入 OpenART 解析器。 */
+        uint8 data = LPUART_ReadByte(LPUART1);
+        openart_uart_push_byte(data);
     }
 
     LPUART_ClearStatusFlags(LPUART1, kLPUART_RxOverrunFlag);

@@ -410,6 +410,11 @@
               <FilePath>..\user\src\drive_output.c</FilePath>
             </File>
             <File>
+              <FileName>drive_pose.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>..\user\src\drive_pose.c</FilePath>
+            </File>
+            <File>
               <FileName>drive_test.c</FileName>
               <FileType>1</FileType>
               <FilePath>..\user\src\drive_test.c</FilePath>
@@ -470,9 +475,24 @@
               <FilePath>..\user\src\menu.c</FilePath>
             </File>
             <File>
+              <FileName>menu_key.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>..\user\src\menu_key.c</FilePath>
+            </File>
+            <File>
               <FileName>vofa.c</FileName>
               <FileType>1</FileType>
               <FilePath>..\user\src\vofa.c</FilePath>
+            </File>
+            <File>
+              <FileName>uart_map.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>..\user\src\uart_map.c</FilePath>
+            </File>
+            <File>
+              <FileName>openart_uart.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>..\user\src\openart_uart.c</FilePath>
             </File>
           </Files>
         </Group>
@@ -503,6 +523,11 @@
               <FileName>drive_output.h</FileName>
               <FileType>5</FileType>
               <FilePath>..\user\inc\drive_output.h</FilePath>
+            </File>
+            <File>
+              <FileName>drive_pose.h</FileName>
+              <FileType>5</FileType>
+              <FilePath>..\user\inc\drive_pose.h</FilePath>
             </File>
             <File>
               <FileName>drive_test.h</FileName>
@@ -573,6 +598,16 @@
               <FileName>vofa.h</FileName>
               <FileType>5</FileType>
               <FilePath>..\user\inc\vofa.h</FilePath>
+            </File>
+            <File>
+              <FileName>uart_map.h</FileName>
+              <FileType>5</FileType>
+              <FilePath>..\user\inc\uart_map.h</FilePath>
+            </File>
+            <File>
+              <FileName>openart_uart.h</FileName>
+              <FileType>5</FileType>
+              <FilePath>..\user\inc\openart_uart.h</FilePath>
             </File>
           </Files>
         </Group>

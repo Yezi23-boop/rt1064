@@ -5,6 +5,7 @@
 #include "menu.h"
 #include "vofa.h"
 #include "drive_test.h"
+#include "openart_uart.h"
 
 void app_init(void)
 {
@@ -21,5 +22,6 @@ void app_poll(void)
 {
     menu_poll();
     vofa_service();
+    openart_uart_poll();
     drive_test_poll();
 }

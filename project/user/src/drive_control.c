@@ -3,6 +3,7 @@
 #include "base_io.h"
 #include "drive_imu.h"
 #include "drive_output.h"
+#include "drive_pose.h"
 #include "drive_test.h"
 #include "motion_math.h"
 
@@ -30,7 +31,9 @@ static uint8 update_startup_guard_20ms(void)
     {
         startup_yaw_locked = 1;
         drive_imu_lock_current_yaw(&control_status);
+        drive_pose_reset_origin(control_status.current_yaw);
         drive_test_apply_attitude_target(control_status.current_yaw);
+        return 1;
     }
 
     return 0;
@@ -42,6 +45,7 @@ uint8 control_init(void)
 
     drive_imu_init();
     drive_output_init();
+    drive_pose_init();
 
     hw_state = io_init();
 
@@ -63,6 +67,7 @@ void update_control_20ms(void)
     {
         return;
     }
+    drive_pose_update_20ms(control_status.wheel_feedback_count, control_status.current_yaw);
     set_motor_output_enabled(1);
 
     if (0 != drive_test_manual_pwm_active())

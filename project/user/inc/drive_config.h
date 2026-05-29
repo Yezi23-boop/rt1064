@@ -12,6 +12,12 @@
 
 /** 第一版上板使用的保守目标轮速上限，单位为 encoder count/20ms。 */
 #define MAX_WHEEL_TARGET_COUNT (100.0f)
+/** 编码器增量到地面位移的标定系数，单位 cm/count；位姿解算只改这个系数做距离标定。 */
+#define POSE_CM_PER_COUNT (0.0086f)
+/** 位姿 X 轴方向校正；当前实测右移时 pose_x_cm 减少，因此取 -1 使右移为正。 */
+#define POSE_X_DIR_SIGN (1.0f)
+/** 位姿 Y 轴方向校正；当前实测前进时 pose_y_cm 减少，因此取 -1 使前进为正。 */
+#define POSE_Y_DIR_SIGN (1.0f)
 /** 第一版上板使用的保守 PWM 限幅，PWM_DUTY_MAX 的量程为 10000。 */
 #define MAX_PWM_DUTY (5000)
 /** 电机 PWM 频率，单位为 Hz。 */

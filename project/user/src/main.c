@@ -1,6 +1,7 @@
 #include "zf_common_headfile.h"
 #include "zf_device_wireless_uart.h"
 #include "drive_control.h"
+#include "openart_uart.h"
 #include "app.h"
 
 int main(void)
@@ -10,6 +11,7 @@ int main(void)
     clock_init(SYSTEM_CLOCK_600M);
     debug_init();
     wireless_uart_init();
+    openart_uart_init();
     control_init_state = control_init();
 
     // 应用层在底盘初始化后启动；菜单和屏幕只做非阻塞轮询，不影响 PIT 闭环节拍。

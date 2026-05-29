@@ -1,0 +1,108 @@
+<h2>Run 页面改造方向</h2>
+<p class="subtitle">目标：一进入 Run 就看到地图，并且在 Run 页直接选地图、执行地图。</p>
+
+<style>
+  .lcd {
+    width: 180px;
+    height: 240px;
+    border: 3px solid #111827;
+    background: #ffffff;
+    color: #111827;
+    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    font-size: 10px;
+    line-height: 1.25;
+    padding: 8px;
+    box-sizing: border-box;
+    display: flex;
+    flex-direction: column;
+    gap: 5px;
+  }
+  .lcd-title { font-weight: 700; font-size: 13px; }
+  .lcd-row { white-space: nowrap; }
+  .map {
+    display: grid;
+    grid-template-columns: repeat(8, 1fr);
+    gap: 1px;
+    margin-top: 3px;
+  }
+  .cell {
+    aspect-ratio: 1;
+    border: 1px solid #cbd5e1;
+    background: #f8fafc;
+  }
+  .wall { background: #111827; border-color: #111827; }
+  .box { background: #facc15; }
+  .target { background: #c084fc; }
+  .car { background: #22d3ee; }
+  .hint { margin-top: auto; font-size: 9px; border-top: 1px solid #cbd5e1; padding-top: 4px; }
+</style>
+
+<div class="cards">
+  <div class="card" data-choice="a-direct-workbench" onclick="toggleSelect(this)">
+    <div class="card-image">
+      <div class="lcd">
+        <div class="lcd-title">Run</div>
+        <div class="lcd-row">Map : V03  Mode: Solve</div>
+        <div class="lcd-row">State: Idle  Last: 12ms</div>
+        <div class="map">
+          <div class="cell wall"></div><div class="cell wall"></div><div class="cell wall"></div><div class="cell wall"></div><div class="cell wall"></div><div class="cell wall"></div><div class="cell wall"></div><div class="cell wall"></div>
+          <div class="cell wall"></div><div class="cell car"></div><div class="cell"></div><div class="cell"></div><div class="cell box"></div><div class="cell"></div><div class="cell target"></div><div class="cell wall"></div>
+          <div class="cell wall"></div><div class="cell"></div><div class="cell wall"></div><div class="cell"></div><div class="cell"></div><div class="cell"></div><div class="cell"></div><div class="cell wall"></div>
+          <div class="cell wall"></div><div class="cell"></div><div class="cell"></div><div class="cell box"></div><div class="cell"></div><div class="cell wall"></div><div class="cell target"></div><div class="cell wall"></div>
+          <div class="cell wall"></div><div class="cell"></div><div class="cell"></div><div class="cell"></div><div class="cell"></div><div class="cell"></div><div class="cell"></div><div class="cell wall"></div>
+          <div class="cell wall"></div><div class="cell wall"></div><div class="cell wall"></div><div class="cell wall"></div><div class="cell wall"></div><div class="cell wall"></div><div class="cell wall"></div><div class="cell wall"></div>
+        </div>
+        <div class="hint">K1/K2 Map  K3 Execute<br>K2L Mode  K4 Home</div>
+      </div>
+    </div>
+    <div class="card-body">
+      <h3>A. 直接工作台 推荐</h3>
+      <p>Run 页就是地图预览页。K1/K2 直接切地图，K3 立即按当前模式执行。最快，最符合“打开就能看到地图”。</p>
+    </div>
+  </div>
+
+  <div class="card" data-choice="b-preview-plus-menu" onclick="toggleSelect(this)">
+    <div class="card-image">
+      <div class="lcd">
+        <div class="lcd-title">Run</div>
+        <div class="lcd-row">&gt; Map V03</div>
+        <div class="lcd-row">  Mode Solve</div>
+        <div class="lcd-row">  Execute</div>
+        <div class="map">
+          <div class="cell wall"></div><div class="cell wall"></div><div class="cell wall"></div><div class="cell wall"></div><div class="cell wall"></div><div class="cell wall"></div><div class="cell wall"></div><div class="cell wall"></div>
+          <div class="cell wall"></div><div class="cell car"></div><div class="cell"></div><div class="cell box"></div><div class="cell"></div><div class="cell"></div><div class="cell target"></div><div class="cell wall"></div>
+          <div class="cell wall"></div><div class="cell"></div><div class="cell"></div><div class="cell"></div><div class="cell wall"></div><div class="cell"></div><div class="cell"></div><div class="cell wall"></div>
+          <div class="cell wall"></div><div class="cell"></div><div class="cell box"></div><div class="cell"></div><div class="cell"></div><div class="cell target"></div><div class="cell"></div><div class="cell wall"></div>
+          <div class="cell wall"></div><div class="cell wall"></div><div class="cell wall"></div><div class="cell wall"></div><div class="cell wall"></div><div class="cell wall"></div><div class="cell wall"></div><div class="cell wall"></div>
+        </div>
+        <div class="hint">K1/K2 Cursor  K3 Enter<br>Map item: K1/K2 change?</div>
+      </div>
+    </div>
+    <div class="card-body">
+      <h3>B. 预览 + 菜单混合</h3>
+      <p>保留 Map/Mode/Execute 三项，同时在下方常驻地图。结构清楚，但按键语义会变复杂。</p>
+    </div>
+  </div>
+
+  <div class="card" data-choice="c-map-first-with-mode-strip" onclick="toggleSelect(this)">
+    <div class="card-image">
+      <div class="lcd">
+        <div class="lcd-title">Run V03</div>
+        <div class="map">
+          <div class="cell wall"></div><div class="cell wall"></div><div class="cell wall"></div><div class="cell wall"></div><div class="cell wall"></div><div class="cell wall"></div><div class="cell wall"></div><div class="cell wall"></div>
+          <div class="cell wall"></div><div class="cell car"></div><div class="cell"></div><div class="cell"></div><div class="cell box"></div><div class="cell target"></div><div class="cell"></div><div class="cell wall"></div>
+          <div class="cell wall"></div><div class="cell"></div><div class="cell wall"></div><div class="cell"></div><div class="cell"></div><div class="cell"></div><div class="cell"></div><div class="cell wall"></div>
+          <div class="cell wall"></div><div class="cell"></div><div class="cell"></div><div class="cell box"></div><div class="cell"></div><div class="cell"></div><div class="cell target"></div><div class="cell wall"></div>
+          <div class="cell wall"></div><div class="cell wall"></div><div class="cell wall"></div><div class="cell wall"></div><div class="cell wall"></div><div class="cell wall"></div><div class="cell wall"></div><div class="cell wall"></div>
+        </div>
+        <div class="lcd-row">Mode: Solve  Save: Dirty</div>
+        <div class="lcd-row">Execute: K3</div>
+        <div class="hint">K1/K2 Map  K3 Execute<br>K4 Home  K4L Home</div>
+      </div>
+    </div>
+    <div class="card-body">
+      <h3>C. 地图优先大预览</h3>
+      <p>把地图放到最显眼位置，状态压到底部。适合主要看地图，但文字状态会更少。</p>
+    </div>
+  </div>
+</div>
