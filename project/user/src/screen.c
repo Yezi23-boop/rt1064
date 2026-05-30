@@ -41,6 +41,20 @@ typedef enum
     SCREEN_PAGE_ART_MAP,
 } screen_page_enum;
 
+typedef struct
+{
+    const map_source_struct *source;
+    const solve_result_struct *result;
+    uint16 step;
+    uint8 use_pose;
+    uint8 start_row;
+    uint8 start_col;
+    float pose_x_cm;
+    float pose_y_cm;
+    uint8 *pose_row;
+    uint8 *pose_col;
+} screen_map_render_struct;
+
 static screen_page_enum active_page = SCREEN_PAGE_NONE; // 只在页面切换时整屏清空，减少白底页面刷新闪烁。
 AT_SDRAM_SECTION_ALIGN(uint16 screen_fill_buffer[FILL_BUFFER_PIXELS], 64); // 显示填充缓存不参与 BFS，放 cacheable SDRAM 减少片上 RAM 压力。
 
@@ -415,23 +429,49 @@ static void draw_map_grid(const map_source_struct *source, int x, int y)
     }
 }
 
-static void draw_color_map(const map_source_struct *source, const solve_result_struct *result, uint16 step)
+static void draw_map_render(const screen_map_render_struct *render)
 {
     char grid[MAP_ROWS][MAP_COLS];
     uint16 car;
+    uint16 pose_car;
     uint16 boxes[MAX_BOXES];
     uint16 targets[MAX_BOXES];
     uint8 box_count;
     uint8 target_count;
     uint8 row;
     uint8 col;
+    int16 pose_row_value;
+    int16 pose_col_value;
     uint16 cell;
     uint16 color;
+    uint16 action_step;
 
-    parse_source(source, grid, &car, boxes, &box_count, targets, &target_count);
-    if((0 != result) && (0 != result->solved) && (0 < step))
+    parse_source(render->source, grid, &car, boxes, &box_count, targets, &target_count);
+
+    if((0 != render->result) && (0 != render->result->solved) && (0 < render->step))
     {
-        apply_actions(&car, boxes, &box_count, targets, &target_count, result->actions, step);
+        if(0 != render->use_pose)
+        {
+            action_step = action_step_from_waypoint_step(render->result, render->step);
+        }
+        else
+        {
+            action_step = render->step;
+        }
+        apply_actions(&car, boxes, &box_count, targets, &target_count, render->result->actions, action_step);
+    }
+
+    if(0 != render->use_pose)
+    {
+        pose_col_value = (int16)render->start_col + round_cm_to_grid_delta(render->pose_x_cm);
+        pose_row_value = (int16)render->start_row - round_cm_to_grid_delta(render->pose_y_cm);
+        *render->pose_row = clamp_grid_index(pose_row_value, MAP_ROWS);
+        *render->pose_col = clamp_grid_index(pose_col_value, MAP_COLS);
+        pose_car = cell_index_local(*render->pose_row, *render->pose_col);
+    }
+    else
+    {
+        pose_car = car;
     }
 
     for(row = 0; row < MAP_ROWS; row++)
@@ -439,10 +479,34 @@ static void draw_color_map(const map_source_struct *source, const solve_result_s
         for(col = 0; col < MAP_COLS; col++)
         {
             cell = cell_index_local(row, col);
-            color = color_for_cell(grid[row][col], cell, car, boxes, box_count, targets, target_count);
+            if(0 != render->use_pose)
+            {
+                color = color_for_pose_cell(grid[row][col], cell, pose_car, boxes, box_count, targets, target_count);
+            }
+            else
+            {
+                color = color_for_cell(grid[row][col], cell, car, boxes, box_count, targets, target_count);
+            }
             fill_rect((uint16)(MAP_X + col * CELL_SIZE), (uint16)(MAP_Y + row * CELL_SIZE), (CELL_SIZE - 1), (CELL_SIZE - 1), color);
         }
     }
+}
+
+static void draw_color_map(const map_source_struct *source, const solve_result_struct *result, uint16 step)
+{
+    screen_map_render_struct render;
+
+    render.source = source;
+    render.result = result;
+    render.step = step;
+    render.use_pose = 0;
+    render.start_row = 0;
+    render.start_col = 0;
+    render.pose_x_cm = 0.0f;
+    render.pose_y_cm = 0.0f;
+    render.pose_row = 0;
+    render.pose_col = 0;
+    draw_map_render(&render);
 }
 
 static void draw_pose_map(const map_source_struct *source, float pose_x_cm, float pose_y_cm, uint8 *pose_row, uint8 *pose_col)
@@ -482,43 +546,19 @@ static void draw_pose_map(const map_source_struct *source, float pose_x_cm, floa
 
 static void draw_pose_map_from_start(const map_source_struct *source, const solve_result_struct *result, uint16 step, float pose_x_cm, float pose_y_cm, uint8 start_row, uint8 start_col, uint8 *pose_row, uint8 *pose_col)
 {
-    char grid[MAP_ROWS][MAP_COLS];
-    uint16 start_car;
-    uint16 pose_car;
-    uint16 boxes[MAX_BOXES];
-    uint16 targets[MAX_BOXES];
-    uint8 box_count;
-    uint8 target_count;
-    int16 row;
-    int16 col;
-    uint8 draw_row;
-    uint8 draw_col;
-    uint16 cell;
-    uint16 color;
-    uint16 action_step;
+    screen_map_render_struct render;
 
-    parse_source(source, grid, &start_car, boxes, &box_count, targets, &target_count);
-    if((0 != result) && (0 != result->solved) && (0 < step))
-    {
-        action_step = action_step_from_waypoint_step(result, step);
-        apply_actions(&start_car, boxes, &box_count, targets, &target_count, result->actions, action_step);
-    }
-
-    col = (int16)start_col + round_cm_to_grid_delta(pose_x_cm);
-    row = (int16)start_row - round_cm_to_grid_delta(pose_y_cm);
-    *pose_row = clamp_grid_index(row, MAP_ROWS);
-    *pose_col = clamp_grid_index(col, MAP_COLS);
-    pose_car = cell_index_local(*pose_row, *pose_col);
-
-    for(draw_row = 0; draw_row < MAP_ROWS; draw_row++)
-    {
-        for(draw_col = 0; draw_col < MAP_COLS; draw_col++)
-        {
-            cell = cell_index_local(draw_row, draw_col);
-            color = color_for_pose_cell(grid[draw_row][draw_col], cell, pose_car, boxes, box_count, targets, target_count);
-            fill_rect((uint16)(MAP_X + draw_col * CELL_SIZE), (uint16)(MAP_Y + draw_row * CELL_SIZE), (CELL_SIZE - 1), (CELL_SIZE - 1), color);
-        }
-    }
+    render.source = source;
+    render.result = result;
+    render.step = step;
+    render.use_pose = 1;
+    render.start_row = start_row;
+    render.start_col = start_col;
+    render.pose_x_cm = pose_x_cm;
+    render.pose_y_cm = pose_y_cm;
+    render.pose_row = pose_row;
+    render.pose_col = pose_col;
+    draw_map_render(&render);
 }
 
 void screen_init(void)
