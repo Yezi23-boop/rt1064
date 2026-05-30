@@ -124,6 +124,16 @@ static void show_text_value(uint16 x, uint16 y, const char *text, uint8 max_char
     ips200_show_string(x, y, text);
 }
 
+static void show_uint_value(uint16 x, uint16 y, uint32 value, uint8 digits)
+{
+    ips200_show_uint(x, y, value, digits);
+}
+
+static void show_float_value(uint16 x, uint16 y, float value, uint8 int_digits, uint8 frac_digits)
+{
+    ips200_show_float(x, y, (double)value, int_digits, frac_digits);
+}
+
 static void show_hint(const char *line1, const char *line2)
 {
     clear_text_area(0, KEY_HINT_Y1, 30);
@@ -640,17 +650,17 @@ static void draw_home_status_values(const float encoder_count[WHEEL_COUNT], floa
 
     ips200_show_int(48, LINE_H * 11, (int16)imu_yaw, 4);
 
-    ips200_show_float(48, LINE_H * 12, (double)target_yaw, 3, 1);
-    ips200_show_float(120, LINE_H * 12, (double)imu_yaw, 3, 1);
+    show_float_value(48, LINE_H * 12, target_yaw, 3, 1);
+    show_float_value(120, LINE_H * 12, imu_yaw, 3, 1);
 
-    ips200_show_float(16, LINE_H * 13, (double)yaw_error, 3, 2);
-    ips200_show_float(96, LINE_H * 13, (double)vz, 1, 2);
-    ips200_show_float(160, LINE_H * 13, (double)vzt, 1, 2);
+    show_float_value(16, LINE_H * 13, yaw_error, 3, 2);
+    show_float_value(96, LINE_H * 13, vz, 1, 2);
+    show_float_value(160, LINE_H * 13, vzt, 1, 2);
 
-    ips200_show_float(16, LINE_H * 14, (double)pose_x_cm, 4, 1);
-    ips200_show_float(120, LINE_H * 14, (double)pose_y_cm, 4, 1);
+    show_float_value(16, LINE_H * 14, pose_x_cm, 4, 1);
+    show_float_value(120, LINE_H * 14, pose_y_cm, 4, 1);
 
-    ips200_show_uint(32, LINE_H * 15, openart_frame_count, 5);
+    show_uint_value(32, LINE_H * 15, openart_frame_count, 5);
 }
 
 void screen_draw_home(const screen_home_view_struct *view)
@@ -834,27 +844,6 @@ void screen_draw_run_workbench(const screen_run_view_struct *view)
     }
 }
 
-void screen_draw_run(uint8 current_map, uint8 candidate_map, run_mode_enum mode, save_state_enum save_state, const char *state, uint32 elapsed_ms)
-{
-    begin_page(SCREEN_PAGE_RUN);
-    ips200_show_string(0, 0, "Run");
-    ips200_show_string(0, LINE_H, "Map : V");
-    ips200_show_uint(56, LINE_H, current_map + 1, 2);
-    ips200_show_string(0, LINE_H * 2, "Pick: V");
-    ips200_show_uint(56, LINE_H * 2, candidate_map + 1, 2);
-    ips200_show_string(0, LINE_H * 3, "Mode: ");
-    show_text_value(48, LINE_H * 3, mode_name(mode), 8);
-    ips200_show_string(0, LINE_H * 4, "Save: ");
-    show_text_value(48, LINE_H * 4, save_state_name(save_state), 12);
-    ips200_show_string(0, LINE_H * 5, "State: ");
-    show_text_value(56, LINE_H * 5, state, 10);
-    ips200_show_string(0, LINE_H * 6, "Time: ");
-    ips200_show_uint(48, LINE_H * 6, elapsed_ms, 5);
-    ips200_show_string(96, LINE_H * 6, "ms");
-    draw_color_map(map_get(candidate_map), 0, 0);
-    show_hint("K1/K2 Map  K3 OK/Run", "K2L Mode  K4 Home");
-}
-
 void screen_draw_mode_select(run_mode_enum candidate_mode)
 {
     uint8 i;
@@ -931,26 +920,6 @@ void screen_draw_playback(uint8 map_index, const map_source_struct *source, cons
         clear_text_area(0, LINE_H * 5, 30);
     }
     show_hint("K1 Prev K2 Next K3 Play", "K4 Run  K4L Home");
-}
-
-void screen_draw_demo(uint8 index, uint8 total, uint8 ok_count, uint8 fail_count, uint32 elapsed_ms, const char *state)
-{
-    begin_page(SCREEN_PAGE_DEMO);
-    ips200_show_string(0, 0, "Demo");
-    ips200_show_string(0, LINE_H, "Map : ");
-    ips200_show_uint(48, LINE_H, index, 3);
-    ips200_show_string(80, LINE_H, "/");
-    ips200_show_uint(88, LINE_H, total, 3);
-    ips200_show_string(0, LINE_H * 2, "OK  : ");
-    ips200_show_uint(48, LINE_H * 2, ok_count, 3);
-    ips200_show_string(0, LINE_H * 3, "Fail: ");
-    ips200_show_uint(48, LINE_H * 3, fail_count, 3);
-    ips200_show_string(0, LINE_H * 4, "Time: ");
-    ips200_show_uint(48, LINE_H * 4, elapsed_ms, 5);
-    ips200_show_string(96, LINE_H * 4, "ms");
-    ips200_show_string(0, LINE_H * 5, "State: ");
-    show_text_value(56, LINE_H * 5, state, 10);
-    show_hint("K4 Stop", "K4L Home");
 }
 
 void screen_draw_debug(uint8 map_index, const map_source_struct *source, float pose_x_cm, float pose_y_cm)
