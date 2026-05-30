@@ -1,134 +1,119 @@
-# 仓库协作规则
+# AGENTS.md
 
-## 全局环境说明
+## 构建命令
 
-- 在这个 Win11 环境里，`rg` / `ripgrep` 可能不可用，或者会因为权限问题失败，例如报错 `Access is denied`。
-- 即使 `rg` 平时是首选搜索工具，也不要默认它在这里可用。
-- 在这个环境中，优先使用 PowerShell 原生命令作为替代方案：
-  - 用 `Get-ChildItem -Recurse -File` 查找文件。
-  - 用 `Select-String` 搜索文件内容。
-- 如果后续在某个具体会话中已经确认 `rg` 可以正常运行，再使用它；在确认之前不要假设它可用。
-- 使用 `uv` 管理 Python 相关工具和验证命令。
-- 默认编码是 UTF-8。
+```powershell
+# Keil MDK 编译（只编译，不下载）
+D:\Keil_v5\UV4\UV4.exe -b "C:\Users\ye\Desktop\rt1064\project\mdk\rt1064.uvprojx"
 
-## 文字说明
+# Keil MDK 下载到 Flash
+D:\Keil_v5\UV4\UV4.exe -f "C:\Users\ye\Desktop\rt1064\project\mdk\rt1064.uvprojx"
 
-- 尽量使用中文回答和编程说明。
-- 默认使用 ffmpeg 处理音频。
-- 发本地图片时，请用 Markdown 图片语法，并把 Windows 路径改成正斜杠。
-
-## 项目文档优先
-
-- 遇到 OpenART Plus、RT1064、UART、SD 卡 `cmm_cfg/cmm_load`、REPL、串口终端、Keil 下载运行状态这类类似问题时，先查项目文档，再继续排查或改代码。
-- 当前仓库文件地图：
-  - `docs/agents/file-map.md`
-- 当前 OpenART Plus 到 RT1064 UART 最小通信经验文档：
-  - `docs/competition/openart_plus_rt1064_uart_experience.md`
-- 如果问题涉及第 21 届智能视觉组整体规则、OpenART/RT1064 分工、16x12 地图识别、推箱子 BFS 或双 OpenART Plus 方案，优先结合逐飞公众号原文和本仓库 `docs/competition` 下的整理文档判断，不要只凭聊天记忆下结论。
-- 遇到 OpenART / OpenMV 脚本、图像处理、相机初始化、串口终端或官方 API 用法问题时，先查 OpenMV 官方文档 `https://docs.openmv.io/`，优先看总览页和对应模块 API，再决定是否自己补封装或改代码。
-- 写 OpenMV / ART 代码前，先确认 OpenMV 官方已经提供了哪些现成能力，常见优先查看 `sensor`、`image`、`machine`、`display`、`ml`、`csi`、`network` 和 OpenMV IDE Overview，避免重复造轮子。
-- 尤其先看 OpenMV 官方库索引页 `https://docs.openmv.io/library/index.html`，从函数和模块总表里筛出能直接复用的能力；必要时再下钻到对应模块页和示例代码。
-
-## Agent skills
-
-### Issue tracker
-
-Issues and PRDs are tracked in GitHub Issues for `Yezi23-boop/rt1064`. See `docs/agents/issue-tracker.md`.
-
-### Triage labels
-
-Use the default mattpocock/skills triage label vocabulary. See `docs/agents/triage-labels.md`.
-
-### Domain docs
-
-Single-context repo: use root `CONTEXT.md` and root `docs/adr/` when present. See `docs/agents/domain.md`.
-
-## 通用编码行为准则
-
-这些准则用于减少常见的 LLM 编码错误。它们偏向谨慎而不是速度；对于非常简单的任务，可以按实际情况判断。
-
-### 1. 编码前先思考
-
-**不要假设，不要隐藏困惑，要明确暴露取舍。**
-
-实现前：
-
-- 明确说明你的假设。如果不确定，就提问。
-- 如果存在多种解释，列出来，不要静默选择其中一个。
-- 如果存在更简单的方案，要说明。必要时直接指出当前方案的问题。
-- 如果某件事不清楚，停下来，说明不清楚的点，然后提问。
-
-### 2. 简单优先
-
-**使用能解决问题的最少代码。不要写推测性代码。**
-
-- 不添加用户没有要求的功能。
-- 不为单次使用的代码增加抽象。
-- 不添加用户没有要求的“灵活性”或“可配置性”。
-- 不为不可能发生的场景添加错误处理。
-- 如果写了 200 行但其实 50 行就能解决，要重写并简化。
-
-自检问题：
-
-```text
-资深工程师会不会认为这段实现过度复杂？
+# Python 语法验证
+python -m py_compile openmv/main.py
 ```
 
-如果答案是会，就简化。
+**重要**：Keil 命令行下载成功后，程序可能停在调试态（`main()` 入口）。需要手动复位或执行 `uvx pyocd reset -t mimxrt1064` 让程序真正运行。
 
-### 3. 手术式修改
+## 项目架构
 
-**只触碰必须修改的内容。只清理自己造成的问题。**
+**双机架构**：OpenART Plus（视觉识别） + RT1064（控制/求解）
 
-编辑已有代码时：
-
-- 不要顺手“改进”相邻代码、注释或格式。
-- 不要重构没有坏掉的代码。
-- 匹配现有代码风格，即使你个人会用另一种写法。
-- 如果发现无关的死代码，可以提出来，但不要删除。
-
-当你的改动制造了孤立内容时：
-
-- 删除由本次改动导致无用的 import、变量、函数或文件。
-- 不要删除本来就存在的死代码，除非用户明确要求。
-
-检验标准：
-
-```text
-每一行改动都应该能直接追溯到用户请求。
+```
+OpenART Plus (MicroPython)          RT1064 (C)
+┌─────────────────────┐            ┌─────────────────────────┐
+│ 摄像头 → 16×12地图识别│   UART1   │ main.c → app.c          │
+│       ↓              │  B12/B13  │       ↓                  │
+│ send_map_uart() ────┼──────────→ │ openart_uart_push_byte() │
+│   MAP_BEGIN          │  115200   │       ↓                  │
+│   12行×16列          │           │ solver.c (BFS求解)       │
+│   MAP_END            │           │       ↓                  │
+└─────────────────────┘           │ drive_control.c (底盘)    │
+                                   └─────────────────────────┘
 ```
 
-### 4. 目标驱动执行
+## UART 通道分配
 
-**定义成功标准，并循环直到验证完成。**
+| 模块 | UART | 引脚 | 用途 |
+|------|------|------|------|
+| 无线串口 | LPUART8 | - | printf 调试输出（已重定向） |
+| OpenART | LPUART1 | TX→B13, RX→B12 | 接收地图数据 |
 
-把任务转换成可验证目标：
+printf 已重定向到无线串口（LPUART8），不与 OpenART 的 UART1 冲突。
 
-- “添加校验” -> “先写无效输入测试，再让测试通过”
-- “修复 bug” -> “先写复现 bug 的测试，再让测试通过”
-- “重构 X” -> “确保重构前后测试都通过”
+## 目录结构与搜索顺序
 
-对于多步骤任务，先给简短计划：
-
-```text
-1. [步骤] -> 验证：[检查方式]
-2. [步骤] -> 验证：[检查方式]
-3. [步骤] -> 验证：[检查方式]
+```
+project/user/     ← 用户代码（优先改这里）
+libraries/        ← 平台库（不要改，除非 bug 明确在库内）
+openmv/           ← OpenART MicroPython 脚本
+docs/competition/ ← 竞赛规则、硬件接线、算法文档
+docs/agents/      ← Agent 工作流文档
 ```
 
-强成功标准可以让 agent 独立循环推进。弱成功标准，例如“让它能用”，通常需要继续澄清。
+**搜索顺序**（找到问题所在再深入）：
+1. `project/user/` — 应用行为
+2. `libraries/zf_driver/` — 外设 API
+3. `libraries/zf_device/` — 设备驱动（IMU、屏幕、相机）
+4. `libraries/zf_common/` — 公共工具（debug、clock、FIFO）
+5. `libraries/sdk/` — 芯片级寄存器、时钟树、启动
 
-### 5. 准则是否有效的判断
+## 关键文件
 
-这些准则生效时，应该能看到：
+### 入口与调度
+- `project/user/src/main.c` — 系统入口
+- `project/user/src/isr.c` — 中断处理（PIT 20ms 控制环、UART 收包）
+- `project/user/src/app.c` — 应用层初始化和轮询
 
-- diff 中不必要的改动变少。
-- 因过度复杂而重写的次数变少。
-- 澄清问题发生在实现前，而不是错误发生后。
+### 底盘控制
+- `project/user/inc/drive_config.h` — 四轮麦轮配置、PID 参数、IMU 参数
+- `project/user/src/drive_control.c` — 控制调度、20ms 姿态环 + 轮速 PID
+- `project/user/src/base_io.c` — 硬件绑定层（编码器、PWM、IMU）
 
-### 6. Git 提交信息
+### 推箱子算法
+- `project/user/src/solver.c` — BFS 求解器
+- `project/user/inc/map_types.h` — 地图常量（MAP_ROWS=12, MAP_COLS=16）
+- `project/user/src/maps.c` — 离线测试地图
 
-- Git commit message 使用中文，简洁说明本次改动。
-- 如果有英文专有名词、协议名、模块名或文件名，可以保留原文。
-- 优先写出能让人一眼知道改了什么的提交信息，不要只写空泛的”update”或”fix”。
-- **不要主动提交 Git**：完成修改后，先向用户汇报修改内容，询问是否需要提交。用户确认后再执行 `git add` 和 `git commit`。
+### 通信
+- `project/user/src/openart_uart.c` — OpenART UART 协议解析
+
+## PIT 中断节拍
+
+- **PIT_CH1**：20ms — 姿态环、混控、四轮速度 PID（`update_control_20ms()`）
+- **PIT_CH2**：5ms — 菜单按键扫描（`menu_key_tick_5ms()`）
+
+## OpenART UART 协议
+
+```
+MAP_BEGIN\n
+################\n    ← 12行，每行16字符
+#..............#\n    ← 字符集：#.TBXC
+...
+################\n
+MAP_END\n
+```
+
+RT1064 收到完整帧后回复：`MAP_OK rows=12 cols=16\r\n`
+
+## 添加新 C 文件的流程
+
+1. 在 `project/user/src/` 添加 `.c`，在 `project/user/inc/` 添加 `.h`
+2. **必须**同步更新 `project/mdk/rt1064.uvprojx`（Keil 工程文件）
+3. 执行 Keil 编译验证：0 Error(s), 0 Warning(s)
+
+## 菜单系统约定
+
+菜单采用 `menu.c`（状态/按键）+ `screen.c`（显示）分离架构：
+- `menu.c` 负责从业务模块取数据，传给 `screen.c`
+- `screen.c` 只负责 IPS200 绘制，不访问业务状态
+- 新增页面/变量参考：`docs/agents/menu-extension-guide.md`
+
+## 文档优先原则
+
+遇到以下问题时，**先查文档再改代码**：
+- OpenART/UART/SD 卡问题 → `docs/competition/openart_plus_rt1064_uart_experience.md`
+- 姿态闭环/底盘控制 → `docs/competition/姿态闭环框架.md`
+- 菜单系统 → `docs/competition/掉电保存菜单框架.md` + `docs/agents/menu-extension-guide.md`
+- 推箱子算法 → `docs/competition/push_box_validation_cases.md`
+- OpenMV API → https://docs.openmv.io/library/index.html

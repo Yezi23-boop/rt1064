@@ -5,7 +5,7 @@
 #define SETTINGS_SECTOR             (127)          // 用户设置专用 Flash 扇区；只保存地图编号和模式，不保存地图内容。
 #define SETTINGS_PAGE               (FLASH_PAGE_0) // 当前只用一个 page，避免引入 sequence 和多副本选择逻辑。
 #define SETTINGS_MAGIC              (0x5058424Du)  // "PXBM"：用于区分未初始化 Flash 和本项目设置记录。
-#define SETTINGS_VERSION            (1u)           // 记录格式版本；字段布局变化时再递增。
+#define SETTINGS_VERSION            (2u)           // 记录格式版本；字段布局变化时再递增。
 
 typedef struct
 {
@@ -14,11 +14,13 @@ typedef struct
     uint16 checksum;                    // 简单字节和校验；用于发现擦写失败或半写入记录。
     uint8 current_map;                  // 保存的地图编号，只是索引，不保存整张地图。
     uint8 run_mode;                     // 保存的运行模式，取值为 run_mode_enum。
-    uint16 reserved;                    // 预留对齐字段，写入前固定为 0。
+    uint8 map_source;                   // 保存的地图来源，取值为 map_source_enum。
+    uint8 reserved;                     // 预留对齐字段，写入前固定为 0。
 } settings_record_struct;
 
 static uint8 current_map;               // 主循环菜单写入并读取；不在 ISR 中访问。
 static run_mode_enum run_mode;          // 主循环菜单写入并读取；Flash 只保存最终确认值。
+static map_source_enum map_source;      // 主循环菜单写入并读取；Flash 只保存最终确认值。
 static uint8 flash_ready;               // flash_init 成功后置 1，避免初始化失败后继续擦写。
 static save_state_enum save_state = SAVE_STATE_EMPTY; // 屏幕提示用状态，不作为控制安全条件。
 
@@ -60,6 +62,10 @@ static uint8 record_valid(const settings_record_struct *record)
     {
         return 0;
     }
+    if(record->map_source >= MAP_SOURCE_COUNT)
+    {
+        return 0;
+    }
     return 1;
 }
 
@@ -69,6 +75,7 @@ void settings_init(void)
 
     current_map = 0;
     run_mode = RUN_MODE_SOLVE;
+    map_source = MAP_SOURCE_OFFLINE;
     flash_ready = 0;
     save_state = SAVE_STATE_EMPTY;
 
@@ -84,6 +91,7 @@ void settings_init(void)
     {
         current_map = record.current_map;
         run_mode = (run_mode_enum)record.run_mode;
+        map_source = (map_source_enum)record.map_source;
         save_state = SAVE_STATE_SAVED;
     }
     else if(SETTINGS_MAGIC == record.magic)
@@ -100,6 +108,11 @@ uint8 settings_get_map(void)
 run_mode_enum settings_get_mode(void)
 {
     return run_mode;
+}
+
+map_source_enum settings_get_source(void)
+{
+    return map_source;
 }
 
 save_state_enum settings_get_save_state(void)
@@ -127,6 +140,20 @@ void settings_set_runtime(uint8 map, run_mode_enum mode)
     }
 }
 
+void settings_set_source(map_source_enum source)
+{
+    if(source >= MAP_SOURCE_COUNT)
+    {
+        source = MAP_SOURCE_OFFLINE;
+    }
+
+    map_source = source;
+    if(0 != flash_ready)
+    {
+        save_state = SAVE_STATE_DIRTY;
+    }
+}
+
 uint8 settings_save(void)
 {
     settings_record_struct record;
@@ -144,6 +171,7 @@ uint8 settings_save(void)
     record.checksum = 0;
     record.current_map = current_map;
     record.run_mode = (uint8)run_mode;
+    record.map_source = (uint8)map_source;
     record.reserved = 0;
     record.checksum = checksum_record(&record);
 
@@ -156,7 +184,8 @@ uint8 settings_save(void)
     flash_read_page(SETTINGS_SECTOR, SETTINGS_PAGE, (uint32 *)&verify, word_len);
     if((0 == record_valid(&verify)) ||
        (verify.current_map != record.current_map) ||
-       (verify.run_mode != record.run_mode))
+       (verify.run_mode != record.run_mode) ||
+       (verify.map_source != record.map_source))
     {
         save_state = SAVE_STATE_CHECK_ERROR;
         return 0;
@@ -170,10 +199,9 @@ const char *mode_name(run_mode_enum mode)
 {
     static const char *const names[RUN_MODE_COUNT] =
     {
-        "Browse",
         "Solve",
         "Run",
-        "Demo",
+        "Step",
     };
 
     if(mode >= RUN_MODE_COUNT)
@@ -181,6 +209,21 @@ const char *mode_name(run_mode_enum mode)
         return "Solve";
     }
     return names[mode];
+}
+
+const char *source_name(map_source_enum source)
+{
+    static const char *const names[MAP_SOURCE_COUNT] =
+    {
+        "Offline",
+        "ART",
+    };
+
+    if(source >= MAP_SOURCE_COUNT)
+    {
+        return "Offline";
+    }
+    return names[source];
 }
 
 const char *save_state_name(save_state_enum state)

@@ -4,6 +4,7 @@
 #include "map_types.h"
 #include "settings.h"
 #include "drive_config.h"
+#include "executor.h"
 
 /**
  * @brief 求解结果回放状态。
@@ -81,7 +82,7 @@ void screen_draw_mode_page(run_mode_enum candidate_mode);
 /**
  * @brief 绘制 Run 工作台页面，显示当前地图并允许直接执行。
  */
-void screen_draw_run_workbench(uint8 current_map, run_mode_enum mode, save_state_enum save_state, const char *state, uint32 elapsed_ms);
+void screen_draw_run_workbench(uint8 current_map, run_mode_enum mode, map_source_enum source, save_state_enum save_state, const char *state, uint32 elapsed_ms);
 
 /**
  * @brief 绘制 Run 页面。
@@ -138,11 +139,42 @@ void screen_draw_demo(uint8 index, uint8 total, uint8 ok_count, uint8 fail_count
 void screen_draw_debug(uint8 map_index, const map_source_struct *source, float pose_x_cm, float pose_y_cm);
 
 /**
+ * @brief 绘制 ART Map 页面，显示 OpenART 接收的实时地图。
+ *
+ * @param[in] frame_count 成功接收的完整地图帧数。
+ * @param[in] age_s 距最近一次收到字节的秒数；若从未收到则显示 "-"。
+ * @param[in] source OpenART 地图数据源；若为 NULL 则显示 "No OpenART map"。
+ */
+void screen_draw_art_map(uint32 frame_count, uint32 age_s, const map_source_struct *source);
+
+/**
  * @brief 绘制 Info 页面。
  *
  * @param[in] map_count_value 内置地图数量。
  * @param[in] save_state Flash 保存状态。
  */
 void screen_draw_info(uint8 map_count_value, save_state_enum save_state);
+
+/**
+ * @brief 绘制 Run/Step 执行页面
+ * @param[in] current_map   当前地图编号
+ * @param[in] source        地图数据源
+ * @param[in] result        求解结果
+ * @param[in] current_step  当前步骤
+ * @param[in] state         执行器状态
+ * @param[in] current_box   当前箱子编号
+ * @param[in] total_boxes   总箱子数
+ * @param[in] start_row     起点行号
+ * @param[in] start_col     起点列号
+ */
+void screen_draw_execute(uint8 current_map,
+                         const map_source_struct *source,
+                         const solve_result_struct *result,
+                         uint16 current_step,
+                         executor_state_enum state,
+                         uint16 current_box,
+                         uint16 total_boxes,
+                         uint8 start_row,
+                         uint8 start_col);
 
 #endif

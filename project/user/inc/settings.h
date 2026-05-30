@@ -6,16 +6,27 @@
 /**
  * @brief 菜单运行模式。
  *
- * 模式只决定 Run 页面按 K3 后执行哪类动作，不改变地图选择和保存规则。
+ * 模式只决定 Run 页面按 K3 后执行哪类动作，不改变地图来源。
  */
 typedef enum
 {
-    RUN_MODE_BROWSE = 0,       /**< 只浏览当前地图，不执行 BFS。 */
-    RUN_MODE_SOLVE,            /**< 执行 BFS 并进入屏幕回放。 */
-    RUN_MODE_RUN,              /**< 为后续真实底盘执行预留的运行模式。 */
-    RUN_MODE_DEMO,             /**< 连续验证所有内置地图。 */
+    RUN_MODE_SOLVE = 0,        /**< 执行 BFS 并进入屏幕回放。 */
+    RUN_MODE_RUN,              /**< 连续执行模式，求解后驱动底盘连续运行。 */
+    RUN_MODE_STEP,             /**< 单步执行模式，每步暂停等待 K3 确认。 */
     RUN_MODE_COUNT,            /**< 模式数量，只用于边界检查。 */
 } run_mode_enum;
+
+/**
+ * @brief 地图来源。
+ *
+ * 来源决定求解器使用离线地图还是 OpenART 实时地图。
+ */
+typedef enum
+{
+    MAP_SOURCE_OFFLINE = 0,    /**< 使用固件内置离线地图。 */
+    MAP_SOURCE_ART,            /**< 使用 OpenART UART 接收的实时地图。 */
+    MAP_SOURCE_COUNT,          /**< 来源数量，只用于边界检查。 */
+} map_source_enum;
 
 /**
  * @brief Flash 中保存项的当前状态。
@@ -79,11 +90,33 @@ void settings_set_runtime(uint8 current_map, run_mode_enum run_mode);
 uint8 settings_save(void);
 
 /**
+ * @brief 获取当前地图来源。
+ * @return 当前地图来源。
+ */
+map_source_enum settings_get_source(void);
+
+/**
+ * @brief 更新地图来源。
+ *
+ * @param[in] source 新来源值。
+ *
+ * @note 该函数只修改 RAM 中的来源并标记 Dirty，不立即写 Flash。
+ */
+void settings_set_source(map_source_enum source);
+
+/**
  * @brief 获取运行模式显示名。
  * @param[in] mode 运行模式。
  * @return 常量字符串地址。
  */
 const char *mode_name(run_mode_enum mode);
+
+/**
+ * @brief 获取地图来源显示名。
+ * @param[in] source 地图来源。
+ * @return 常量字符串地址。
+ */
+const char *source_name(map_source_enum source);
 
 /**
  * @brief 获取保存状态显示名。

@@ -1,6 +1,7 @@
 #include "zf_common_headfile.h"
 #include "zf_common_debug.h"
 #include "drive_control.h"
+#include "executor.h"
 #include "menu_key.h"
 #include "openart_uart.h"
 #include "isr.h"
@@ -17,6 +18,7 @@ void PIT_IRQHandler(void)
     {
         pit_flag_clear(PIT_CH1);
         update_control_20ms();   // 20ms 执行姿态环、混控和四轮速度 PID。
+        executor_update_20ms();
     }
 
     if(pit_flag_get(PIT_CH2))

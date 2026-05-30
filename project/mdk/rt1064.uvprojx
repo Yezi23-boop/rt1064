@@ -489,6 +489,11 @@
               <FileType>1</FileType>
               <FilePath>..\user\src\openart_uart.c</FilePath>
             </File>
+            <File>
+              <FileName>executor.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>..\user\src\executor.c</FilePath>
+            </File>
           </Files>
         </Group>
         <Group>
@@ -598,6 +603,11 @@
               <FileName>openart_uart.h</FileName>
               <FileType>5</FileType>
               <FilePath>..\user\inc\openart_uart.h</FilePath>
+            </File>
+            <File>
+              <FileName>executor.h</FileName>
+              <FileType>5</FileType>
+              <FilePath>..\user\inc\executor.h</FilePath>
             </File>
           </Files>
         </Group>

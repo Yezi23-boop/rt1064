@@ -9,25 +9,26 @@
 #include "drive_control.h"
 #include "drive_pose.h"
 #include "openart_uart.h"
+#include "executor.h"
 
 #define MENU_KEY_SCAN_PERIOD_MS (5)
 #define PLAYBACK_STEP_MS        (300u)
 #define HOME_DYNAMIC_REFRESH_MS (500u)
-#define HOME_ITEM_COUNT         (3)
+#define HOME_ITEM_COUNT         (4)
 #define RUN_ITEM_COUNT          (3)
-#define ROOT_PAGE_COUNT         (4)
+#define ROOT_PAGE_COUNT         (5)
 
 typedef enum
 {
     MENU_PAGE_HOME         = 0,
     MENU_PAGE_RUN          = 1,
-    MENU_PAGE_DEBUG        = 2,
-    MENU_PAGE_INFO         = 3,
+    MENU_PAGE_ART_MAP      = 2,
+    MENU_PAGE_DEBUG        = 3,
+    MENU_PAGE_INFO         = 4,
     MENU_PAGE_RUN_MAP      = 11,
     MENU_PAGE_RUN_MODE     = 12,
     MENU_PAGE_RUN_EXECUTE  = 13,
     MENU_PAGE_RUN_PLAYBACK = 14,
-    MENU_PAGE_RUN_DEMO     = 15,
 } menu_page_id_enum;
 
 typedef void (*menu_page_draw_func)(void);
@@ -47,6 +48,7 @@ typedef struct
 static const char *const home_items[HOME_ITEM_COUNT] =
 {
     "Run",
+    "ART Map",
     "Debug",
     "Info",
 };
@@ -54,6 +56,7 @@ static const char *const home_items[HOME_ITEM_COUNT] =
 static const menu_page_id_enum home_item_pages[HOME_ITEM_COUNT] =
 {
     MENU_PAGE_RUN,
+    MENU_PAGE_ART_MAP,
     MENU_PAGE_DEBUG,
     MENU_PAGE_INFO,
 };
@@ -87,12 +90,29 @@ static playback_state_enum playback_state;
 static uint32 playback_last_ms;
 static uint32 dynamic_last_ms;
 static uint8 need_redraw;
-static uint8 demo_active;
-static uint8 demo_index;
-static uint8 demo_ok_count;
-static uint8 demo_fail_count;
-static uint32 demo_last_elapsed_ms;
 static const char *run_state = "Idle";
+static uint8 exec_start_row = 0;
+static uint8 exec_start_col = 0;
+static char last_solve_rows[MAP_ROWS][MAP_COLS + 1];
+static map_source_struct last_solve_source =
+{
+    "Run",
+    {
+        last_solve_rows[0],
+        last_solve_rows[1],
+        last_solve_rows[2],
+        last_solve_rows[3],
+        last_solve_rows[4],
+        last_solve_rows[5],
+        last_solve_rows[6],
+        last_solve_rows[7],
+        last_solve_rows[8],
+        last_solve_rows[9],
+        last_solve_rows[10],
+        last_solve_rows[11],
+    },
+};
+static uint8 last_solve_source_valid = 0;
 
 static void draw_current_page(void);
 static void draw_home_page(void);
@@ -100,21 +120,24 @@ static void draw_run_page(void);
 static void draw_run_map_page(void);
 static void draw_mode_page(void);
 static void draw_playback_page(void);
-static void draw_demo_page(void);
 static void draw_debug_page(void);
 static void draw_info_page(void);
+static void draw_art_map_page(void);
 static void refresh_home_page(void);
 static void refresh_debug_page(void);
+static void refresh_art_map_page(void);
 static void handle_home_key(menu_key_event_enum event);
 static void handle_run_key(menu_key_event_enum event);
 static void handle_debug_key(menu_key_event_enum event);
 static void handle_info_key(menu_key_event_enum event);
+static void handle_art_map_key(menu_key_event_enum event);
 static void handle_map_event(menu_key_event_enum event);
 static void handle_mode_event(menu_key_event_enum event);
 static void handle_playback_event(menu_key_event_enum event);
-static void handle_demo_event(menu_key_event_enum event);
+static void draw_execute_page(void);
+static void refresh_execute_page(void);
+static void handle_execute_event(menu_key_event_enum event);
 static void execute_current_selection(void);
-static void stop_demo(void);
 
 static const menu_page_def_struct menu_pages[] =
 {
@@ -123,9 +146,10 @@ static const menu_page_def_struct menu_pages[] =
     { MENU_PAGE_RUN_MAP,      MENU_PAGE_RUN,  0,   draw_run_map_page,  0,                  handle_map_event    },
     { MENU_PAGE_RUN_MODE,     MENU_PAGE_RUN,  0,   draw_mode_page,     0,                  handle_mode_event   },
     { MENU_PAGE_RUN_PLAYBACK, MENU_PAGE_RUN,  0,   draw_playback_page, 0,                  handle_playback_event },
-    { MENU_PAGE_RUN_DEMO,     MENU_PAGE_RUN,  0,   draw_demo_page,     0,                  handle_demo_event   },
+    { MENU_PAGE_RUN_EXECUTE,  MENU_PAGE_RUN,  500, draw_execute_page,  refresh_execute_page, handle_execute_event },
     { MENU_PAGE_DEBUG,        MENU_PAGE_HOME, HOME_DYNAMIC_REFRESH_MS, draw_debug_page,    refresh_debug_page, handle_debug_key    },
     { MENU_PAGE_INFO,         MENU_PAGE_HOME, 0,   draw_info_page,     0,                  handle_info_key     },
+    { MENU_PAGE_ART_MAP,      MENU_PAGE_HOME, HOME_DYNAMIC_REFRESH_MS, draw_art_map_page,  refresh_art_map_page, handle_art_map_key },
 };
 
 static void mark_redraw(void)
@@ -232,7 +256,6 @@ static void go_home(void)
 {
     candidate_map = current_map;
     candidate_mode = run_mode;
-    stop_demo();
     enter_page(MENU_PAGE_HOME);
 }
 
@@ -252,13 +275,64 @@ static void clear_result_state(void)
     last_elapsed_ms = 0;
     playback_step = 0;
     playback_state = PLAYBACK_STATE_PAUSED;
+    last_solve_source_valid = 0;
     run_state = "Idle";
+}
+
+static const map_source_struct *selected_map_source(void)
+{
+    if(MAP_SOURCE_ART == settings_get_source())
+    {
+        return openart_map_get();
+    }
+    return map_get(current_map);
+}
+
+static void save_solve_source_snapshot(const map_source_struct *source)
+{
+    uint8 row, col;
+
+    last_solve_source.name = source->name;
+    for(row = 0; row < MAP_ROWS; row++)
+    {
+        for(col = 0; col < MAP_COLS; col++)
+        {
+            last_solve_rows[row][col] = source->rows[row][col];
+        }
+        last_solve_rows[row][MAP_COLS] = '\0';
+    }
+    last_solve_source_valid = 1;
+}
+
+static const map_source_struct *last_or_selected_map_source(void)
+{
+    if(0 != last_solve_source_valid)
+    {
+        return &last_solve_source;
+    }
+    return selected_map_source();
 }
 
 static void solve_current_map(void)
 {
-    const map_source_struct *source = map_get(current_map);
+    const map_source_struct *source;
     uint32 start_ms;
+
+    source = selected_map_source();
+
+    if(0 == source)
+    {
+        clear_result(&last_result);
+        last_elapsed_ms = 0;
+        playback_step = 0;
+        playback_state = PLAYBACK_STATE_FAIL;
+        last_solve_source_valid = 0;
+        run_state = "No Map";
+        mark_redraw();
+        return;
+    }
+    save_solve_source_snapshot(source);
+    source = &last_solve_source;
 
     run_state = "Running";
     mark_redraw();
@@ -290,67 +364,6 @@ static void solve_current_map(void)
 
     playback_step = 0;
     playback_last_ms = time_ms();
-}
-
-static void start_demo(void)
-{
-    demo_active = 1;
-    demo_index = 0;
-    demo_ok_count = 0;
-    demo_fail_count = 0;
-    demo_last_elapsed_ms = 0;
-    run_state = "Running";
-    clear_result(&last_result);
-    mark_redraw();
-}
-
-static void stop_demo(void)
-{
-    if(0 != demo_active)
-    {
-        demo_active = 0;
-        run_state = "Stop";
-        mark_redraw();
-    }
-}
-
-static void demo_tick(void)
-{
-    const map_source_struct *source;
-    uint32 start_ms;
-
-    if((MENU_PAGE_RUN_DEMO != current_page) || (0 == demo_active))
-    {
-        return;
-    }
-
-    if(demo_index >= map_count())
-    {
-        demo_active = 0;
-        run_state = "Done";
-        mark_redraw();
-        return;
-    }
-
-    source = map_get(demo_index);
-    start_ms = time_ms();
-    if(0 != solve_map(source, &last_result))
-    {
-        demo_ok_count++;
-    }
-    else
-    {
-        demo_fail_count++;
-    }
-    demo_last_elapsed_ms = time_ms() - start_ms;
-    demo_index++;
-
-    if(demo_index >= map_count())
-    {
-        demo_active = 0;
-        run_state = "Done";
-    }
-    mark_redraw();
 }
 
 static void move_cursor(int8 delta)
@@ -481,7 +494,15 @@ static void handle_run_event(menu_key_event_enum event)
     }
     else if(MENU_KEY_EVENT_K3_SHORT == event)
     {
-        execute_current_selection();
+        if(EXEC_STATE_PAUSED == executor_get_state())
+        {
+            executor_resume();
+            run_state = "Running";
+        }
+        else if(EXEC_STATE_IDLE == executor_get_state())
+        {
+            execute_current_selection();
+        }
     }
     else if(MENU_KEY_EVENT_K3_LONG == event)
     {
@@ -489,7 +510,18 @@ static void handle_run_event(menu_key_event_enum event)
     }
     else if(MENU_KEY_EVENT_K4_SHORT == event)
     {
-        go_home();
+        if(EXEC_STATE_ERROR == executor_get_state() ||
+           EXEC_STATE_DONE == executor_get_state())
+        {
+            executor_stop();
+            run_state = "Idle";
+        }
+        else
+        {
+            map_source_enum src = settings_get_source();
+            settings_set_source((MAP_SOURCE_OFFLINE == src) ? MAP_SOURCE_ART : MAP_SOURCE_OFFLINE);
+            mark_redraw();
+        }
     }
 }
 
@@ -589,15 +621,6 @@ static void handle_playback_event(menu_key_event_enum event)
     }
 }
 
-static void handle_demo_event(menu_key_event_enum event)
-{
-    if(MENU_KEY_EVENT_K4_SHORT == event)
-    {
-        stop_demo();
-        enter_page(MENU_PAGE_RUN);
-    }
-}
-
 static void handle_debug_key(menu_key_event_enum event)
 {
     if(MENU_KEY_EVENT_K4_SHORT == event)
@@ -636,28 +659,52 @@ static void playback_tick(void)
     }
 }
 
+static void find_car_in_source(const map_source_struct *source, uint8 *row_out, uint8 *col_out)
+{
+    uint8 r, c;
+
+    for(r = 0; r < MAP_ROWS; r++)
+    {
+        for(c = 0; c < MAP_COLS; c++)
+        {
+            if('C' == source->rows[r][c])
+            {
+                *row_out = r;
+                *col_out = c;
+                return;
+            }
+        }
+    }
+    *row_out = 0;
+    *col_out = 0;
+}
+
 static void execute_current_selection(void)
 {
     candidate_map = current_map;
     candidate_mode = run_mode;
-
-    if(RUN_MODE_BROWSE == run_mode)
-    {
-        clear_result_state();
-        run_state = "Browse";
-        enter_page(MENU_PAGE_RUN);
-        return;
-    }
-
-    if(RUN_MODE_DEMO == run_mode)
-    {
-        start_demo();
-        enter_page(MENU_PAGE_RUN_DEMO);
-        return;
-    }
-
     solve_current_map();
-    enter_page(MENU_PAGE_RUN_PLAYBACK);
+
+    if(last_result.solved)
+    {
+        if(RUN_MODE_SOLVE == run_mode)
+        {
+            enter_page(MENU_PAGE_RUN_PLAYBACK);
+        }
+        else
+        {
+            uint8 single_step = (RUN_MODE_STEP == run_mode) ? 1u : 0u;
+
+            if(0 != last_solve_source_valid)
+            {
+                find_car_in_source(&last_solve_source, &exec_start_row, &exec_start_col);
+            }
+
+            executor_start(last_result.waypoints, last_result.waypoint_count,
+                           exec_start_row, exec_start_col, single_step);
+            enter_page(MENU_PAGE_RUN_EXECUTE);
+        }
+    }
 }
 
 static void dispatch_key_event(menu_key_event_enum event)
@@ -715,7 +762,7 @@ static void draw_debug_page(void)
 
 static void draw_run_page(void)
 {
-    screen_draw_run_workbench(current_map, run_mode, settings_get_save_state(), run_state, last_elapsed_ms);
+    screen_draw_run_workbench(current_map, run_mode, settings_get_source(), settings_get_save_state(), run_state, last_elapsed_ms);
 }
 
 static void draw_run_map_page(void)
@@ -756,6 +803,37 @@ static void refresh_debug_page(void)
     draw_debug_page();
 }
 
+static uint32 art_map_age_seconds(void)
+{
+    uint32 last_ms = openart_last_rx_ms();
+
+    if(0 == last_ms)
+    {
+        return 0;
+    }
+    return (time_ms() - last_ms) / 1000u;
+}
+
+static void draw_art_map_page(void)
+{
+    const map_source_struct *source = openart_map_get();
+
+    screen_draw_art_map(openart_uart_get_frame_count(), art_map_age_seconds(), source);
+}
+
+static void refresh_art_map_page(void)
+{
+    draw_art_map_page();
+}
+
+static void handle_art_map_key(menu_key_event_enum event)
+{
+    if(MENU_KEY_EVENT_K4_SHORT == event)
+    {
+        go_home();
+    }
+}
+
 static void refresh_current_page_dynamic(void)
 {
     const menu_page_def_struct *page;
@@ -777,15 +855,48 @@ static void refresh_current_page_dynamic(void)
 
 static void draw_playback_page(void)
 {
-    screen_draw_playback(current_map, map_get(current_map), &last_result, playback_step, last_elapsed_ms, playback_state);
+    screen_draw_playback(current_map, last_or_selected_map_source(), &last_result, playback_step, last_elapsed_ms, playback_state);
 }
 
-static void draw_demo_page(void)
+static void draw_execute_page(void)
 {
-    uint8 total = map_count();
-    uint8 display_index = (demo_index >= total) ? total : (uint8)(demo_index + 1u);
+    screen_draw_execute(current_map,
+                        last_or_selected_map_source(),
+                        &last_result,
+                        executor_get_current_step(),
+                        executor_get_state(),
+                        executor_get_current_box(),
+                        executor_get_total_boxes(),
+                        exec_start_row,
+                        exec_start_col);
+}
 
-    screen_draw_demo(display_index, total, demo_ok_count, demo_fail_count, demo_last_elapsed_ms, run_state);
+static void refresh_execute_page(void)
+{
+    draw_execute_page();
+}
+
+static void handle_execute_event(menu_key_event_enum event)
+{
+    switch(event)
+    {
+        case MENU_KEY_EVENT_K3_SHORT:
+            /* 单步模式下恢复执行 */
+            if(EXEC_STATE_PAUSED == executor_get_state())
+            {
+                executor_resume();
+            }
+            break;
+            
+        case MENU_KEY_EVENT_K4_SHORT:
+            /* 停止执行，返回 Run 页面 */
+            executor_stop();
+            go_parent();
+            break;
+            
+        default:
+            break;
+    }
 }
 
 static void draw_current_page(void)
@@ -828,11 +939,6 @@ void menu_init(void)
     playback_state = PLAYBACK_STATE_PAUSED;
     playback_last_ms = 0;
     dynamic_last_ms = time_ms();
-    demo_active = 0;
-    demo_index = 0;
-    demo_ok_count = 0;
-    demo_fail_count = 0;
-    demo_last_elapsed_ms = 0;
     run_state = "Idle";
     clear_result(&last_result);
     mark_redraw();
@@ -849,7 +955,6 @@ void menu_poll(void)
         dispatch_key_event(event);
     }
 
-    demo_tick();
     playback_tick();
 
     if(0 != need_redraw)
