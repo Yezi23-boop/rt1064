@@ -31,8 +31,7 @@ typedef enum
     MENU_PAGE_RUN_PLAYBACK = 14,
 } menu_page_id_enum;
 
-typedef void (*menu_page_draw_func)(void);
-typedef void (*menu_page_refresh_func)(void);
+typedef void (*menu_page_lifecycle_func)(void);
 typedef void (*menu_page_key_func)(menu_key_event_enum event);
 
 typedef struct
@@ -40,8 +39,10 @@ typedef struct
     menu_page_id_enum id;
     menu_page_id_enum parent;
     uint16 refresh_ms;
-    menu_page_draw_func draw_full;
-    menu_page_refresh_func refresh_dynamic;
+    menu_page_lifecycle_func on_enter;
+    menu_page_lifecycle_func on_exit;
+    menu_page_lifecycle_func on_draw;
+    menu_page_lifecycle_func on_refresh;
     menu_page_key_func on_key;
 } menu_page_def_struct;
 
@@ -115,6 +116,8 @@ static map_source_struct last_solve_source =
 static uint8 last_solve_source_valid = 0;
 
 static void draw_current_page(void);
+static void enter_run_map_page(void);
+static void enter_run_mode_page(void);
 static void draw_home_page(void);
 static void draw_run_page(void);
 static void draw_run_map_page(void);
@@ -141,15 +144,15 @@ static void execute_current_selection(void);
 
 static const menu_page_def_struct menu_pages[] =
 {
-    { MENU_PAGE_HOME,         MENU_PAGE_HOME, HOME_DYNAMIC_REFRESH_MS, draw_home_page,     refresh_home_page,  handle_home_key     },
-    { MENU_PAGE_RUN,          MENU_PAGE_HOME, 0,   draw_run_page,      0,                  handle_run_key      },
-    { MENU_PAGE_RUN_MAP,      MENU_PAGE_RUN,  0,   draw_run_map_page,  0,                  handle_map_event    },
-    { MENU_PAGE_RUN_MODE,     MENU_PAGE_RUN,  0,   draw_mode_page,     0,                  handle_mode_event   },
-    { MENU_PAGE_RUN_PLAYBACK, MENU_PAGE_RUN,  0,   draw_playback_page, 0,                  handle_playback_event },
-    { MENU_PAGE_RUN_EXECUTE,  MENU_PAGE_RUN,  500, draw_execute_page,  refresh_execute_page, handle_execute_event },
-    { MENU_PAGE_DEBUG,        MENU_PAGE_HOME, HOME_DYNAMIC_REFRESH_MS, draw_debug_page,    refresh_debug_page, handle_debug_key    },
-    { MENU_PAGE_INFO,         MENU_PAGE_HOME, 0,   draw_info_page,     0,                  handle_info_key     },
-    { MENU_PAGE_ART_MAP,      MENU_PAGE_HOME, HOME_DYNAMIC_REFRESH_MS, draw_art_map_page,  refresh_art_map_page, handle_art_map_key },
+    { MENU_PAGE_HOME,         MENU_PAGE_HOME, HOME_DYNAMIC_REFRESH_MS, 0,                   0, draw_home_page,     refresh_home_page,    handle_home_key      },
+    { MENU_PAGE_RUN,          MENU_PAGE_HOME, 0,                       0,                   0, draw_run_page,      0,                    handle_run_key       },
+    { MENU_PAGE_RUN_MAP,      MENU_PAGE_RUN,  0,                       enter_run_map_page,  0, draw_run_map_page,  0,                    handle_map_event     },
+    { MENU_PAGE_RUN_MODE,     MENU_PAGE_RUN,  0,                       enter_run_mode_page, 0, draw_mode_page,     0,                    handle_mode_event    },
+    { MENU_PAGE_RUN_PLAYBACK, MENU_PAGE_RUN,  0,                       0,                   0, draw_playback_page, 0,                    handle_playback_event },
+    { MENU_PAGE_RUN_EXECUTE,  MENU_PAGE_RUN,  500,                     0,                   0, draw_execute_page,  refresh_execute_page, handle_execute_event  },
+    { MENU_PAGE_DEBUG,        MENU_PAGE_HOME, HOME_DYNAMIC_REFRESH_MS, 0,                   0, draw_debug_page,    refresh_debug_page,   handle_debug_key     },
+    { MENU_PAGE_INFO,         MENU_PAGE_HOME, 0,                       0,                   0, draw_info_page,     0,                    handle_info_key      },
+    { MENU_PAGE_ART_MAP,      MENU_PAGE_HOME, HOME_DYNAMIC_REFRESH_MS, 0,                   0, draw_art_map_page,  refresh_art_map_page, handle_art_map_key   },
 };
 
 static void mark_redraw(void)
@@ -219,11 +222,20 @@ static void save_page_cursor(void)
 
 static void enter_page(menu_page_id_enum page)
 {
+    const menu_page_def_struct *old_page;
+    const menu_page_def_struct *new_page;
     uint8 root;
+
+    old_page = find_page(current_page);
+    if(0 != old_page->on_exit)
+    {
+        old_page->on_exit();
+    }
 
     save_page_cursor();
     current_page = page;
-    root = page_root(page);
+    new_page = find_page(current_page);
+    root = page_root(current_page);
 
     if(root < ROOT_PAGE_COUNT)
     {
@@ -239,17 +251,23 @@ static void enter_page(menu_page_id_enum page)
         cursor_row = 0;
     }
 
-    if(MENU_PAGE_RUN_MAP == page)
+    if(0 != new_page->on_enter)
     {
-        candidate_map = current_map;
-    }
-    else if(MENU_PAGE_RUN_MODE == page)
-    {
-        candidate_mode = run_mode;
+        new_page->on_enter();
     }
 
     previous_cursor_row = cursor_row;
     mark_redraw();
+}
+
+static void enter_run_map_page(void)
+{
+    candidate_map = current_map;
+}
+
+static void enter_run_mode_page(void)
+{
+    candidate_mode = run_mode;
 }
 
 static void go_home(void)
@@ -840,7 +858,7 @@ static void refresh_current_page_dynamic(void)
     uint32 now_ms;
 
     page = find_page(current_page);
-    if((0 == page->refresh_ms) || (0 == page->refresh_dynamic))
+    if((0 == page->refresh_ms) || (0 == page->on_refresh))
     {
         return;
     }
@@ -849,7 +867,7 @@ static void refresh_current_page_dynamic(void)
     if((now_ms - dynamic_last_ms) >= page->refresh_ms)
     {
         dynamic_last_ms = now_ms;
-        page->refresh_dynamic();
+        page->on_refresh();
     }
 }
 
@@ -909,9 +927,9 @@ static void draw_current_page(void)
         page = find_page(current_page);
     }
 
-    if(0 != page->draw_full)
+    if(0 != page->on_draw)
     {
-        page->draw_full();
+        page->on_draw();
     }
 }
 
