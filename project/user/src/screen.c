@@ -777,6 +777,17 @@ static const char *executor_state_text(executor_state_enum state)
     }
 }
 
+static const char *executor_error_text(executor_error_enum error)
+{
+    switch(error)
+    {
+        case EXEC_ERROR_TIMEOUT: return "E:TMO";
+        case EXEC_ERROR_MAP:     return "E:MAP";
+        case EXEC_ERROR_NONE:    return "E:OK";
+        default:                 return "E:?";
+    }
+}
+
 static void draw_executor_status(const screen_run_view_struct *view)
 {
     uint16 y0 = EXEC_LINE_Y(0);
@@ -802,14 +813,7 @@ static void draw_executor_status(const screen_run_view_struct *view)
     ips200_show_float(132, y1, (double)view->pose_y_cm, 3, 1);
     if(EXEC_STATE_ERROR == view->executor_state)
     {
-        const char *err_msg = "E:?";
-        switch(view->executor_error)
-        {
-            case EXEC_ERROR_TIMEOUT: err_msg = "E:TMO"; break;
-            case EXEC_ERROR_MAP:     err_msg = "E:MAP"; break;
-            default: break;
-        }
-        ips200_show_string(176, y1, err_msg);
+        ips200_show_string(176, y1, executor_error_text(view->executor_error));
     }
 }
 
@@ -978,6 +982,10 @@ void screen_draw_execute(const screen_execute_view_struct *view)
     ips200_show_uint(104, LINE_H * 2, view->current_step, 3);
     ips200_show_string(128, LINE_H * 2, "/");
     ips200_show_uint(136, LINE_H * 2, view->result->waypoint_count, 3);
+    if(EXEC_STATE_ERROR == view->state)
+    {
+        ips200_show_string(176, LINE_H * 2, executor_error_text(view->error));
+    }
 
     /* 4. 绘制箱子信息 */
     ips200_show_string(0, LINE_H * 3, "B:");
