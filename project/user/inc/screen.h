@@ -17,6 +17,63 @@ typedef enum
     PLAYBACK_STATE_FAIL,        /**< 当前地图求解失败，只显示失败信息。 */
 } playback_state_enum;
 
+typedef struct
+{
+    const char *const *items;
+    uint8 item_count;
+    uint8 cursor;
+    uint8 current_map;
+    run_mode_enum mode;
+    save_state_enum save_state;
+    const float *encoder_count;
+    float imu_roll;
+    float imu_pitch;
+    float imu_yaw;
+    float target_yaw;
+    float yaw_error;
+    float vz;
+    float vzt;
+    float pose_x_cm;
+    float pose_y_cm;
+    uint32 openart_frame_count;
+} screen_home_view_struct;
+
+typedef struct
+{
+    uint8 current_map;
+    run_mode_enum mode;
+    map_source_enum source_type;
+    save_state_enum save_state;
+    const char *state_text;
+    uint32 elapsed_ms;
+    const map_source_struct *source;
+    uint8 executor_active;
+    executor_state_enum executor_state;
+    executor_error_enum executor_error;
+    uint16 current_step;
+    uint16 total_steps;
+    uint16 current_box;
+    uint16 total_boxes;
+    float pose_x_cm;
+    float pose_y_cm;
+} screen_run_view_struct;
+
+typedef struct
+{
+    uint8 current_map;
+    const map_source_struct *source;
+    const solve_result_struct *result;
+    uint16 current_step;
+    executor_state_enum state;
+    executor_error_enum error;
+    uint16 current_box;
+    uint16 total_boxes;
+    uint8 start_row;
+    uint8 start_col;
+    float pose_x_cm;
+    float pose_y_cm;
+} screen_execute_view_struct;
+
 /**
  * @brief 初始化 IPS200 屏幕显示参数。
  *
@@ -47,14 +104,14 @@ void screen_init(void);
  * @param[in] pose_y_cm 全局定位 Y 坐标，单位为 cm，前进为正。
  * @param[in] openart_frame_count OpenART 地图接收成功帧数。
  */
-void screen_draw_home(const char *const *items, uint8 item_count, uint8 cursor, uint8 current_map, run_mode_enum mode, save_state_enum save_state, const float encoder_count[WHEEL_COUNT], float imu_roll, float imu_pitch, float imu_yaw, float target_yaw, float yaw_error, float vz, float vzt, float pose_x_cm, float pose_y_cm, uint32 openart_frame_count);
+void screen_draw_home(const screen_home_view_struct *view);
 
 /**
  * @brief 局部刷新 Home 页面动态状态行。
  *
  * 只更新编码器、IMU、Yaw 和定位坐标，不重绘菜单和光标。
  */
-void screen_draw_home_status(const float encoder_count[WHEEL_COUNT], float imu_roll, float imu_pitch, float imu_yaw, float target_yaw, float yaw_error, float vz, float vzt, float pose_x_cm, float pose_y_cm, uint32 openart_frame_count);
+void screen_draw_home_status(const screen_home_view_struct *view);
 
 /**
  * @brief 只刷新列表页光标，不重绘整页。
@@ -82,7 +139,7 @@ void screen_draw_mode_page(run_mode_enum candidate_mode);
 /**
  * @brief 绘制 Run 工作台页面，显示当前地图并允许直接执行。
  */
-void screen_draw_run_workbench(uint8 current_map, run_mode_enum mode, map_source_enum source, save_state_enum save_state, const char *state, uint32 elapsed_ms);
+void screen_draw_run_workbench(const screen_run_view_struct *view);
 
 /**
  * @brief 绘制 Run 页面。
@@ -167,14 +224,6 @@ void screen_draw_info(uint8 map_count_value, save_state_enum save_state);
  * @param[in] start_row     起点行号
  * @param[in] start_col     起点列号
  */
-void screen_draw_execute(uint8 current_map,
-                         const map_source_struct *source,
-                         const solve_result_struct *result,
-                         uint16 current_step,
-                         executor_state_enum state,
-                         uint16 current_box,
-                         uint16 total_boxes,
-                         uint8 start_row,
-                         uint8 start_col);
+void screen_draw_execute(const screen_execute_view_struct *view);
 
 #endif

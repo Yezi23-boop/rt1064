@@ -747,28 +747,76 @@ static void dispatch_key_event(menu_key_event_enum event)
     }
 }
 
-static void draw_home_page(void)
+static void build_home_view(screen_home_view_struct *view)
 {
     const control_status_struct *status = get_control_status();
     const drive_pose_struct *pose = drive_pose_get();
 
-    screen_draw_home(home_items,
-        HOME_ITEM_COUNT,
-        cursor_row,
-        current_map,
-        run_mode,
-        settings_get_save_state(),
-        status->wheel_feedback_count,
-        status->current_roll,
-        status->current_pitch,
-        status->current_yaw,
-        status->target_yaw,
-        status->yaw_error,
-        status->vz,
-        status->vzt,
-        pose->x_cm,
-        pose->y_cm,
-        openart_uart_get_frame_count());
+    view->items = home_items;
+    view->item_count = HOME_ITEM_COUNT;
+    view->cursor = cursor_row;
+    view->current_map = current_map;
+    view->mode = run_mode;
+    view->save_state = settings_get_save_state();
+    view->encoder_count = status->wheel_feedback_count;
+    view->imu_roll = status->current_roll;
+    view->imu_pitch = status->current_pitch;
+    view->imu_yaw = status->current_yaw;
+    view->target_yaw = status->target_yaw;
+    view->yaw_error = status->yaw_error;
+    view->vz = status->vz;
+    view->vzt = status->vzt;
+    view->pose_x_cm = pose->x_cm;
+    view->pose_y_cm = pose->y_cm;
+    view->openart_frame_count = openart_uart_get_frame_count();
+}
+
+static void build_run_view(screen_run_view_struct *view)
+{
+    const drive_pose_struct *pose = drive_pose_get();
+
+    view->current_map = current_map;
+    view->mode = run_mode;
+    view->source_type = settings_get_source();
+    view->save_state = settings_get_save_state();
+    view->state_text = run_state;
+    view->elapsed_ms = last_elapsed_ms;
+    view->source = selected_map_source();
+    view->executor_active = (EXEC_STATE_IDLE != executor_get_state()) ? 1u : 0u;
+    view->executor_state = executor_get_state();
+    view->executor_error = executor_get_error();
+    view->current_step = executor_get_current_step();
+    view->total_steps = executor_get_total_steps();
+    view->current_box = executor_get_current_box();
+    view->total_boxes = executor_get_total_boxes();
+    view->pose_x_cm = pose->x_cm;
+    view->pose_y_cm = pose->y_cm;
+}
+
+static void build_execute_view(screen_execute_view_struct *view)
+{
+    const drive_pose_struct *pose = drive_pose_get();
+
+    view->current_map = current_map;
+    view->source = last_or_selected_map_source();
+    view->result = &last_result;
+    view->current_step = executor_get_current_step();
+    view->state = executor_get_state();
+    view->error = executor_get_error();
+    view->current_box = executor_get_current_box();
+    view->total_boxes = executor_get_total_boxes();
+    view->start_row = exec_start_row;
+    view->start_col = exec_start_col;
+    view->pose_x_cm = pose->x_cm;
+    view->pose_y_cm = pose->y_cm;
+}
+
+static void draw_home_page(void)
+{
+    screen_home_view_struct view;
+
+    build_home_view(&view);
+    screen_draw_home(&view);
 }
 
 static void draw_debug_page(void)
@@ -780,7 +828,10 @@ static void draw_debug_page(void)
 
 static void draw_run_page(void)
 {
-    screen_draw_run_workbench(current_map, run_mode, settings_get_source(), settings_get_save_state(), run_state, last_elapsed_ms);
+    screen_run_view_struct view;
+
+    build_run_view(&view);
+    screen_draw_run_workbench(&view);
 }
 
 static void draw_run_map_page(void)
@@ -800,20 +851,10 @@ static void draw_info_page(void)
 
 static void refresh_home_page(void)
 {
-    const control_status_struct *status = get_control_status();
-    const drive_pose_struct *pose = drive_pose_get();
+    screen_home_view_struct view;
 
-    screen_draw_home_status(status->wheel_feedback_count,
-        status->current_roll,
-        status->current_pitch,
-        status->current_yaw,
-        status->target_yaw,
-        status->yaw_error,
-        status->vz,
-        status->vzt,
-        pose->x_cm,
-        pose->y_cm,
-        openart_uart_get_frame_count());
+    build_home_view(&view);
+    screen_draw_home_status(&view);
 }
 
 static void refresh_debug_page(void)
@@ -878,15 +919,10 @@ static void draw_playback_page(void)
 
 static void draw_execute_page(void)
 {
-    screen_draw_execute(current_map,
-                        last_or_selected_map_source(),
-                        &last_result,
-                        executor_get_current_step(),
-                        executor_get_state(),
-                        executor_get_current_box(),
-                        executor_get_total_boxes(),
-                        exec_start_row,
-                        exec_start_col);
+    screen_execute_view_struct view;
+
+    build_execute_view(&view);
+    screen_draw_execute(&view);
 }
 
 static void refresh_execute_page(void)
