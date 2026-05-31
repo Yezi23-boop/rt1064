@@ -9,28 +9,39 @@
 #define CONTROL_PERIOD_MS (20)
 /** 轮速 PID 与姿态环的执行周期，单位为 s。 */
 #define CONTROL_DT_S (0.02f)
+/** 推箱子地图每格物理尺寸，单位 cm。 */
+#define GRID_SIZE_CM (20.0f)
 
 /** 第一版上板使用的保守目标轮速上限，单位为 encoder count/20ms。 */
 #define MAX_WHEEL_TARGET_COUNT (100.0f)
 /** 编码器增量到地面位移的标定系数，单位 cm/count；位姿解算只改这个系数做距离标定。 */
 #define POSE_CM_PER_COUNT (0.0086f)
-/** 位姿 X 轴方向校正；当前实测右移时 pose_x_cm 减少，因此取 -1 使右移为正。 */
+/** 位姿 X 轴方向校正；当前取 +1，表示麦轮反解的正 X 直接对应右移为正。 */
 #define POSE_X_DIR_SIGN (1.0f)
-/** 位姿 Y 轴方向校正；当前实测前进时 pose_y_cm 减少，因此取 -1 使前进为正。 */
+/** 位姿 Y 轴方向校正；当前取 +1，表示麦轮反解的正 Y 直接对应前进为正。 */
 #define POSE_Y_DIR_SIGN (1.0f)
 /** 第一版上板使用的保守 PWM 限幅，PWM_DUTY_MAX 的量程为 10000。 */
-#define MAX_PWM_DUTY (5000)
+#define MAX_PWM_DUTY (8000)
 /** 电机 PWM 频率，单位为 Hz。 */
 #define PWM_FREQ_HZ (17000)
+/** 电机最小有效 PWM 补偿开关；置 1 后非零小 PWM 会抬到死区以上。 */
+#define MOTOR_PWM_DEADBAND_ENABLE (1)
+/** 四轮最小有效 PWM，占空比量程同 MAX_PWM_DUTY/PWM_DUTY_MAX，轮序为 LF/LB/RF/RB。 */
+#define MOTOR_PWM_DEADBAND_LF (500)
+#define MOTOR_PWM_DEADBAND_LB (700)
+#define MOTOR_PWM_DEADBAND_RF (500)
+#define MOTOR_PWM_DEADBAND_RB (400)
 
 /** yaw 姿态 PD 比例系数；误差单位为 degree，输出为归一化姿态修正分量 vzt。 */
-#define YAW_KP (0.20f)
+#define YAW_KP (0.08f)
 /** yaw 姿态 PD 微分系数；不加入积分项，避免静态角度误差累积导致过冲。 */
-#define YAW_KD (0.1f)
+#define YAW_KD (0.0001f)
 /** yaw 姿态环硬死区，单位 degree；死区内不输出姿态修正，避免零点附近 IMU 小抖动带动车轮。 */
 #define YAW_DEADBAND_DEG (0.5f)
 /** 姿态环允许输出的最大归一化旋转分量。 */
 #define MAX_VZ (1.0f)
+/** 平移/路径执行时姿态保持允许叠加的最大旋转修正，避免横移被 yaw 环抢占。 */
+#define YAW_TRANSLATION_MAX_VZ (0.5f)
 /** 离散原地转向每次命令对应的最大目标角步进，单位为 degree。 */
 #define TURN_STEP_DEG (10.0f)
 
@@ -44,18 +55,39 @@
 #define IMU_YAW_STARTUP_STABLE_DELAY_MS (6000)
 
 /** 四轮增量式速度 PID 比例初值；上板后根据 encoder count/20ms 反馈调整。 */
-#define WHEEL_PID_KP (2.0f)
+#define WHEEL_PID_KP (5.0f)
 /** 四轮增量式速度 PID 积分初值；单位随 count/20ms 误差和 PWM 输出共同确定。 */
-#define WHEEL_PID_KI (0.3f)
+#define WHEEL_PID_KI (0.5f)
 /** 四轮增量式速度 PID 微分初值；第一版关闭微分。 */
 #define WHEEL_PID_KD (0.0f)
+/** 目标轮速小于该阈值时认为该轮应停转，不让编码器微小抖动触发速度环补偿。 */
+#define WHEEL_TARGET_STOP_EPS_COUNT (1.0f)
+/** 目标轮速达到该阈值才允许电机死区补偿，避免姿态小修正被放大成抖动。 */
+#define MOTOR_PWM_DEADBAND_TARGET_THRESHOLD_COUNT (10.0f)
 
 /** 起步 PWM 阶梯限幅开关；置 1 后速度环输出会先从较低 PWM 窗口逐步放开。 */
 #define DRIVE_START_PWM_RAMP_ENABLE (1)
 /** 起步首个非零输出周期允许的最大 signed PWM 绝对值。 */
-#define DRIVE_START_PWM_RAMP_INITIAL_LIMIT (600)
+#define DRIVE_START_PWM_RAMP_INITIAL_LIMIT (1000)
 /** 每个 20ms 控制周期放开的 signed PWM 窗口增量。 */
-#define DRIVE_START_PWM_RAMP_STEP (10)
+#define DRIVE_START_PWM_RAMP_STEP (100)
+
+/** 路径跟踪PID比例系数；误差单位为cm，输出为归一化速度。 */
+#define PATH_KP (0.15f)
+/** 路径跟踪PID积分系数；用于消除稳态误差。 */
+#define PATH_KI (0.0f)
+/** 路径跟踪PID微分系数；用于减少超调。 */
+#define PATH_KD (0.0f)
+/** 路径跟踪PID最大输出速度，归一化到 MAX_WHEEL_TARGET_COUNT。 */
+#define PATH_MAX_SPEED (1.0f)
+/** 路径跟踪PID积分限幅，防积分饱和。 */
+#define PATH_MAX_INTEGRAL (5.0f)
+/** 路径跟踪PID到点阈值，单位cm。 */
+#define PATH_ARRIVAL_THRESHOLD_CM (0.5f)
+/** 执行器到点需要连续满足阈值的 20ms 周期数，用于过滤瞬时越界和惯性抖动。 */
+#define EXEC_ARRIVAL_STABLE_TICKS (3u)
+/** waypoint 切换前的停稳时间，单位 ms；只在拐点/路径点边界停，不拆连续直线段。 */
+#define EXEC_SEGMENT_SETTLE_MS (150u)
 
 /** 底盘统一轮序，混控、硬件映射和调试输出均不得更换该顺序。 */
 typedef enum

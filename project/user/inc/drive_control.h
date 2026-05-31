@@ -69,6 +69,14 @@ void set_target_yaw(float yaw);
 void set_motion_target(float vx, float vy, float yaw_target);
 
 /**
+ * @brief 结束当前路径小段并清除速度环输出记忆。
+ *
+ * @note 用于执行器切换 waypoint：清零平移/旋转指令、四轮目标和轮速 PID，
+ *       但不改写当前目标 yaw，避免拐点短暂停顿后带着上一段 PWM 累计量起步。
+ */
+void reset_motion_segment(void);
+
+/**
  * @brief 稳定停止底盘输出。
  * @note 函数将目标 yaw 更新为当前 yaw，并直接关闭电机输出，防止下一周期因旧目标重新转动。
  */

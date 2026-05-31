@@ -9,9 +9,9 @@
 /** VOFA+ 曲线输出开关；遥控时保持低频输出，避免同一无线串口边发曲线边收摇杆导致延迟。 */
 #define VOFA_CURVE_OUTPUT_ENABLE (0)
 /** VOFA+ 曲线刷新周期，单位 ms；需要边看曲线边遥控时先用低频，避免挤占摇杆 RX。 */
-#define VOFA_SEND_PERIOD_MS (200u)
+#define VOFA_SEND_PERIOD_MS (100)
 /** 位姿调试输出开关；置 1 后 FireWater 只发送 pose_x/y/yaw 和车体本周期 vx/vy 位移。 */
-#define VOFA_POSE_ONLY_ENABLE (1)
+#define VOFA_POSE_ONLY_ENABLE (0)
 /** 摇杆接管底盘开关；先保持关闭，确认上位机发送格式后再置 1 接入主程序。 */
 #define VOFA_JOYSTICK_CONTROL_ENABLE (0)
 /** 摇杆命令超时时间，超过该时间未收到新坐标即停车，避免无线链路中断后保持旧速度。 */

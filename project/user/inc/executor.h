@@ -22,9 +22,14 @@ typedef enum {
 /** @brief 执行器错误类型 */
 typedef enum {
     EXEC_ERROR_NONE,      /**< 无错误 */
-    EXEC_ERROR_TIMEOUT,   /**< 单步超时（3秒） */
     EXEC_ERROR_MAP        /**< 地图数据异常 */
 } executor_error_enum;
+
+/**
+ * @brief 初始化执行器PID参数。
+ * @note 应在主程序初始化阶段调用一次。
+ */
+void executor_init(void);
 
 /**
  * @brief 启动执行器。
@@ -77,5 +82,11 @@ uint16 executor_get_current_step(void);
 uint16 executor_get_total_steps(void);
 uint16 executor_get_current_box(void);
 uint16 executor_get_total_boxes(void);
+
+/**
+ * @brief 输出执行器调试信息。
+ * @note 用于调试路径跟踪PID。
+ */
+void executor_debug_output(void);
 
 #endif /* _executor_h_ */

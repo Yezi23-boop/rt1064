@@ -759,8 +759,6 @@ static void build_home_view(screen_home_view_struct *view)
     view->mode = run_mode;
     view->save_state = settings_get_save_state();
     view->encoder_count = status->wheel_feedback_count;
-    view->imu_roll = status->current_roll;
-    view->imu_pitch = status->current_pitch;
     view->imu_yaw = status->current_yaw;
     view->target_yaw = status->target_yaw;
     view->yaw_error = status->yaw_error;

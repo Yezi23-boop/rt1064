@@ -3,6 +3,7 @@
 #include "drive_control.h"
 #include "openart_uart.h"
 #include "app.h"
+#include "executor.h"
 
 int main(void)
 {
@@ -15,6 +16,7 @@ int main(void)
     // UART1 运行期专用于 OpenART，openart_uart_init 只清协议状态和接收缓冲。
     openart_uart_init();
     control_init_state = control_init();
+    executor_init();
 
     // 应用层在底盘初始化后启动；菜单和屏幕只做非阻塞轮询，不影响 PIT 闭环节拍。
     app_init();

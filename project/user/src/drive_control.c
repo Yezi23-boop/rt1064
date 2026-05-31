@@ -11,6 +11,21 @@ static control_status_struct control_status;
 static uint32 startup_yaw_wait_ms = 0;
 static uint8 startup_yaw_locked = 0;
 
+static uint8 motion_is_translating(void)
+{
+    return ((control_status.vx != 0.0f) || (control_status.vy != 0.0f)) ? 1u : 0u;
+}
+
+static void limit_translation_attitude_output(void)
+{
+    if(0 != motion_is_translating())
+    {
+        control_status.vzt = limit_float(control_status.vzt,
+                                         -YAW_TRANSLATION_MAX_VZ,
+                                         YAW_TRANSLATION_MAX_VZ);
+    }
+}
+
 static uint8 update_startup_guard_20ms(void)
 {
     if (startup_yaw_wait_ms < IMU_YAW_STARTUP_STABLE_DELAY_MS)
@@ -81,6 +96,7 @@ void update_control_20ms(void)
     }
 
     drive_imu_update_attitude_20ms(&control_status);
+    limit_translation_attitude_output();
 
     mecanum_mix(control_status.vx,
                 control_status.vy,
@@ -136,12 +152,19 @@ void set_motion_target(float vx, float vy, float yaw_target)
     set_target_yaw(yaw_target);
 }
 
+void reset_motion_segment(void)
+{
+    drive_test_clear_manual_pwm();
+    drive_output_clear_motion_outputs(&control_status);
+    drive_output_reset_and_stop(&control_status);
+}
+
 void stop_motion(void)
 {
     drive_test_clear_manual_pwm();
     drive_imu_stop_lock_current_yaw(&control_status);
     drive_output_clear_motion_outputs(&control_status);
-    drive_output_stop(&control_status);
+    drive_output_reset_and_stop(&control_status);
 }
 
 const control_status_struct *get_control_status(void)

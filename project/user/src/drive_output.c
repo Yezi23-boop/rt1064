@@ -93,6 +93,15 @@ static void update_start_pwm_ramp(const float pwm[WHEEL_COUNT])
 #endif
 }
 
+static uint8 wheel_target_allows_deadband(float target_count)
+{
+    if (target_count < 0.0f)
+    {
+        target_count = -target_count;
+    }
+    return (target_count >= MOTOR_PWM_DEADBAND_TARGET_THRESHOLD_COUNT) ? 1u : 0u;
+}
+
 static void output_wheel_pwm_with_start_ramp(control_status_struct *status)
 {
     uint8 i;
@@ -102,7 +111,9 @@ static void output_wheel_pwm_with_start_ramp(control_status_struct *status)
 
     for (i = 0; i < WHEEL_COUNT; i++)
     {
-        set_wheel_pwm((wheel_enum)i, status->signed_pwm[i]);
+        set_wheel_pwm_with_deadband((wheel_enum)i,
+                                    status->signed_pwm[i],
+                                    wheel_target_allows_deadband(status->wheel_target_count[i]));
     }
 }
 
@@ -114,6 +125,12 @@ static void clear_signed_pwm(control_status_struct *status)
     {
         status->signed_pwm[i] = 0.0f;
     }
+}
+
+static uint8 wheel_target_is_stop(float target_count)
+{
+    return ((target_count > -WHEEL_TARGET_STOP_EPS_COUNT) &&
+            (target_count < WHEEL_TARGET_STOP_EPS_COUNT)) ? 1u : 0u;
 }
 
 void drive_output_init(void)
@@ -171,9 +188,17 @@ void drive_output_update_and_output(control_status_struct *status)
 
     for (i = 0; i < WHEEL_COUNT; i++)
     {
-        status->signed_pwm[i] = wheel_pid_update(&wheel_pid[i],
-                                                 status->wheel_target_count[i],
-                                                 status->wheel_feedback_count[i]);
+        if (0 != wheel_target_is_stop(status->wheel_target_count[i]))
+        {
+            wheel_pid_reset(&wheel_pid[i]);
+            status->signed_pwm[i] = 0.0f;
+        }
+        else
+        {
+            status->signed_pwm[i] = wheel_pid_update(&wheel_pid[i],
+                                                     status->wheel_target_count[i],
+                                                     status->wheel_feedback_count[i]);
+        }
     }
 
     output_wheel_pwm_with_start_ramp(status);

@@ -13,6 +13,19 @@ typedef struct
     float last_error;                    /**< 上一次最短角度误差，单位为 degree。 */
 } attitude_pd_struct;
 
+/** 路径跟踪位置式PID状态，输入输出节拍固定为20ms。 */
+typedef struct
+{
+    float kp;                            /**< 比例系数。 */
+    float ki;                            /**< 积分系数。 */
+    float kd;                            /**< 微分系数。 */
+    float integral;                      /**< 积分累积。 */
+    float last_error;                    /**< 上一次误差。 */
+    float last_output;                   /**< 上一次输出（用于限幅）。 */
+    float max_output;                    /**< 最大输出限幅。 */
+    float max_integral;                  /**< 积分限幅（防积分饱和）。 */
+} path_pid_struct;
+
 /**
  * @brief 初始化 yaw 姿态 PD。
  * @param[out] pid 待初始化的姿态 PD 状态。
@@ -45,6 +58,40 @@ float shortest_angle_error(float target_yaw, float current_yaw);
  * @return 已限幅到 [-MAX_VZ, MAX_VZ] 的归一化姿态修正分量 vzt。
  */
 float attitude_pd_update(attitude_pd_struct *pid, float target_yaw, float current_yaw);
+
+/**
+ * @brief 初始化路径跟踪位置式PID实例。
+ * @param[out] pid 待初始化的PID状态。
+ * @param[in] kp 比例系数。
+ * @param[in] ki 积分系数。
+ * @param[in] kd 微分系数。
+ * @param[in] max_output 最大输出限幅。
+ * @param[in] max_integral 积分限幅。
+ */
+void path_pid_init(path_pid_struct *pid, float kp, float ki, float kd,
+                   float max_output, float max_integral);
+
+/**
+ * @brief 清除PID历史状态和积分累积。
+ * @param[in,out] pid 待重置的PID状态。
+ */
+void path_pid_reset(path_pid_struct *pid);
+
+/**
+ * @brief 按一次20ms采样更新路径跟踪位置式PID。
+ * @param[in,out] pid 路径跟踪PID状态。
+ * @param[in] error 位置误差，单位为cm。
+ * @param[in] dt_s 采样周期，单位为秒。
+ * @return 限幅后的速度输出，范围[-max_output, max_output]。
+ */
+float path_pid_update(path_pid_struct *pid, float error, float dt_s);
+
+/**
+ * @brief 获取当前积分值（用于调试）。
+ * @param[in] pid PID状态。
+ * @return 当前积分值。
+ */
+float path_pid_get_integral(const path_pid_struct *pid);
 
 /**
  * @brief 将浮点值约束在给定闭区间内。

@@ -65,6 +65,60 @@ float attitude_pd_update(attitude_pd_struct *pid, float target_yaw, float curren
     return limit_float(output, -MAX_VZ, MAX_VZ);
 }
 
+void path_pid_init(path_pid_struct *pid, float kp, float ki, float kd,
+                   float max_output, float max_integral)
+{
+    pid->kp = kp;
+    pid->ki = ki;
+    pid->kd = kd;
+    pid->max_output = max_output;
+    pid->max_integral = max_integral;
+    path_pid_reset(pid);
+}
+
+void path_pid_reset(path_pid_struct *pid)
+{
+    pid->integral = 0.0f;
+    pid->last_error = 0.0f;
+    pid->last_output = 0.0f;
+}
+
+float path_pid_update(path_pid_struct *pid, float error, float dt_s)
+{
+    float p_term, i_term, d_term;
+    float output;
+
+    /* 1. 比例项 */
+    p_term = pid->kp * error;
+
+    /* 2. 积分项（带限幅，防积分饱和） */
+    pid->integral += error * dt_s;
+    if (pid->integral > pid->max_integral) {
+        pid->integral = pid->max_integral;
+    } else if (pid->integral < -pid->max_integral) {
+        pid->integral = -pid->max_integral;
+    }
+    i_term = pid->ki * pid->integral;
+
+    /* 3. 微分项 */
+    d_term = pid->kd * (error - pid->last_error) / dt_s;
+    pid->last_error = error;
+
+    /* 4. 计算总输出 */
+    output = p_term + i_term + d_term;
+
+    /* 5. 输出限幅 */
+    output = limit_float(output, -pid->max_output, pid->max_output);
+
+    pid->last_output = output;
+    return output;
+}
+
+float path_pid_get_integral(const path_pid_struct *pid)
+{
+    return pid->integral;
+}
+
 void command_to_velocity(motion_command_enum command, float move_speed, float turn_speed, float *vx, float *vy, float *vz)
 {
     *vx = 0.0f;

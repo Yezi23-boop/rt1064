@@ -78,6 +78,49 @@ int8 encoder_dir_sign[WHEEL_COUNT] =
 
 static uint8 motor_output_enabled = 0; // 上电安全窗口结束前，底层强制所有非零 PWM 为 0。
 
+static uint16 motor_pwm_deadband_for_wheel(wheel_enum wheel)
+{
+    static const uint16 deadband[WHEEL_COUNT] =
+    {
+        MOTOR_PWM_DEADBAND_LF,
+        MOTOR_PWM_DEADBAND_LB,
+        MOTOR_PWM_DEADBAND_RF,
+        MOTOR_PWM_DEADBAND_RB,
+    };
+
+    return deadband[wheel];
+}
+
+static float apply_motor_pwm_deadband(wheel_enum wheel, float signed_pwm)
+{
+#if MOTOR_PWM_DEADBAND_ENABLE
+    float abs_pwm;
+    float deadband_pwm;
+
+    if(0.0f == signed_pwm)
+    {
+        return 0.0f;
+    }
+
+    abs_pwm = signed_pwm;
+    if(abs_pwm < 0.0f)
+    {
+        abs_pwm = -abs_pwm;
+    }
+
+    deadband_pwm = (float)motor_pwm_deadband_for_wheel(wheel);
+    if(abs_pwm >= deadband_pwm)
+    {
+        return signed_pwm;
+    }
+
+    return (signed_pwm > 0.0f) ? deadband_pwm : -deadband_pwm;
+#else
+    (void)wheel;
+    return signed_pwm;
+#endif
+}
+
 uint8 io_init(void)
 {
     uint8 imu_state;
@@ -129,7 +172,7 @@ void read_encoder_counts(float wheel_feedback_count[WHEEL_COUNT])
     }
 }
 
-void set_wheel_pwm(wheel_enum wheel, float signed_pwm)
+void set_wheel_pwm_with_deadband(wheel_enum wheel, float signed_pwm, uint8 deadband_enabled)
 {
     float corrected_pwm;
     uint32 duty;
@@ -146,6 +189,10 @@ void set_wheel_pwm(wheel_enum wheel, float signed_pwm)
     }
 
     corrected_pwm = signed_pwm * (float)motor_dir_sign[wheel];
+    if(0 != deadband_enabled)
+    {
+        corrected_pwm = apply_motor_pwm_deadband(wheel, corrected_pwm);
+    }
     corrected_pwm = limit_float(corrected_pwm, -(float)MAX_PWM_DUTY, (float)MAX_PWM_DUTY);
 
     if(corrected_pwm >= 0.0f)
@@ -168,6 +215,11 @@ void set_wheel_pwm(wheel_enum wheel, float signed_pwm)
         pwm_set_duty(motor_pwm1_pin[wheel], 0);
         pwm_set_duty(motor_pwm2_pin[wheel], duty);
     }
+}
+
+void set_wheel_pwm(wheel_enum wheel, float signed_pwm)
+{
+    set_wheel_pwm_with_deadband(wheel, signed_pwm, 1u);
 }
 
 void stop_wheels(void)

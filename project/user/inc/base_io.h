@@ -34,6 +34,14 @@ void read_encoder_counts(float wheel_feedback_count[WHEEL_COUNT]);
 void set_wheel_pwm(wheel_enum wheel, float signed_pwm);
 
 /**
+ * @brief 向指定车轮输出 PWM，并由上层决定是否启用电机死区补偿。
+ * @param[in] wheel 目标车轮。
+ * @param[in] signed_pwm signed PWM 指令。
+ * @param[in] deadband_enabled 非 0 表示允许死区补偿，0 表示小 PWM 原样输出。
+ */
+void set_wheel_pwm_with_deadband(wheel_enum wheel, float signed_pwm, uint8 deadband_enabled);
+
+/**
  * @brief 将四个车轮 PWM 输出立即置零。
  * @note 本函数不决定姿态环后续是否重新接管，稳定停止由 `stop_motion()` 负责。
  */

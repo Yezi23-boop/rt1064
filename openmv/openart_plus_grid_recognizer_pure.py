@@ -15,7 +15,7 @@ DEBUG_ENABLE = True          # True=打印地图并绘制调试图形；False=�
 DEBUG_DRAW_ROI = True        # True=画绿色地图边界/拉正边框
 DEBUG_DRAW_GRID_LINES = True # True=画 16x12 网格线，用于检查格子是否对齐
 DEBUG_DRAW_POINTS = True     # True=画识别结果圆点；False=画面更干净、显示更快
-DEBUG_PRINT_PERIOD_MS = 500
+DEBUG_PRINT_PERIOD_MS = 1000
 
 # 显示/识别路径：
 # 标定看图：SHOW_RECTIFIED_VIEW=True,  USE_RECTIFIED_RECOGNITION=True
@@ -53,10 +53,10 @@ GRID_ROWS = 12
 # MAP_CORNERS 表示屏幕地图外边界，用于四角透视标定。
 # 四点按 左上、右上、右下、左下 填写，指向完整 16x12 地图外边界。
 MAP_CORNERS = (
-    (28, 12),
-    (312, 14),
-    (310, 218),
-    (28, 219),
+    (11, 5),
+    (315, 6),
+    (310, 214),
+    (16, 222),
 )
 
 # 拉正图上的有效采样区域边距。四角已对齐但整张网格略偏时，只调这里。

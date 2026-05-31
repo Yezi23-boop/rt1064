@@ -22,7 +22,6 @@
 #define POSE_CAR_COLOR          (RGB565_BLUE)
 #define EMPTY_COLOR             (RGB565_WHITE)
 #define GRID_COLOR              (RGB565_GRAY)
-#define GRID_CELL_SIZE_CM       (20.0f) // 推箱子地图物理尺度，默认现实 20cm 对应屏幕一格。
 #define FILL_BUFFER_PIXELS      (240 * LINE_H) // 单行文字清屏所需最大像素数，复用作小矩形填充缓存。
 
 typedef enum
@@ -348,9 +347,9 @@ static int16 round_cm_to_grid_delta(float value_cm)
 {
     if(value_cm >= 0.0f)
     {
-        return (int16)((value_cm + GRID_CELL_SIZE_CM * 0.5f) / GRID_CELL_SIZE_CM);
+        return (int16)((value_cm + GRID_SIZE_CM * 0.5f) / GRID_SIZE_CM);
     }
-    return (int16)((value_cm - GRID_CELL_SIZE_CM * 0.5f) / GRID_CELL_SIZE_CM);
+    return (int16)((value_cm - GRID_SIZE_CM * 0.5f) / GRID_SIZE_CM);
 }
 
 static uint8 clamp_grid_index(int16 value, uint8 max_value)
@@ -619,25 +618,22 @@ static void draw_home_status_labels(void)
     ips200_show_string(0, LINE_H * 9, "Enc LB:");
     ips200_show_string(112, LINE_H * 9, "RB:");
 
-    ips200_show_string(0, LINE_H * 10, "IMU R:");
-    ips200_show_string(96, LINE_H * 10, "P:");
+    ips200_show_string(0, LINE_H * 10, "IMU Y:");
 
-    ips200_show_string(0, LINE_H * 11, "IMU Y:");
+    ips200_show_string(0, LINE_H * 11, "Yaw T:");
+    ips200_show_string(96, LINE_H * 11, " C:");
 
-    ips200_show_string(0, LINE_H * 12, "Yaw T:");
-    ips200_show_string(96, LINE_H * 12, " C:");
+    ips200_show_string(0, LINE_H * 12, "E:");
+    ips200_show_string(72, LINE_H * 12, " Z:");
+    ips200_show_string(136, LINE_H * 12, " T:");
 
-    ips200_show_string(0, LINE_H * 13, "E:");
-    ips200_show_string(72, LINE_H * 13, " Z:");
-    ips200_show_string(136, LINE_H * 13, " T:");
+    ips200_show_string(0, LINE_H * 13, "X:");
+    ips200_show_string(96, LINE_H * 13, " Y:");
 
-    ips200_show_string(0, LINE_H * 14, "X:");
-    ips200_show_string(96, LINE_H * 14, " Y:");
-
-    ips200_show_string(0, LINE_H * 15, "ART:");
+    ips200_show_string(0, LINE_H * 14, "ART:");
 }
 
-static void draw_home_status_values(const float encoder_count[WHEEL_COUNT], float imu_roll, float imu_pitch, float imu_yaw, float target_yaw, float yaw_error, float vz, float vzt, float pose_x_cm, float pose_y_cm, uint32 openart_frame_count)
+static void draw_home_status_values(const float encoder_count[WHEEL_COUNT], float imu_yaw, float target_yaw, float yaw_error, float vz, float vzt, float pose_x_cm, float pose_y_cm, uint32 openart_frame_count)
 {
     ips200_show_int(56, LINE_H * 8, (int16)encoder_count[WHEEL_LF], 5);
     ips200_show_int(136, LINE_H * 8, (int16)encoder_count[WHEEL_RF], 5);
@@ -645,22 +641,19 @@ static void draw_home_status_values(const float encoder_count[WHEEL_COUNT], floa
     ips200_show_int(56, LINE_H * 9, (int16)encoder_count[WHEEL_LB], 5);
     ips200_show_int(136, LINE_H * 9, (int16)encoder_count[WHEEL_RB], 5);
 
-    ips200_show_int(48, LINE_H * 10, (int16)imu_roll, 4);
-    ips200_show_int(112, LINE_H * 10, (int16)imu_pitch, 4);
+    ips200_show_int(48, LINE_H * 10, (int16)imu_yaw, 4);
 
-    ips200_show_int(48, LINE_H * 11, (int16)imu_yaw, 4);
+    show_float_value(48, LINE_H * 11, target_yaw, 3, 1);
+    show_float_value(120, LINE_H * 11, imu_yaw, 3, 1);
 
-    show_float_value(48, LINE_H * 12, target_yaw, 3, 1);
-    show_float_value(120, LINE_H * 12, imu_yaw, 3, 1);
+    show_float_value(16, LINE_H * 12, yaw_error, 3, 2);
+    show_float_value(96, LINE_H * 12, vz, 1, 2);
+    show_float_value(160, LINE_H * 12, vzt, 1, 2);
 
-    show_float_value(16, LINE_H * 13, yaw_error, 3, 2);
-    show_float_value(96, LINE_H * 13, vz, 1, 2);
-    show_float_value(160, LINE_H * 13, vzt, 1, 2);
+    show_float_value(16, LINE_H * 13, pose_x_cm, 4, 1);
+    show_float_value(120, LINE_H * 13, pose_y_cm, 4, 1);
 
-    show_float_value(16, LINE_H * 14, pose_x_cm, 4, 1);
-    show_float_value(120, LINE_H * 14, pose_y_cm, 4, 1);
-
-    show_uint_value(32, LINE_H * 15, openart_frame_count, 5);
+    show_uint_value(32, LINE_H * 14, openart_frame_count, 5);
 }
 
 void screen_draw_home(const screen_home_view_struct *view)
@@ -682,8 +675,6 @@ void screen_draw_home(const screen_home_view_struct *view)
     show_text_value(48, LINE_H * 7, save_state_name(view->save_state), 12);
     draw_home_status_labels();
     draw_home_status_values(view->encoder_count,
-        view->imu_roll,
-        view->imu_pitch,
         view->imu_yaw,
         view->target_yaw,
         view->yaw_error,
@@ -699,8 +690,6 @@ void screen_draw_home_status(const screen_home_view_struct *view)
 {
     begin_page(SCREEN_PAGE_HOME);
     draw_home_status_values(view->encoder_count,
-        view->imu_roll,
-        view->imu_pitch,
         view->imu_yaw,
         view->target_yaw,
         view->yaw_error,
@@ -781,7 +770,6 @@ static const char *executor_error_text(executor_error_enum error)
 {
     switch(error)
     {
-        case EXEC_ERROR_TIMEOUT: return "E:TMO";
         case EXEC_ERROR_MAP:     return "E:MAP";
         case EXEC_ERROR_NONE:    return "E:OK";
         default:                 return "E:?";

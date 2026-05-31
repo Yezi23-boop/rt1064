@@ -26,8 +26,6 @@ typedef struct
     run_mode_enum mode;
     save_state_enum save_state;
     const float *encoder_count;
-    float imu_roll;
-    float imu_pitch;
     float imu_yaw;
     float target_yaw;
     float yaw_error;
@@ -93,8 +91,6 @@ void screen_init(void);
  * @param[in] mode 当前运行模式。
  * @param[in] save_state Flash 保存状态。
  * @param[in] encoder_count 四轮编码器反馈增量，单位为 count/20ms，轮序为 LF/LB/RF/RB。
- * @param[in] imu_roll IMU 横滚角，单位为 degree。
- * @param[in] imu_pitch IMU 俯仰角，单位为 degree。
  * @param[in] imu_yaw IMU 航向角，单位为 degree。
  * @param[in] target_yaw 姿态环目标航向角，单位为 degree。
  * @param[in] yaw_error 姿态环最短角度误差，单位为 degree。

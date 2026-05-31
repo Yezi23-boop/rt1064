@@ -17,8 +17,8 @@ void PIT_IRQHandler(void)
     if(pit_flag_get(PIT_CH1))
     {
         pit_flag_clear(PIT_CH1);
-        update_control_20ms();   // 20ms 执行姿态环、混控和四轮速度 PID。
         executor_update_20ms();
+        update_control_20ms();   // 20ms 执行姿态环、混控和四轮速度 PID。
     }
 
     if(pit_flag_get(PIT_CH2))

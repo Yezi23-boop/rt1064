@@ -291,8 +291,56 @@ static uint8 result_append_action(solve_result_struct *result, char action)
     return 1;
 }
 
+static char waypoint_action_dir(char action)
+{
+    if(('u' == action) || ('U' == action))
+    {
+        return 'u';
+    }
+    if(('d' == action) || ('D' == action))
+    {
+        return 'd';
+    }
+    if(('l' == action) || ('L' == action))
+    {
+        return 'l';
+    }
+    if(('r' == action) || ('R' == action))
+    {
+        return 'r';
+    }
+    return action;
+}
+
+static uint8 action_is_push(char action)
+{
+    return ((action >= 'A') && (action <= 'Z')) ? 1u : 0u;
+}
+
+static uint8 same_waypoint_run(char previous_action, char action)
+{
+    if(action_is_push(previous_action) != action_is_push(action))
+    {
+        return 0u;
+    }
+
+    return (waypoint_action_dir(previous_action) == waypoint_action_dir(action)) ? 1u : 0u;
+}
+
 static uint8 result_append_waypoint(solve_result_struct *result, uint16 player_cell, char action)
 {
+    uint16 last_index;
+
+    if((0 < result->waypoint_count) &&
+       (0 != same_waypoint_run(result->waypoints[result->waypoint_count - 1u].action, action)))
+    {
+        last_index = (uint16)(result->waypoint_count - 1u);
+        result->waypoints[last_index].row = cell_row(player_cell);
+        result->waypoints[last_index].col = cell_col(player_cell);
+        result->waypoints[last_index].action = action;
+        return 1;
+    }
+
     if(MAX_WAYPOINTS <= result->waypoint_count)
     {
         set_message(result, "Waypoint overflow");

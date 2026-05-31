@@ -22,9 +22,36 @@
 /** 平移测试持续时间，单位 ms；到时自动 stop_motion()。 */
 #define DRIVE_TRANSLATE_TEST_DURATION_MS (3000u)
 /** 平移测试方向；可改为 MOTION_BACKWARD/MOTION_LEFT/MOTION_RIGHT 分别测试四个基本方向。 */
-#define DRIVE_TRANSLATE_TEST_COMMAND (MOTION_LEFT_BACK)
+#define DRIVE_TRANSLATE_TEST_COMMAND (MOTION_RIGHT)
 /** 平移测试速度幅值，范围 [0, 1]，先用低速观察姿态保持。 */
 #define DRIVE_TRANSLATE_TEST_SPEED (1.0f)
+
+/** 小方形平移测试开关；右 -> 下/后退 -> 左 -> 上/前进，默认关闭。 */
+#define DRIVE_SQUARE_TEST_ENABLE (0)
+/** 小方形按位姿切段开关；置 0 时退回按固定时间切段。 */
+#define DRIVE_SQUARE_TEST_POSE_MODE_ENABLE (0)
+/** 小方形测试启动时间，单位 ms；默认等同上电 yaw 稳定/电机输出安全窗口。 */
+#define DRIVE_SQUARE_TEST_START_MS (IMU_YAW_STARTUP_STABLE_DELAY_MS)
+/** 小方形每条边运行时长，单位 ms；按场地实际一格距离微调。 */
+#define DRIVE_SQUARE_TEST_SIDE_DURATION_MS (3000)
+/** 小方形按位姿切段时的单段最大运行时间，超时自动停车。 */
+#define DRIVE_SQUARE_TEST_STEP_TIMEOUT_MS (DRIVE_SQUARE_TEST_SIDE_DURATION_MS)
+/** 小方形边长，单位 cm；默认一格。 */
+#define DRIVE_SQUARE_TEST_SIDE_CM (GRID_SIZE_CM)
+/** 小方形按位姿切段的到点阈值，单位 cm。 */
+#define DRIVE_SQUARE_TEST_ARRIVAL_THRESHOLD_CM (2.0f)
+/** 小方形测试速度幅值，范围 [0, 1]。 */
+#define DRIVE_SQUARE_TEST_SPEED (1)
+
+/* 代码层单轮点动测试：
+ * 测电机真实死区时，先在 drive_config.h 里关闭 MOTOR_PWM_DEADBAND_ENABLE。
+ * 修改下面 4 个宏后重新编译下载即可，不经过菜单页面。 */
+#define DRIVE_WHEEL_JOG_ENABLE (0)
+#define DRIVE_WHEEL_JOG_WHEEL (WHEEL_RF)
+/* 可选轮位：WHEEL_LF 左前、WHEEL_LB 左后、WHEEL_RF 右前、WHEEL_RB 右后。 */
+#define DRIVE_WHEEL_JOG_PWM (300.0f)
+#define DRIVE_WHEEL_JOG_START_MS (IMU_YAW_STARTUP_STABLE_DELAY_MS + 500u)
+#define DRIVE_WHEEL_JOG_DURATION_MS (2000u)
 
 /**
  * @brief 初始化代码开关式底盘调车测试状态。
