@@ -311,6 +311,16 @@ uint32 openart_uart_get_frame_count(void)
     return frame_count;
 }
 
+void openart_uart_discard_pending(void)
+{
+    uint32 primask;
+
+    primask = interrupt_global_disable();
+    hw_rx_read_index = hw_rx_write_index;
+    interrupt_global_enable(primask);
+    reset_frame_parser();
+}
+
 uint8 openart_find_player_cell(uint8 *row, uint8 *col, uint8 *count)
 {
     return openart_get_player_cell(row, col, count, 0);

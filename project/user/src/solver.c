@@ -330,6 +330,14 @@ static uint8 same_waypoint_run(char previous_action, char action)
 static uint8 result_append_waypoint(solve_result_struct *result, uint16 player_cell, char action)
 {
     uint16 last_index;
+    uint16 action_index;
+
+    if(0 == result->action_count)
+    {
+        set_message(result, "Waypoint action missing");
+        return 0;
+    }
+    action_index = (uint16)(result->action_count - 1u);
 
     if((0 < result->waypoint_count) &&
        (0 != same_waypoint_run(result->waypoints[result->waypoint_count - 1u].action, action)))
@@ -338,6 +346,7 @@ static uint8 result_append_waypoint(solve_result_struct *result, uint16 player_c
         result->waypoints[last_index].row = cell_row(player_cell);
         result->waypoints[last_index].col = cell_col(player_cell);
         result->waypoints[last_index].action = action;
+        result->waypoints[last_index].action_end = result->action_count;
         return 1;
     }
 
@@ -350,6 +359,8 @@ static uint8 result_append_waypoint(solve_result_struct *result, uint16 player_c
     result->waypoints[result->waypoint_count].row = cell_row(player_cell);
     result->waypoints[result->waypoint_count].col = cell_col(player_cell);
     result->waypoints[result->waypoint_count].action = action;
+    result->waypoints[result->waypoint_count].action_start = action_index;
+    result->waypoints[result->waypoint_count].action_end = result->action_count;
     result->waypoint_count++;
     return 1;
 }

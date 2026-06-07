@@ -2,7 +2,6 @@
 #include "drive_control.h"
 #include "drive_pose.h"
 #include "motion_math.h"
-#include "openart_uart.h"
 #include <math.h>
 
 /* 执行器内部状态 */
@@ -15,12 +14,6 @@ static uint16 exec_waypoint_count = 0;
 static uint16 current_step = 0;
 static uint8 start_row = 0;
 static uint8 start_col = 0;
-static uint16 expected_player_cell = 0;
-static uint16 expected_boxes[MAX_BOXES];
-static uint8 expected_box_count = 0;
-static uint16 expected_targets[MAX_BOXES];
-static uint8 expected_target_count = 0;
-static uint8 expected_state_valid = 0;
 
 /* 路径跟踪PID实例 */
 static path_pid_struct x_pid;
@@ -31,271 +24,14 @@ static uint8 single_step_mode = 0;
 static uint8 arrival_stable_ticks = 0;
 static uint8 segment_settling = 0;
 static uint16 segment_settle_elapsed_ms = 0;
-static uint8 art_verify_enabled = 0;
+static uint8 art_sync_enabled = 0;
 static uint8 segment_waiting_art = 0;
-static uint16 art_verify_elapsed_ms = 0;
-static uint8 art_confirm_count = 0;
-static uint32 art_last_checked_frame = 0;
 
 /* 将网格坐标转换为物理坐标（以起点为原点） */
 static void grid_to_physical(uint8 row, uint8 col, float *x_cm, float *y_cm)
 {
     *x_cm = (float)(col - start_col) * GRID_SIZE_CM;
     *y_cm = -(float)(row - start_row) * GRID_SIZE_CM;
-}
-
-static uint16 cell_index_local(uint8 row, uint8 col)
-{
-    return (uint16)(row * MAP_COLS + col);
-}
-
-static uint8 cell_row_local(uint16 cell)
-{
-    return (uint8)(cell / MAP_COLS);
-}
-
-static uint8 cell_col_local(uint16 cell)
-{
-    return (uint8)(cell % MAP_COLS);
-}
-
-static uint8 abs_int16_to_u8(int16 value)
-{
-    if(value < 0)
-    {
-        value = (int16)-value;
-    }
-    return (uint8)value;
-}
-
-static uint8 cell_step(uint16 cell, int8 dr, int8 dc, uint16 *next_cell)
-{
-    int16 row = (int16)cell_row_local(cell) + dr;
-    int16 col = (int16)cell_col_local(cell) + dc;
-
-    if((row < 0) || (row >= MAP_ROWS) || (col < 0) || (col >= MAP_COLS))
-    {
-        return 0;
-    }
-
-    *next_cell = cell_index_local((uint8)row, (uint8)col);
-    return 1;
-}
-
-static int8 waypoint_row_delta(char action)
-{
-    if(('u' == action) || ('U' == action))
-    {
-        return -1;
-    }
-    if(('d' == action) || ('D' == action))
-    {
-        return 1;
-    }
-    return 0;
-}
-
-static int8 waypoint_col_delta(char action)
-{
-    if(('l' == action) || ('L' == action))
-    {
-        return -1;
-    }
-    if(('r' == action) || ('R' == action))
-    {
-        return 1;
-    }
-    return 0;
-}
-
-static uint8 cell_in_list(const uint16 *list, uint8 count, uint16 cell)
-{
-    uint8 i;
-
-    for(i = 0; i < count; i++)
-    {
-        if(list[i] == cell)
-        {
-            return 1;
-        }
-    }
-    return 0;
-}
-
-static uint8 find_box_index(const uint16 *boxes, uint8 count, uint16 cell, uint8 *index)
-{
-    uint8 i;
-
-    for(i = 0; i < count; i++)
-    {
-        if(boxes[i] == cell)
-        {
-            *index = i;
-            return 1;
-        }
-    }
-    return 0;
-}
-
-static void remove_index(uint16 *list, uint8 *count, uint8 index)
-{
-    uint8 i;
-
-    for(i = index; (i + 1u) < *count; i++)
-    {
-        list[i] = list[i + 1u];
-    }
-    (*count)--;
-}
-
-static void remove_solved_boxes_from_expected(uint16 *boxes, uint8 *box_count)
-{
-    uint8 i = 0;
-
-    while(i < *box_count)
-    {
-        if(0 != cell_in_list(expected_targets, expected_target_count, boxes[i]))
-        {
-            remove_index(boxes, box_count, i);
-        }
-        else
-        {
-            i++;
-        }
-    }
-}
-
-static uint8 unordered_cells_equal(const uint16 *left, uint8 left_count, const uint16 *right, uint8 right_count)
-{
-    uint8 i;
-
-    if(left_count != right_count)
-    {
-        return 0;
-    }
-
-    for(i = 0; i < left_count; i++)
-    {
-        if(0 == cell_in_list(right, right_count, left[i]))
-        {
-            return 0;
-        }
-    }
-    return 1;
-}
-
-static void expected_state_reset(void)
-{
-    expected_player_cell = 0;
-    expected_box_count = 0;
-    expected_target_count = 0;
-    expected_state_valid = 0;
-}
-
-static void expected_state_init_from_source(const map_source_struct *source)
-{
-    uint8 row;
-    uint8 col;
-    char value;
-
-    expected_state_reset();
-    if(0 == source)
-    {
-        return;
-    }
-
-    for(row = 0; row < MAP_ROWS; row++)
-    {
-        for(col = 0; col < MAP_COLS; col++)
-        {
-            value = source->rows[row][col];
-            if('C' == value)
-            {
-                expected_player_cell = cell_index_local(row, col);
-                expected_state_valid = 1;
-            }
-            else if(('B' == value) && (expected_box_count < MAX_BOXES))
-            {
-                expected_boxes[expected_box_count] = cell_index_local(row, col);
-                expected_box_count++;
-            }
-            else if(('T' == value) && (expected_target_count < MAX_BOXES))
-            {
-                expected_targets[expected_target_count] = cell_index_local(row, col);
-                expected_target_count++;
-            }
-        }
-    }
-}
-
-static uint8 expected_state_after_waypoint(const waypoint_struct *wp,
-                                           uint16 out_boxes[MAX_BOXES],
-                                           uint8 *out_box_count,
-                                           uint16 *out_player)
-{
-    uint16 player = expected_player_cell;
-    uint16 next_player;
-    uint16 next_box;
-    uint16 target_cell;
-    uint8 temp_box_count = expected_box_count;
-    uint8 box_index;
-    uint8 steps;
-    uint8 i;
-    int8 dr = waypoint_row_delta(wp->action);
-    int8 dc = waypoint_col_delta(wp->action);
-
-    for(i = 0; i < expected_box_count; i++)
-    {
-        out_boxes[i] = expected_boxes[i];
-    }
-
-    target_cell = cell_index_local(wp->row, wp->col);
-    steps = (uint8)(abs_int16_to_u8((int16)wp->row - (int16)cell_row_local(player)) +
-                    abs_int16_to_u8((int16)wp->col - (int16)cell_col_local(player)));
-
-    for(i = 0; i < steps; i++)
-    {
-        if(0 == cell_step(player, dr, dc, &next_player))
-        {
-            return 0;
-        }
-
-        if((wp->action >= 'A') && (wp->action <= 'Z'))
-        {
-            if(0 == find_box_index(out_boxes, temp_box_count, next_player, &box_index))
-            {
-                return 0;
-            }
-            if(0 == cell_step(out_boxes[box_index], dr, dc, &next_box))
-            {
-                return 0;
-            }
-            out_boxes[box_index] = next_box;
-        }
-        player = next_player;
-    }
-
-    if(player != target_cell)
-    {
-        return 0;
-    }
-
-    remove_solved_boxes_from_expected(out_boxes, &temp_box_count);
-    *out_box_count = temp_box_count;
-    *out_player = player;
-    return 1;
-}
-
-static void expected_state_commit(uint16 player, const uint16 boxes[MAX_BOXES], uint8 box_count)
-{
-    uint8 i;
-
-    expected_player_cell = player;
-    expected_box_count = box_count;
-    for(i = 0; i < box_count; i++)
-    {
-        expected_boxes[i] = boxes[i];
-    }
 }
 
 void executor_init(void)
@@ -311,9 +47,6 @@ static void executor_reset_segment_state(void)
     segment_settling = 0;
     segment_settle_elapsed_ms = 0;
     segment_waiting_art = 0;
-    art_verify_elapsed_ms = 0;
-    art_confirm_count = 0;
-    art_last_checked_frame = 0;
     path_pid_reset(&x_pid);
     path_pid_reset(&y_pid);
 }
@@ -398,8 +131,10 @@ static void move_to_target(float target_x, float target_y, char action)
 
 void executor_start(const waypoint_struct *waypoints, uint16 count,
                     uint8 start_row_param, uint8 start_col_param, uint8 single_step,
-                    uint8 art_verify, const map_source_struct *source)
+                    uint8 art_sync)
 {
+    const drive_pose_struct *pose;
+
     /* 参数检查 */
     if (waypoints == NULL || count == 0)
     {
@@ -414,16 +149,16 @@ void executor_start(const waypoint_struct *waypoints, uint16 count,
     start_row = start_row_param;
     start_col = start_col_param;
     single_step_mode = single_step;
-    art_verify_enabled = art_verify;
-    expected_state_init_from_source(source);
+    art_sync_enabled = art_sync;
 
     /* 重置状态 */
     current_step = 0;
     exec_error = EXEC_ERROR_NONE;
     executor_reset_segment_state();
 
-    /* 重置位姿，以起点为原点 */
-    drive_pose_reset(0.0f, 0.0f, 0.0f);
+    /* 重置局部位置，以最新 C 格为原点；yaw 保留当前 IMU 相对航向。 */
+    pose = drive_pose_get();
+    drive_pose_reset(0.0f, 0.0f, pose->yaw_deg);
 
     /* 设置初始状态 */
     if (single_step_mode)
@@ -444,8 +179,7 @@ void executor_stop(void)
     exec_waypoints = NULL;
     exec_waypoint_count = 0;
     current_step = 0;
-    art_verify_enabled = 0;
-    expected_state_reset();
+    art_sync_enabled = 0;
     executor_reset_segment_state();
 }
 
@@ -456,6 +190,27 @@ void executor_resume(void)
         executor_reset_segment_state();
         exec_state = EXEC_STATE_RUNNING;
     }
+}
+
+uint8 executor_art_sync_pending(void)
+{
+    return ((EXEC_STATE_RUNNING == exec_state) && (0 != segment_waiting_art)) ? 1u : 0u;
+}
+
+void executor_finish_done(void)
+{
+    stop_motion();
+    exec_error = EXEC_ERROR_NONE;
+    exec_state = EXEC_STATE_DONE;
+    executor_reset_segment_state();
+}
+
+void executor_set_error(executor_error_enum error)
+{
+    stop_motion();
+    exec_error = error;
+    exec_state = EXEC_STATE_ERROR;
+    executor_reset_segment_state();
 }
 
 static void executor_enter_segment_settle(void)
@@ -484,30 +239,19 @@ static void executor_advance_after_segment(void)
     }
 }
 
-static void executor_correct_pose_and_advance(float target_x, float target_y)
-{
-    const drive_pose_struct *pose = drive_pose_get();
-
-    drive_pose_reset(target_x, target_y, pose->yaw_deg);
-    executor_advance_after_segment();
-}
-
 static void executor_enter_art_wait(void)
 {
     segment_settling = 0;
     segment_settle_elapsed_ms = 0;
     segment_waiting_art = 1;
-    art_verify_elapsed_ms = 0;
-    art_confirm_count = 0;
-    art_last_checked_frame = openart_uart_get_frame_count();
 }
 
-static void executor_finish_segment_settle(float target_x, float target_y)
+static void executor_finish_segment_settle(void)
 {
     segment_settling = 0;
     segment_settle_elapsed_ms = 0;
 
-    if (0 != art_verify_enabled)
+    if (0 != art_sync_enabled)
     {
         executor_enter_art_wait();
         return;
@@ -516,82 +260,12 @@ static void executor_finish_segment_settle(float target_x, float target_y)
     executor_advance_after_segment();
 }
 
-static void executor_fail_art(executor_error_enum error)
-{
-    stop_motion();
-    executor_reset_segment_state();
-    exec_error = error;
-    exec_state = EXEC_STATE_ERROR;
-}
-
-static void executor_update_art_wait_20ms(float target_x, float target_y, const waypoint_struct *wp)
-{
-    uint8 art_row = 0;
-    uint8 art_col = 0;
-    uint8 art_count = 0;
-    uint32 art_frame = 0;
-    uint16 art_boxes[MAX_BOXES];
-    uint8 art_box_count = 0;
-    uint16 next_expected_boxes[MAX_BOXES];
-    uint8 next_expected_box_count = 0;
-    uint16 next_expected_player = 0;
-    uint8 boxes_match = 0;
-
-    reset_motion_segment();
-
-    if (art_verify_elapsed_ms >= EXEC_ART_VERIFY_TIMEOUT_MS)
-    {
-        executor_fail_art(EXEC_ERROR_ART_TIMEOUT);
-        return;
-    }
-
-    if (0 != openart_get_player_cell(&art_row, &art_col, &art_count, &art_frame))
-    {
-        if (art_frame != art_last_checked_frame)
-        {
-            art_last_checked_frame = art_frame;
-            if((0 != expected_state_valid) &&
-               (0 != expected_state_after_waypoint(wp, next_expected_boxes, &next_expected_box_count, &next_expected_player)) &&
-               (0 != openart_get_box_cells(art_boxes, &art_box_count, 0)))
-            {
-                boxes_match = unordered_cells_equal(next_expected_boxes, next_expected_box_count,
-                                                   art_boxes, art_box_count);
-            }
-
-            if ((art_row == wp->row) && (art_col == wp->col) && (0 != boxes_match))
-            {
-                if (art_confirm_count < EXEC_ART_CONFIRM_FRAMES)
-                {
-                    art_confirm_count++;
-                }
-                if (art_confirm_count >= EXEC_ART_CONFIRM_FRAMES)
-                {
-                    expected_state_commit(next_expected_player, next_expected_boxes, next_expected_box_count);
-                    executor_correct_pose_and_advance(target_x, target_y);
-                    return;
-                }
-            }
-            else
-            {
-                art_confirm_count = 0;
-            }
-        }
-    }
-    else if((0 != art_frame) && (art_frame != art_last_checked_frame) && (1u != art_count))
-    {
-        art_last_checked_frame = art_frame;
-        art_confirm_count = 0;
-    }
-
-    art_verify_elapsed_ms += CONTROL_PERIOD_MS;
-}
-
-static void executor_update_segment_settle_20ms(float target_x, float target_y)
+static void executor_update_segment_settle_20ms(void)
 {
     reset_motion_segment();
     if (segment_settle_elapsed_ms >= EXEC_SEGMENT_SETTLE_MS)
     {
-        executor_finish_segment_settle(target_x, target_y);
+        executor_finish_segment_settle();
         return;
     }
 
@@ -621,17 +295,17 @@ void executor_update_20ms(void)
 
     if (0 != segment_settling)
     {
-        executor_update_segment_settle_20ms(target_x, target_y);
+        executor_update_segment_settle_20ms();
         return;
     }
 
     if (0 != segment_waiting_art)
     {
-        executor_update_art_wait_20ms(target_x, target_y, wp);
+        reset_motion_segment();
         return;
     }
 
-    if (is_axis_arrived(target_x, target_y, wp->action))
+    if (0 != is_axis_arrived(target_x, target_y, wp->action))
     {
         reset_motion_segment();
         if (arrival_stable_ticks < EXEC_ARRIVAL_STABLE_TICKS)
@@ -689,42 +363,6 @@ uint16 executor_get_current_step(void)
 uint16 executor_get_total_steps(void)
 {
     return exec_waypoint_count;
-}
-
-uint16 executor_get_current_box(void)
-{
-    if (exec_waypoints == NULL || exec_waypoint_count == 0)
-    {
-        return 0;
-    }
-    /* 计算当前是第几个箱子 */
-    uint16 box = 0;
-    for (uint16 i = 0; i < current_step && i < exec_waypoint_count; i++)
-    {
-        if (exec_waypoints[i].action >= 'A' && exec_waypoints[i].action <= 'Z')
-        {
-            box++;
-        }
-    }
-    return box;
-}
-
-uint16 executor_get_total_boxes(void)
-{
-    if (exec_waypoints == NULL || exec_waypoint_count == 0)
-    {
-        return 0;
-    }
-    /* 计算总共有多少个箱子 */
-    uint16 box = 0;
-    for (uint16 i = 0; i < exec_waypoint_count; i++)
-    {
-        if (exec_waypoints[i].action >= 'A' && exec_waypoints[i].action <= 'Z')
-        {
-            box++;
-        }
-    }
-    return box;
 }
 
 void executor_debug_output(void)

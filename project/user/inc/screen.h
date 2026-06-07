@@ -45,13 +45,12 @@ typedef struct
     const char *state_text;
     uint32 elapsed_ms;
     const map_source_struct *source;
+    const solve_result_struct *result;
     uint8 executor_active;
     executor_state_enum executor_state;
     executor_error_enum executor_error;
     uint16 current_step;
     uint16 total_steps;
-    uint16 current_box;
-    uint16 total_boxes;
     float pose_x_cm;
     float pose_y_cm;
 } screen_run_view_struct;
@@ -64,12 +63,11 @@ typedef struct
     uint16 current_step;
     executor_state_enum state;
     executor_error_enum error;
-    uint16 current_box;
-    uint16 total_boxes;
     uint8 start_row;
     uint8 start_col;
     float pose_x_cm;
     float pose_y_cm;
+    uint8 art_launch_pending;
     uint8 art_player_enabled;
     uint8 art_player_valid;
     uint8 art_player_count;
@@ -123,11 +121,6 @@ void screen_draw_home_status(const screen_home_view_struct *view);
 void screen_draw_nav_cursor(uint8 previous_cursor, uint8 cursor);
 
 /**
- * @brief 绘制 Run 根菜单页面。
- */
-void screen_draw_run_root(const char *const *items, uint8 item_count, uint8 cursor, uint8 current_map, run_mode_enum mode, save_state_enum save_state, const char *state, uint32 elapsed_ms);
-
-/**
  * @brief 绘制 Run/Map 地图选择与预览页面。
  */
 void screen_draw_map_select(uint8 current_map, uint8 candidate_map, save_state_enum save_state, const char *state);
@@ -141,12 +134,6 @@ void screen_draw_mode_page(run_mode_enum candidate_mode);
  * @brief 绘制 Run 工作台页面，显示当前地图并允许直接执行。
  */
 void screen_draw_run_workbench(const screen_run_view_struct *view);
-
-/**
- * @brief 绘制模式选择页面。
- * @param[in] candidate_mode 当前候选模式，按 K3 后才写入运行设置。
- */
-void screen_draw_mode_select(run_mode_enum candidate_mode);
 
 /**
  * @brief 绘制 BFS 结果回放页面。
@@ -194,8 +181,6 @@ void screen_draw_info(uint8 map_count_value, save_state_enum save_state);
  * @param[in] result        求解结果
  * @param[in] current_step  当前步骤
  * @param[in] state         执行器状态
- * @param[in] current_box   当前箱子编号
- * @param[in] total_boxes   总箱子数
  * @param[in] start_row     起点行号
  * @param[in] start_col     起点列号
  */

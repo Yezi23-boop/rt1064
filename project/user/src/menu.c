@@ -8,6 +8,7 @@
 #include "timebase.h"
 #include "drive_control.h"
 #include "drive_pose.h"
+#include "drive_config.h"
 #include "openart_uart.h"
 #include "executor.h"
 
@@ -45,6 +46,22 @@ typedef struct
     menu_page_lifecycle_func on_refresh;
     menu_page_key_func on_key;
 } menu_page_def_struct;
+
+typedef enum
+{
+    ART_REPLAN_IDLE = 0,
+    ART_REPLAN_INITIAL,
+    ART_REPLAN_SEGMENT,
+} art_replan_phase_enum;
+
+typedef struct
+{
+    uint8 car_count;
+    uint8 box_count;
+    uint8 target_count;
+    uint8 car_row;
+    uint8 car_col;
+} art_map_stats_struct;
 
 static const char *const home_items[HOME_ITEM_COUNT] =
 {
@@ -114,6 +131,14 @@ static map_source_struct last_solve_source =
     },
 };
 static uint8 last_solve_source_valid = 0;
+static art_replan_phase_enum art_replan_phase = ART_REPLAN_IDLE;
+static char art_candidate_rows[MAP_ROWS][MAP_COLS + 1];
+static uint8 art_candidate_valid = 0;
+static uint8 art_stable_count = 0;
+static uint32 art_last_seen_frame = 0;
+static uint32 art_wait_start_ms = 0;
+static executor_error_enum art_timeout_error = EXEC_ERROR_ART_TIMEOUT;
+static uint8 art_launch_pending = 0;
 
 static void draw_current_page(void);
 static void enter_run_map_page(void);
@@ -141,6 +166,9 @@ static void draw_execute_page(void);
 static void refresh_execute_page(void);
 static void handle_execute_event(menu_key_event_enum event);
 static void execute_current_selection(void);
+static void art_replan_cancel(void);
+static void art_replan_tick(void);
+static void art_launch_confirm(void);
 
 static const menu_page_def_struct menu_pages[] =
 {
@@ -272,6 +300,11 @@ static void enter_run_mode_page(void)
 
 static void go_home(void)
 {
+    if(0 != art_launch_pending)
+    {
+        art_replan_cancel();
+        run_state = "Idle";
+    }
     candidate_map = current_map;
     candidate_mode = run_mode;
     enter_page(MENU_PAGE_HOME);
@@ -289,6 +322,11 @@ static void go_parent(void)
 
 static void clear_result_state(void)
 {
+    art_replan_cancel();
+    if(EXEC_STATE_IDLE != executor_get_state())
+    {
+        executor_stop();
+    }
     clear_result(&last_result);
     last_elapsed_ms = 0;
     playback_step = 0;
@@ -382,6 +420,330 @@ static void solve_current_map(void)
 
     playback_step = 0;
     playback_last_ms = time_ms();
+}
+
+static void art_replan_cancel(void)
+{
+    art_replan_phase = ART_REPLAN_IDLE;
+    art_candidate_valid = 0;
+    art_stable_count = 0;
+    art_last_seen_frame = 0;
+    art_wait_start_ms = 0;
+    art_launch_pending = 0;
+}
+
+static void art_replan_wait_fresh_frame(void)
+{
+    openart_uart_discard_pending();
+    art_candidate_valid = 0;
+    art_stable_count = 0;
+    art_last_seen_frame = openart_uart_get_frame_count();
+}
+
+static void art_copy_rows(char dst[MAP_ROWS][MAP_COLS + 1], const map_source_struct *source)
+{
+    uint8 row;
+    uint8 col;
+
+    for(row = 0; row < MAP_ROWS; row++)
+    {
+        for(col = 0; col < MAP_COLS; col++)
+        {
+            dst[row][col] = source->rows[row][col];
+        }
+        dst[row][MAP_COLS] = '\0';
+    }
+}
+
+static uint8 art_rows_match(const char rows[MAP_ROWS][MAP_COLS + 1], const map_source_struct *source)
+{
+    uint8 row;
+    uint8 col;
+
+    for(row = 0; row < MAP_ROWS; row++)
+    {
+        for(col = 0; col < MAP_COLS; col++)
+        {
+            if(rows[row][col] != source->rows[row][col])
+            {
+                return 0;
+            }
+        }
+    }
+    return 1;
+}
+
+static void art_replan_begin(art_replan_phase_enum phase)
+{
+    art_replan_phase = phase;
+    art_replan_wait_fresh_frame();
+    art_wait_start_ms = time_ms();
+    art_timeout_error = EXEC_ERROR_ART_TIMEOUT;
+    run_state = (ART_REPLAN_INITIAL == phase) ? "Wait ART" : "ART Sync";
+    mark_redraw();
+}
+
+static void art_replan_restart_stability(void)
+{
+    art_replan_wait_fresh_frame();
+}
+
+static uint8 art_get_stable_map(const map_source_struct **source_out)
+{
+    const map_source_struct *source = openart_map_get();
+    uint32 frame = openart_uart_get_frame_count();
+
+    if((0 == source) || (0 == frame))
+    {
+        return 0;
+    }
+
+    if(frame == art_last_seen_frame)
+    {
+        return 0;
+    }
+    art_last_seen_frame = frame;
+
+    if((0 != art_candidate_valid) && (0 != art_rows_match(art_candidate_rows, source)))
+    {
+        if(art_stable_count < EXEC_ART_STABLE_FRAMES)
+        {
+            art_stable_count++;
+        }
+    }
+    else
+    {
+        art_copy_rows(art_candidate_rows, source);
+        art_candidate_valid = 1;
+        art_stable_count = 1;
+    }
+
+    if(art_stable_count >= EXEC_ART_STABLE_FRAMES)
+    {
+        *source_out = source;
+        return 1;
+    }
+    return 0;
+}
+
+static void art_collect_stats(const map_source_struct *source, art_map_stats_struct *stats)
+{
+    uint8 row;
+    uint8 col;
+    char value;
+
+    stats->car_count = 0;
+    stats->box_count = 0;
+    stats->target_count = 0;
+    stats->car_row = 0;
+    stats->car_col = 0;
+
+    for(row = 0; row < MAP_ROWS; row++)
+    {
+        for(col = 0; col < MAP_COLS; col++)
+        {
+            value = source->rows[row][col];
+            if('C' == value)
+            {
+                if(0 == stats->car_count)
+                {
+                    stats->car_row = row;
+                    stats->car_col = col;
+                }
+                stats->car_count++;
+            }
+            else if('B' == value)
+            {
+                stats->box_count++;
+            }
+            else if('T' == value)
+            {
+                stats->target_count++;
+            }
+        }
+    }
+}
+
+static uint8 art_stats_done(const art_map_stats_struct *stats)
+{
+    return ((0 == stats->box_count) && (0 == stats->target_count)) ? 1u : 0u;
+}
+
+static uint8 art_stats_valid_for_solve(const art_map_stats_struct *stats)
+{
+    if(1u != stats->car_count)
+    {
+        return 0;
+    }
+    if(stats->box_count != stats->target_count)
+    {
+        return 0;
+    }
+    if((stats->box_count > MAX_BOXES) || (stats->target_count > MAX_BOXES))
+    {
+        return 0;
+    }
+    return (0 != stats->box_count) ? 1u : 0u;
+}
+
+static void art_replan_start_executor(const art_map_stats_struct *stats)
+{
+    uint8 single_step = (RUN_MODE_STEP == run_mode) ? 1u : 0u;
+
+    exec_start_row = stats->car_row;
+    exec_start_col = stats->car_col;
+    executor_start(last_result.waypoints, last_result.waypoint_count,
+                   exec_start_row, exec_start_col, single_step, 1u);
+    run_state = (0 != single_step) ? "Paused" : "Running";
+}
+
+static void art_replan_wait_launch(const art_map_stats_struct *stats)
+{
+    exec_start_row = stats->car_row;
+    exec_start_col = stats->car_col;
+    art_replan_cancel();
+    art_launch_pending = 1;
+    run_state = "Ready K3";
+    mark_redraw();
+}
+
+static void art_launch_confirm(void)
+{
+    uint8 single_step;
+
+    if(0 == art_launch_pending)
+    {
+        return;
+    }
+
+    art_launch_pending = 0;
+    single_step = (RUN_MODE_STEP == run_mode) ? 1u : 0u;
+    executor_start(last_result.waypoints, last_result.waypoint_count,
+                   exec_start_row, exec_start_col, single_step, 1u);
+    run_state = (0 != single_step) ? "Paused" : "Running";
+    mark_redraw();
+}
+
+static void art_handle_stable_map(const map_source_struct *source, executor_error_enum *timeout_error)
+{
+    art_map_stats_struct stats;
+    uint32 start_ms;
+    art_replan_phase_enum phase = art_replan_phase;
+
+    save_solve_source_snapshot(source);
+    art_collect_stats(&last_solve_source, &stats);
+
+    if((1u == stats.car_count) && (0 != art_stats_done(&stats)))
+    {
+        exec_start_row = stats.car_row;
+        exec_start_col = stats.car_col;
+        clear_result(&last_result);
+        last_elapsed_ms = 0;
+        playback_state = PLAYBACK_STATE_DONE;
+        run_state = "Done";
+        art_replan_cancel();
+        executor_finish_done();
+        printf("ART_DONE frame=%lu C=%d,%d\r\n",
+            (unsigned long)openart_uart_get_frame_count(),
+            stats.car_row,
+            stats.car_col);
+        mark_redraw();
+        return;
+    }
+
+    if(0 == art_stats_valid_for_solve(&stats))
+    {
+        *timeout_error = EXEC_ERROR_ART_SYNC;
+        run_state = "Bad ART";
+        printf("ART_SYNC_BAD frame=%lu C=%d B=%d T=%d\r\n",
+            (unsigned long)openart_uart_get_frame_count(),
+            stats.car_count,
+            stats.box_count,
+            stats.target_count);
+        art_replan_restart_stability();
+        mark_redraw();
+        return;
+    }
+
+    openart_uart_discard_pending();
+    start_ms = time_ms();
+    if(0 != solve_map(&last_solve_source, &last_result))
+    {
+        last_elapsed_ms = time_ms() - start_ms;
+        openart_uart_discard_pending();
+        playback_step = 0;
+        playback_last_ms = time_ms();
+        playback_state = PLAYBACK_STATE_PAUSED;
+        if(ART_REPLAN_INITIAL == phase)
+        {
+            art_replan_wait_launch(&stats);
+        }
+        else
+        {
+            art_replan_start_executor(&stats);
+            art_replan_cancel();
+        }
+        printf("ART_REPLAN_OK phase=%d tasks=%d actions=%d waypoints=%d time=%lu\r\n",
+            phase,
+            last_result.task_count,
+            last_result.action_count,
+            last_result.waypoint_count,
+            (unsigned long)last_elapsed_ms);
+        if(ART_REPLAN_INITIAL == phase)
+        {
+            enter_page(MENU_PAGE_RUN_EXECUTE);
+        }
+        else
+        {
+            mark_redraw();
+        }
+    }
+    else
+    {
+        last_elapsed_ms = time_ms() - start_ms;
+        art_replan_wait_fresh_frame();
+        playback_state = PLAYBACK_STATE_FAIL;
+        *timeout_error = EXEC_ERROR_ART_PLAN;
+        run_state = "Plan Fail";
+        printf("ART_REPLAN_FAIL phase=%d %s time=%lu\r\n",
+            phase,
+            last_result.message,
+            (unsigned long)last_elapsed_ms);
+        mark_redraw();
+    }
+}
+
+static void art_replan_tick(void)
+{
+    const map_source_struct *stable_source;
+
+    if((ART_REPLAN_IDLE == art_replan_phase) &&
+       (MAP_SOURCE_ART == settings_get_source()) &&
+       (0 != executor_art_sync_pending()))
+    {
+        art_replan_begin(ART_REPLAN_SEGMENT);
+    }
+
+    if(ART_REPLAN_IDLE == art_replan_phase)
+    {
+        return;
+    }
+
+    if((time_ms() - art_wait_start_ms) >= EXEC_ART_SYNC_TIMEOUT_MS)
+    {
+        run_state = "ART Timeout";
+        art_replan_cancel();
+        executor_set_error(art_timeout_error);
+        printf("ART_SYNC_TIMEOUT err=%d\r\n", art_timeout_error);
+        mark_redraw();
+        return;
+    }
+
+    stable_source = 0;
+    if(0 != art_get_stable_map(&stable_source))
+    {
+        art_handle_stable_map(stable_source, &art_timeout_error);
+    }
 }
 
 static void move_cursor(int8 delta)
@@ -512,7 +874,11 @@ static void handle_run_event(menu_key_event_enum event)
     }
     else if(MENU_KEY_EVENT_K3_SHORT == event)
     {
-        if(EXEC_STATE_PAUSED == executor_get_state())
+        if(0 != art_launch_pending)
+        {
+            art_launch_confirm();
+        }
+        else if(EXEC_STATE_PAUSED == executor_get_state())
         {
             executor_resume();
             run_state = "Running";
@@ -701,6 +1067,21 @@ static void execute_current_selection(void)
 {
     candidate_map = current_map;
     candidate_mode = run_mode;
+    art_replan_cancel();
+
+    if((MAP_SOURCE_ART == settings_get_source()) && (RUN_MODE_SOLVE != run_mode))
+    {
+        clear_result(&last_result);
+        last_elapsed_ms = 0;
+        playback_step = 0;
+        playback_state = PLAYBACK_STATE_PAUSED;
+        last_solve_source_valid = 0;
+        executor_stop();
+        art_replan_begin(ART_REPLAN_INITIAL);
+        enter_page(MENU_PAGE_RUN_EXECUTE);
+        return;
+    }
+
     solve_current_map();
 
     if(last_result.solved)
@@ -720,8 +1101,7 @@ static void execute_current_selection(void)
 
             executor_start(last_result.waypoints, last_result.waypoint_count,
                            exec_start_row, exec_start_col, single_step,
-                           (MAP_SOURCE_ART == settings_get_source()) ? 1u : 0u,
-                           &last_solve_source);
+                           0u);
             enter_page(MENU_PAGE_RUN_EXECUTE);
         }
     }
@@ -782,13 +1162,12 @@ static void build_run_view(screen_run_view_struct *view)
     view->state_text = run_state;
     view->elapsed_ms = last_elapsed_ms;
     view->source = selected_map_source();
+    view->result = &last_result;
     view->executor_active = (EXEC_STATE_IDLE != executor_get_state()) ? 1u : 0u;
     view->executor_state = executor_get_state();
     view->executor_error = executor_get_error();
     view->current_step = executor_get_current_step();
     view->total_steps = executor_get_total_steps();
-    view->current_box = executor_get_current_box();
-    view->total_boxes = executor_get_total_boxes();
     view->pose_x_cm = pose->x_cm;
     view->pose_y_cm = pose->y_cm;
 }
@@ -806,12 +1185,11 @@ static void build_execute_view(screen_execute_view_struct *view)
     view->current_step = executor_get_current_step();
     view->state = executor_get_state();
     view->error = executor_get_error();
-    view->current_box = executor_get_current_box();
-    view->total_boxes = executor_get_total_boxes();
     view->start_row = exec_start_row;
     view->start_col = exec_start_col;
     view->pose_x_cm = pose->x_cm;
     view->pose_y_cm = pose->y_cm;
+    view->art_launch_pending = art_launch_pending;
     view->art_player_enabled = (MAP_SOURCE_ART == settings_get_source()) ? 1u : 0u;
     if(0 != view->art_player_enabled)
     {
@@ -950,15 +1328,21 @@ static void handle_execute_event(menu_key_event_enum event)
     switch(event)
     {
         case MENU_KEY_EVENT_K3_SHORT:
-            /* 单步模式下恢复执行 */
-            if(EXEC_STATE_PAUSED == executor_get_state())
+            if(0 != art_launch_pending)
+            {
+                art_launch_confirm();
+            }
+            else if(EXEC_STATE_PAUSED == executor_get_state())
             {
                 executor_resume();
+                run_state = "Running";
+                mark_redraw();
             }
             break;
             
         case MENU_KEY_EVENT_K4_SHORT:
             /* 停止执行，返回 Run 页面 */
+            art_replan_cancel();
             executor_stop();
             go_parent();
             break;
@@ -1025,6 +1409,7 @@ void menu_poll(void)
     }
 
     playback_tick();
+    art_replan_tick();
 
     if(0 != need_redraw)
     {

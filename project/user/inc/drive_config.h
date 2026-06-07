@@ -14,8 +14,12 @@
 
 /** 第一版上板使用的保守目标轮速上限，单位为 encoder count/20ms。 */
 #define MAX_WHEEL_TARGET_COUNT (100.0f)
-/** 编码器增量到地面位移的标定系数，单位 cm/count；位姿解算只改这个系数做距离标定。 */
-#define POSE_CM_PER_COUNT (0.0086f)
+/** 前后方向编码器增量到地面位移的标定系数，单位 cm/count；上下准时保持该值不动。 */
+#define POSE_Y_CM_PER_COUNT (0.0086f)
+/** 左右横移编码器增量到地面位移的标定系数，单位 cm/count；麦轮横移滑移通常需要单独标定。 */
+#define POSE_X_CM_PER_COUNT (0.0072f)
+/** 兼容旧调试说明的基础比例；新代码实际使用 X/Y 两个独立比例。 */
+#define POSE_CM_PER_COUNT (POSE_Y_CM_PER_COUNT)
 /** 位姿 X 轴方向校正；当前取 +1，表示麦轮反解的正 X 直接对应右移为正。 */
 #define POSE_X_DIR_SIGN (1.0f)
 /** 位姿 Y 轴方向校正；当前取 +1，表示麦轮反解的正 Y 直接对应前进为正。 */
@@ -41,7 +45,7 @@
 /** 姿态环允许输出的最大归一化旋转分量。 */
 #define MAX_VZ (1.0f)
 /** 平移/路径执行时姿态保持允许叠加的最大旋转修正，避免横移被 yaw 环抢占。 */
-#define YAW_TRANSLATION_MAX_VZ (0.5f)
+#define YAW_TRANSLATION_MAX_VZ (0.3f)
 /** 离散原地转向每次命令对应的最大目标角步进，单位为 degree。 */
 #define TURN_STEP_DEG (10.0f)
 
@@ -62,8 +66,8 @@
 #define WHEEL_PID_KD (0.0f)
 /** 目标轮速小于该阈值时认为该轮应停转，不让编码器微小抖动触发速度环补偿。 */
 #define WHEEL_TARGET_STOP_EPS_COUNT (1.0f)
-/** 目标轮速达到该阈值才允许电机死区补偿，避免姿态小修正被放大成抖动。 */
-#define MOTOR_PWM_DEADBAND_TARGET_THRESHOLD_COUNT (10.0f)
+/** 目标轮速达到该阈值才允许电机死区补偿，避免段末 yaw 小修正被放大成抖动。 */
+#define MOTOR_PWM_DEADBAND_TARGET_THRESHOLD_COUNT (25.0f)
 
 /** 起步 PWM 阶梯限幅开关；置 1 后速度环输出会先从较低 PWM 窗口逐步放开。 */
 #define DRIVE_START_PWM_RAMP_ENABLE (1)
@@ -73,7 +77,7 @@
 #define DRIVE_START_PWM_RAMP_STEP (100)
 
 /** 路径跟踪PID比例系数；误差单位为cm，输出为归一化速度。 */
-#define PATH_KP (0.15f)
+#define PATH_KP (0.08f)
 /** 路径跟踪PID积分系数；用于消除稳态误差。 */
 #define PATH_KI (0.0f)
 /** 路径跟踪PID微分系数；用于减少超调。 */
@@ -83,15 +87,15 @@
 /** 路径跟踪PID积分限幅，防积分饱和。 */
 #define PATH_MAX_INTEGRAL (5.0f)
 /** 路径跟踪PID到点阈值，单位cm。 */
-#define PATH_ARRIVAL_THRESHOLD_CM (0.5f)
+#define PATH_ARRIVAL_THRESHOLD_CM (1.0f)
 /** 执行器到点需要连续满足阈值的 20ms 周期数，用于过滤瞬时越界和惯性抖动。 */
 #define EXEC_ARRIVAL_STABLE_TICKS (3u)
 /** waypoint 切换前的停稳时间，单位 ms；只在拐点/路径点边界停，不拆连续直线段。 */
-#define EXEC_SEGMENT_SETTLE_MS (150u)
-/** ART 来源执行时，段末等待 OpenART 小车格子确认的最长时间，单位 ms。 */
-#define EXEC_ART_VERIFY_TIMEOUT_MS (800u)
-/** ART 来源执行时，目标格需要连续确认的新地图帧数。 */
-#define EXEC_ART_CONFIRM_FRAMES (1u)
+#define EXEC_SEGMENT_SETTLE_MS (500u)
+/** ART 来源执行时，初始/段末等待稳定完整地图的最长时间，单位 ms。 */
+#define EXEC_ART_SYNC_TIMEOUT_MS (3000u)
+/** ART 来源执行时，完整地图需要连续一致的新帧数量。 */
+#define EXEC_ART_STABLE_FRAMES (2u)
 
 /** 底盘统一轮序，混控、硬件映射和调试输出均不得更换该顺序。 */
 typedef enum

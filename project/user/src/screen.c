@@ -29,11 +29,9 @@ typedef enum
     SCREEN_PAGE_NONE = 0,
     SCREEN_PAGE_HOME,
     SCREEN_PAGE_RUN,
-    SCREEN_PAGE_RUN_ROOT,
     SCREEN_PAGE_RUN_MAP,
     SCREEN_PAGE_MODE_SELECT,
     SCREEN_PAGE_PLAYBACK,
-    SCREEN_PAGE_DEMO,
     SCREEN_PAGE_DEBUG,
     SCREEN_PAGE_RUN_EXECUTE,
     SCREEN_PAGE_INFO,
@@ -56,6 +54,9 @@ typedef struct
 
 static screen_page_enum active_page = SCREEN_PAGE_NONE; // 只在页面切换时整屏清空，减少白底页面刷新闪烁。
 AT_SDRAM_SECTION_ALIGN(uint16 screen_fill_buffer[FILL_BUFFER_PIXELS], 64); // 显示填充缓存不参与 BFS，放 cacheable SDRAM 减少片上 RAM 压力。
+
+static void draw_mode_select(run_mode_enum candidate_mode);
+static void draw_pose_map_from_start(const map_source_struct *source, const solve_result_struct *result, uint16 step, float pose_x_cm, float pose_y_cm, uint8 start_row, uint8 start_col, uint8 *pose_row, uint8 *pose_col);
 
 static void begin_page(screen_page_enum page)
 {
@@ -367,73 +368,83 @@ static uint8 clamp_grid_index(int16 value, uint8 max_value)
 
 static uint16 action_step_from_waypoint_step(const solve_result_struct *result, uint16 waypoint_step)
 {
-    uint16 action_step = 0;
-    uint16 visible_step = 0;
-    char action;
-
-    if(0 == result)
+    if((0 == result) || (0 == waypoint_step))
     {
         return 0;
     }
 
-    while((action_step < result->action_count) && (visible_step < waypoint_step))
+    if(waypoint_step >= result->waypoint_count)
     {
-        action = result->actions[action_step];
-        action_step++;
-        if('|' != action)
+        return result->action_count;
+    }
+
+    return result->waypoints[waypoint_step].action_start;
+}
+
+static uint8 waypoint_is_push(const waypoint_struct *wp)
+{
+    return ((0 != wp) && (wp->action >= 'A') && (wp->action <= 'Z')) ? 1u : 0u;
+}
+
+static uint16 action_step_for_execute_preview(const solve_result_struct *result, uint16 waypoint_step)
+{
+    uint16 action_step = action_step_from_waypoint_step(result, waypoint_step);
+    const waypoint_struct *wp;
+
+    if((0 == result) || (0 == result->solved) || (waypoint_step >= result->waypoint_count))
+    {
+        return action_step;
+    }
+
+    wp = &result->waypoints[waypoint_step];
+    if(0 == waypoint_is_push(wp))
+    {
+        return action_step;
+    }
+
+    if(wp->action_end > result->action_count)
+    {
+        return result->action_count;
+    }
+
+    return wp->action_end;
+}
+
+static void display_task_progress(const solve_result_struct *result, uint16 waypoint_step, uint16 *current_task, uint16 *total_tasks)
+{
+    uint16 action_step;
+    uint16 i;
+    uint16 completed_tasks = 0;
+
+    *current_task = 0;
+    *total_tasks = 0;
+
+    if((0 == result) || (0 == result->solved) || (0 == result->task_count))
+    {
+        return;
+    }
+
+    *total_tasks = result->task_count;
+    action_step = action_step_from_waypoint_step(result, waypoint_step);
+
+    for(i = 0; (i < action_step) && (i < result->action_count); i++)
+    {
+        if('|' == result->actions[i])
         {
-            visible_step++;
+            completed_tasks++;
         }
     }
 
-    while((action_step < result->action_count) && ('|' == result->actions[action_step]))
+    if(action_step >= result->action_count)
     {
-        action_step++;
+        *current_task = *total_tasks;
     }
-
-    return action_step;
-}
-
-/**
- * @brief 绘制地图网格（墙壁、箱子、目标），不处理游戏状态。
- * @param[in] source  地图数据源
- * @param[in] x       绘制起始 X 坐标（像素）
- * @param[in] y       绘制起始 Y 坐标（像素）
- */
-static void draw_map_grid(const map_source_struct *source, int x, int y)
-{
-    uint8 row, col;
-    char value;
-    uint16 color;
-
-    for(row = 0; row < MAP_ROWS; row++)
+    else
     {
-        for(col = 0; col < MAP_COLS; col++)
+        *current_task = (uint16)(completed_tasks + 1u);
+        if(*current_task > *total_tasks)
         {
-            value = source->rows[row][col];
-
-            if('#' == value || 'X' == value)
-            {
-                color = WALL_COLOR;
-            }
-            else if('B' == value)
-            {
-                color = BOX_COLOR;
-            }
-            else if('T' == value)
-            {
-                color = TARGET_COLOR;
-            }
-            else
-            {
-                color = EMPTY_COLOR;
-            }
-
-            fill_rect((uint16)(x + col * CELL_SIZE),
-                       (uint16)(y + row * CELL_SIZE),
-                       (CELL_SIZE - 1),
-                       (CELL_SIZE - 1),
-                       color);
+            *current_task = *total_tasks;
         }
     }
 }
@@ -461,7 +472,7 @@ static void draw_map_render(const screen_map_render_struct *render)
     {
         if(0 != render->use_pose)
         {
-            action_step = action_step_from_waypoint_step(render->result, render->step);
+            action_step = action_step_for_execute_preview(render->result, render->step);
         }
         else
         {
@@ -518,39 +529,34 @@ static void draw_color_map(const map_source_struct *source, const solve_result_s
     draw_map_render(&render);
 }
 
-static void draw_pose_map(const map_source_struct *source, float pose_x_cm, float pose_y_cm, uint8 *pose_row, uint8 *pose_col)
+static uint16 find_start_car(const map_source_struct *source)
 {
-    char grid[MAP_ROWS][MAP_COLS];
-    uint16 start_car;
-    uint16 pose_car;
-    uint16 boxes[MAX_BOXES];
-    uint16 targets[MAX_BOXES];
-    uint8 box_count;
-    uint8 target_count;
-    int16 row;
-    int16 col;
-    uint8 draw_row;
-    uint8 draw_col;
-    uint16 cell;
-    uint16 color;
+    uint8 row;
+    uint8 col;
 
-    parse_source(source, grid, &start_car, boxes, &box_count, targets, &target_count);
-
-    col = (int16)cell_col_local(start_car) + round_cm_to_grid_delta(pose_x_cm);
-    row = (int16)cell_row_local(start_car) - round_cm_to_grid_delta(pose_y_cm);
-    *pose_row = clamp_grid_index(row, MAP_ROWS);
-    *pose_col = clamp_grid_index(col, MAP_COLS);
-    pose_car = cell_index_local(*pose_row, *pose_col);
-
-    for(draw_row = 0; draw_row < MAP_ROWS; draw_row++)
+    for(row = 0; row < MAP_ROWS; row++)
     {
-        for(draw_col = 0; draw_col < MAP_COLS; draw_col++)
+        for(col = 0; col < MAP_COLS; col++)
         {
-            cell = cell_index_local(draw_row, draw_col);
-            color = color_for_pose_cell(grid[draw_row][draw_col], cell, pose_car, boxes, box_count, targets, target_count);
-            fill_rect((uint16)(MAP_X + draw_col * CELL_SIZE), (uint16)(MAP_Y + draw_row * CELL_SIZE), (CELL_SIZE - 1), (CELL_SIZE - 1), color);
+            if('C' == source->rows[row][col])
+            {
+                return cell_index_local(row, col);
+            }
         }
     }
+    return 0;
+}
+
+static void draw_pose_map(const map_source_struct *source, float pose_x_cm, float pose_y_cm, uint8 *pose_row, uint8 *pose_col)
+{
+    uint16 start_car;
+
+    start_car = find_start_car(source);
+    draw_pose_map_from_start(source, 0, 0, pose_x_cm, pose_y_cm,
+                             cell_row_local(start_car),
+                             cell_col_local(start_car),
+                             pose_row,
+                             pose_col);
 }
 
 static void draw_pose_map_from_start(const map_source_struct *source, const solve_result_struct *result, uint16 step, float pose_x_cm, float pose_y_cm, uint8 start_row, uint8 start_col, uint8 *pose_row, uint8 *pose_col)
@@ -706,32 +712,6 @@ void screen_draw_nav_cursor(uint8 previous_cursor, uint8 cursor)
     ips200_show_string(MENU_CURSOR_X, MENU_ROW_Y(cursor), ">");
 }
 
-void screen_draw_run_root(const char *const *items, uint8 item_count, uint8 cursor, uint8 current_map, run_mode_enum mode, save_state_enum save_state, const char *state, uint32 elapsed_ms)
-{
-    uint8 i;
-
-    begin_page(SCREEN_PAGE_RUN_ROOT);
-    ips200_show_string(0, 0, "Run");
-    for(i = 0; i < item_count; i++)
-    {
-        ips200_show_string(MENU_CURSOR_X, MENU_ROW_Y(i), (i == cursor) ? ">" : " ");
-        ips200_show_string(MENU_TEXT_X, MENU_ROW_Y(i), items[i]);
-    }
-
-    ips200_show_string(0, LINE_H * 5, "Map : V");
-    ips200_show_uint(56, LINE_H * 5, current_map + 1, 2);
-    ips200_show_string(0, LINE_H * 6, "Mode: ");
-    show_text_value(48, LINE_H * 6, mode_name(mode), 8);
-    ips200_show_string(0, LINE_H * 7, "Save: ");
-    show_text_value(48, LINE_H * 7, save_state_name(save_state), 12);
-    ips200_show_string(0, LINE_H * 8, "State: ");
-    show_text_value(56, LINE_H * 8, state, 10);
-    ips200_show_string(0, LINE_H * 9, "Last: ");
-    ips200_show_uint(48, LINE_H * 9, elapsed_ms, 5);
-    ips200_show_string(96, LINE_H * 9, "ms");
-    show_hint("K1/K2 Move  K3 Enter", "K4 Home  K4L Home");
-}
-
 void screen_draw_map_select(uint8 current_map, uint8 candidate_map, save_state_enum save_state, const char *state)
 {
     begin_page(SCREEN_PAGE_RUN_MAP);
@@ -750,7 +730,7 @@ void screen_draw_map_select(uint8 current_map, uint8 candidate_map, save_state_e
 
 void screen_draw_mode_page(run_mode_enum candidate_mode)
 {
-    screen_draw_mode_select(candidate_mode);
+    draw_mode_select(candidate_mode);
 }
 
 static const char *executor_state_text(executor_state_enum state)
@@ -772,7 +752,8 @@ static const char *executor_error_text(executor_error_enum error)
     {
         case EXEC_ERROR_MAP:        return "E:MAP";
         case EXEC_ERROR_ART_TIMEOUT:return "E:ATO";
-        case EXEC_ERROR_ART_PLAYER: return "E:ART";
+        case EXEC_ERROR_ART_SYNC:   return "E:SYN";
+        case EXEC_ERROR_ART_PLAN:   return "E:PLN";
         case EXEC_ERROR_NONE:       return "E:OK";
         default:                    return "E:?";
     }
@@ -782,6 +763,10 @@ static void draw_executor_status(const screen_run_view_struct *view)
 {
     uint16 y0 = EXEC_LINE_Y(0);
     uint16 y1 = EXEC_LINE_Y(1);
+    uint16 current_task;
+    uint16 total_tasks;
+
+    display_task_progress(view->result, view->current_step, &current_task, &total_tasks);
 
     /* 行0：状态 + 步数 */
     ips200_show_string(0, y0, "S:");
@@ -794,9 +779,9 @@ static void draw_executor_status(const screen_run_view_struct *view)
 
     /* 行1：箱子数 + 位置，ERROR 时追加错误码 */
     ips200_show_string(0, y1, "B:");
-    ips200_show_uint(16, y1, view->current_box, 2);
+    ips200_show_uint(16, y1, current_task, 2);
     ips200_show_string(32, y1, "/");
-    ips200_show_uint(40, y1, view->total_boxes, 2);
+    ips200_show_uint(40, y1, total_tasks, 2);
     ips200_show_string(64, y1, "X:");
     ips200_show_float(76, y1, (double)view->pose_x_cm, 3, 1);
     ips200_show_string(120, y1, "Y:");
@@ -838,7 +823,7 @@ void screen_draw_run_workbench(const screen_run_view_struct *view)
     }
 }
 
-void screen_draw_mode_select(run_mode_enum candidate_mode)
+static void draw_mode_select(run_mode_enum candidate_mode)
 {
     uint8 i;
 
@@ -940,6 +925,20 @@ void screen_draw_debug(uint8 map_index, const map_source_struct *source, float p
 void screen_draw_execute(const screen_execute_view_struct *view)
 {
     uint8 pose_row, pose_col;
+    uint16 current_task;
+    uint16 total_tasks;
+    uint16 total_waypoints = 0;
+    const waypoint_struct *wp = 0;
+
+    if(0 != view->result)
+    {
+        total_waypoints = view->result->waypoint_count;
+        if(view->current_step < total_waypoints)
+        {
+            wp = &view->result->waypoints[view->current_step];
+        }
+    }
+    display_task_progress(view->result, view->current_step, &current_task, &total_tasks);
 
     /* 1. 绘制顶部信息栏 */
     begin_page(SCREEN_PAGE_RUN_EXECUTE);
@@ -967,11 +966,13 @@ void screen_draw_execute(const screen_execute_view_struct *view)
 
     /* 3. 绘制状态信息 */
     ips200_show_string(0, LINE_H * 2, "S:");
-    show_text_value(16, LINE_H * 2, executor_state_text(view->state), 7);
+    show_text_value(16, LINE_H * 2,
+                    (0 != view->art_launch_pending) ? "READY" : executor_state_text(view->state),
+                    7);
     ips200_show_string(80, LINE_H * 2, "St:");
     ips200_show_uint(104, LINE_H * 2, view->current_step, 3);
     ips200_show_string(128, LINE_H * 2, "/");
-    ips200_show_uint(136, LINE_H * 2, view->result->waypoint_count, 3);
+    ips200_show_uint(136, LINE_H * 2, total_waypoints, 3);
     if(EXEC_STATE_ERROR == view->state)
     {
         ips200_show_string(176, LINE_H * 2, executor_error_text(view->error));
@@ -979,35 +980,54 @@ void screen_draw_execute(const screen_execute_view_struct *view)
 
     /* 4. 绘制箱子信息 */
     ips200_show_string(0, LINE_H * 3, "B:");
-    ips200_show_uint(16, LINE_H * 3, view->current_box, 2);
+    ips200_show_uint(16, LINE_H * 3, current_task, 2);
     ips200_show_string(32, LINE_H * 3, "/");
-    ips200_show_uint(40, LINE_H * 3, view->total_boxes, 2);
+    ips200_show_uint(40, LINE_H * 3, total_tasks, 2);
 
-    /* 5. 绘制 MCU 本地 pose 换算格子与 ART 识别格子 */
+    /* 5. 绘制 MCU 本地 pose 换算格子与当前 waypoint 目标 */
     ips200_show_string(64, LINE_H * 3, "M:");
     ips200_show_uint(80, LINE_H * 3, pose_row, 2);
     ips200_show_string(96, LINE_H * 3, ",");
     ips200_show_uint(104, LINE_H * 3, pose_col, 2);
 
+    ips200_show_string(0, LINE_H * 4, "W:");
+    if(0 != wp)
+    {
+        ips200_show_uint(16, LINE_H * 4, wp->row, 2);
+        ips200_show_string(32, LINE_H * 4, ",");
+        ips200_show_uint(40, LINE_H * 4, wp->col, 2);
+        ips200_show_string(64, LINE_H * 4, "A:");
+        ips200_show_char(80, LINE_H * 4, wp->action);
+    }
+    else
+    {
+        ips200_show_string(16, LINE_H * 4, "--,--");
+        ips200_show_string(64, LINE_H * 4, "A:-");
+    }
+
     if(0 != view->art_player_enabled)
     {
-        ips200_show_string(0, LINE_H * 4, "A:");
+        ips200_show_string(0, LINE_H * 5, "A:");
         if(0 != view->art_player_valid)
         {
-            ips200_show_uint(16, LINE_H * 4, view->art_row, 2);
-            ips200_show_string(32, LINE_H * 4, ",");
-            ips200_show_uint(40, LINE_H * 4, view->art_col, 2);
+            ips200_show_uint(16, LINE_H * 5, view->art_row, 2);
+            ips200_show_string(32, LINE_H * 5, ",");
+            ips200_show_uint(40, LINE_H * 5, view->art_col, 2);
         }
         else
         {
-            ips200_show_string(16, LINE_H * 4, "--,--");
+            ips200_show_string(16, LINE_H * 5, "--,--");
         }
-        ips200_show_string(80, LINE_H * 4, "N:");
-        ips200_show_uint(96, LINE_H * 4, view->art_player_count, 2);
+        ips200_show_string(80, LINE_H * 5, "N:");
+        ips200_show_uint(96, LINE_H * 5, view->art_player_count, 2);
     }
 
     /* 6. 绘制按键提示 */
-    if(EXEC_STATE_PAUSED == view->state)
+    if(0 != view->art_launch_pending)
+    {
+        show_hint("K3 Launch", "K4 Stop");
+    }
+    else if(EXEC_STATE_PAUSED == view->state)
     {
         show_hint("K3 Resume", "K4 Stop");
     }

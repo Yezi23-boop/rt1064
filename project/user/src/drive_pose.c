@@ -62,8 +62,8 @@ void drive_pose_update_20ms(const float encoder_count[WHEEL_COUNT], float yaw_de
     body_vy_count = (lf_count + lb_count + rf_count + rb_count) * 0.25f;
     body_vx_count = (lf_count + rb_count - lb_count - rf_count) * 0.25f;
 
-    dx_body_cm = body_vx_count * POSE_CM_PER_COUNT * POSE_X_DIR_SIGN;
-    dy_body_cm = body_vy_count * POSE_CM_PER_COUNT * POSE_Y_DIR_SIGN;
+    dx_body_cm = body_vx_count * POSE_X_CM_PER_COUNT * POSE_X_DIR_SIGN;
+    dy_body_cm = body_vy_count * POSE_Y_CM_PER_COUNT * POSE_Y_DIR_SIGN;
 
     pose_yaw_deg = normalize_yaw_deg(yaw_deg - pose_yaw_zero_deg);
     yaw_rad = pose_yaw_deg * (float)M_PI / 180.0f;

@@ -23,8 +23,9 @@ typedef enum {
 typedef enum {
     EXEC_ERROR_NONE,      /**< 无错误 */
     EXEC_ERROR_MAP,       /**< 地图数据异常 */
-    EXEC_ERROR_ART_TIMEOUT, /**< ART 段末确认超时 */
-    EXEC_ERROR_ART_PLAYER /**< ART 小车格子无效或不在目标格 */
+    EXEC_ERROR_ART_TIMEOUT, /**< ART 低频重定位等待超时 */
+    EXEC_ERROR_ART_SYNC,  /**< ART 稳定地图无效 */
+    EXEC_ERROR_ART_PLAN   /**< ART 稳定地图重解算失败 */
 } executor_error_enum;
 
 /**
@@ -43,7 +44,7 @@ void executor_init(void);
  */
 void executor_start(const waypoint_struct *waypoints, uint16 count,
                     uint8 start_row, uint8 start_col, uint8 single_step,
-                    uint8 art_verify, const map_source_struct *source);
+                    uint8 art_sync);
 
 /**
  * @brief 停止执行器（急停）。
@@ -59,6 +60,22 @@ void executor_update_20ms(void);
  * @brief 单步模式下恢复执行（K3 按键调用）。
  */
 void executor_resume(void);
+
+/**
+ * @brief ART 低频重定位是否正在等待主循环处理。
+ * @return 1 表示当前 waypoint 已本地到点停车，等待主循环读取稳定 ART 地图并重解算。
+ */
+uint8 executor_art_sync_pending(void);
+
+/**
+ * @brief 主循环确认任务已完成后，把执行器置为 DONE。
+ */
+void executor_finish_done(void);
+
+/**
+ * @brief 主循环确认低频重定位失败后，把执行器置为 ERROR。
+ */
+void executor_set_error(executor_error_enum error);
 
 /**
  * @brief 获取当前状态。
@@ -83,8 +100,6 @@ const char *executor_state_name(void);
  */
 uint16 executor_get_current_step(void);
 uint16 executor_get_total_steps(void);
-uint16 executor_get_current_box(void);
-uint16 executor_get_total_boxes(void);
 
 /**
  * @brief 输出执行器调试信息。

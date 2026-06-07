@@ -39,6 +39,13 @@ uint32 openart_last_rx_ms(void);
 uint32 openart_uart_get_frame_count(void);
 
 /**
+ * @brief 丢弃 UART 环形缓冲中尚未解析的字节，并重置当前半帧解析状态。
+ *
+ * 已接收完成的最近一帧地图仍然保留；本函数只用于等待后续新帧前清理旧串口数据。
+ */
+void openart_uart_discard_pending(void);
+
+/**
  * @brief 查找最近一帧 OpenART 地图中的小车格子 `C`。
  * @param[out] row  唯一 `C` 所在行；未找到或多于一个时返回第一个 `C` 或 0。
  * @param[out] col  唯一 `C` 所在列；未找到或多于一个时返回第一个 `C` 或 0。

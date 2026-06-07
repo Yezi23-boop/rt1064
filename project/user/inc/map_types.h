@@ -56,6 +56,8 @@ typedef struct
     uint8 row;                          /**< 行号，范围 `[0, MAP_ROWS - 1]`。 */
     uint8 col;                          /**< 列号，范围 `[0, MAP_COLS - 1]`。 */
     char action;                        /**< 到达该点对应的动作字符，小写移动、大写推箱。 */
+    uint16 action_start;                /**< 该 waypoint 覆盖的第一个 action 下标，包含前序任务分隔符之后的位置。 */
+    uint16 action_end;                  /**< 该 waypoint 覆盖的尾后 action 下标，不包含 `|` 分隔符。 */
 } waypoint_struct;
 
 /**
