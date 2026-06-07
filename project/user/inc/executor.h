@@ -22,7 +22,9 @@ typedef enum {
 /** @brief 执行器错误类型 */
 typedef enum {
     EXEC_ERROR_NONE,      /**< 无错误 */
-    EXEC_ERROR_MAP        /**< 地图数据异常 */
+    EXEC_ERROR_MAP,       /**< 地图数据异常 */
+    EXEC_ERROR_ART_TIMEOUT, /**< ART 段末确认超时 */
+    EXEC_ERROR_ART_PLAYER /**< ART 小车格子无效或不在目标格 */
 } executor_error_enum;
 
 /**
@@ -40,7 +42,8 @@ void executor_init(void);
  * @param single_step 是否单步模式
  */
 void executor_start(const waypoint_struct *waypoints, uint16 count,
-                    uint8 start_row, uint8 start_col, uint8 single_step);
+                    uint8 start_row, uint8 start_col, uint8 single_step,
+                    uint8 art_verify, const map_source_struct *source);
 
 /**
  * @brief 停止执行器（急停）。

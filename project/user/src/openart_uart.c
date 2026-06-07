@@ -44,6 +44,52 @@ static map_source_struct openart_map_source;
 static uint8 map_valid;
 static uint32 frame_count;
 static uint32 error_count;
+static uint8 player_row;
+static uint8 player_col;
+static uint8 player_count;
+static uint16 box_cells[MAX_BOXES];
+static uint8 box_count;
+
+static uint16 map_cell_index(uint8 row, uint8 col)
+{
+    return (uint16)(row * MAP_COLS + col);
+}
+
+static void update_map_object_cache(void)
+{
+    uint8 r;
+    uint8 c;
+    uint8 found_count = 0;
+    uint8 first_row = 0;
+    uint8 first_col = 0;
+    uint8 found_boxes = 0;
+
+    for(r = 0; r < MAP_ROWS; r++)
+    {
+        for(c = 0; c < MAP_COLS; c++)
+        {
+            if('C' == map_snapshot[r][c])
+            {
+                if(0 == found_count)
+                {
+                    first_row = r;
+                    first_col = c;
+                }
+                found_count++;
+            }
+            else if(('B' == map_snapshot[r][c]) && (found_boxes < MAX_BOXES))
+            {
+                box_cells[found_boxes] = map_cell_index(r, c);
+                found_boxes++;
+            }
+        }
+    }
+
+    player_row = first_row;
+    player_col = first_col;
+    player_count = found_count;
+    box_count = found_boxes;
+}
 
 static uint16 next_hw_rx_index(uint16 index)
 {
@@ -121,6 +167,7 @@ static void accept_map(void)
 
     openart_map_source.name = "OpenART";
     map_valid = 1;
+    update_map_object_cache();
     frame_count++;
     uart_write_string(OPENART_UART_INDEX, "MAP_OK rows=12 cols=16\r\n");
 }
@@ -206,6 +253,10 @@ void openart_uart_init(void)
     frame_count = 0;
     error_count = 0;
     last_rx_ms = 0;
+    player_row = 0;
+    player_col = 0;
+    player_count = 0;
+    box_count = 0;
     reset_frame_parser();
 
     for(row = 0; row < MAP_ROWS; row++)
@@ -258,6 +309,56 @@ uint32 openart_last_rx_ms(void)
 uint32 openart_uart_get_frame_count(void)
 {
     return frame_count;
+}
+
+uint8 openart_find_player_cell(uint8 *row, uint8 *col, uint8 *count)
+{
+    return openart_get_player_cell(row, col, count, 0);
+}
+
+uint8 openart_get_player_cell(uint8 *row, uint8 *col, uint8 *count, uint32 *frame)
+{
+    if(0 != row)
+    {
+        *row = player_row;
+    }
+    if(0 != col)
+    {
+        *col = player_col;
+    }
+    if(0 != count)
+    {
+        *count = player_count;
+    }
+    if(0 != frame)
+    {
+        *frame = frame_count;
+    }
+
+    return ((0 != map_valid) && (1u == player_count)) ? 1u : 0u;
+}
+
+uint8 openart_get_box_cells(uint16 boxes[MAX_BOXES], uint8 *count, uint32 *frame)
+{
+    uint8 i;
+
+    if(0 != boxes)
+    {
+        for(i = 0; i < box_count; i++)
+        {
+            boxes[i] = box_cells[i];
+        }
+    }
+    if(0 != count)
+    {
+        *count = box_count;
+    }
+    if(0 != frame)
+    {
+        *frame = frame_count;
+    }
+
+    return (0 != map_valid) ? 1u : 0u;
 }
 
 void openart_uart_push_byte(uint8 data)

@@ -770,9 +770,11 @@ static const char *executor_error_text(executor_error_enum error)
 {
     switch(error)
     {
-        case EXEC_ERROR_MAP:     return "E:MAP";
-        case EXEC_ERROR_NONE:    return "E:OK";
-        default:                 return "E:?";
+        case EXEC_ERROR_MAP:        return "E:MAP";
+        case EXEC_ERROR_ART_TIMEOUT:return "E:ATO";
+        case EXEC_ERROR_ART_PLAYER: return "E:ART";
+        case EXEC_ERROR_NONE:       return "E:OK";
+        default:                    return "E:?";
     }
 }
 
@@ -981,11 +983,28 @@ void screen_draw_execute(const screen_execute_view_struct *view)
     ips200_show_string(32, LINE_H * 3, "/");
     ips200_show_uint(40, LINE_H * 3, view->total_boxes, 2);
 
-    /* 5. 绘制小车位置 */
-    ips200_show_string(64, LINE_H * 3, "R:");
+    /* 5. 绘制 MCU 本地 pose 换算格子与 ART 识别格子 */
+    ips200_show_string(64, LINE_H * 3, "M:");
     ips200_show_uint(80, LINE_H * 3, pose_row, 2);
-    ips200_show_string(96, LINE_H * 3, "C:");
-    ips200_show_uint(112, LINE_H * 3, pose_col, 2);
+    ips200_show_string(96, LINE_H * 3, ",");
+    ips200_show_uint(104, LINE_H * 3, pose_col, 2);
+
+    if(0 != view->art_player_enabled)
+    {
+        ips200_show_string(0, LINE_H * 4, "A:");
+        if(0 != view->art_player_valid)
+        {
+            ips200_show_uint(16, LINE_H * 4, view->art_row, 2);
+            ips200_show_string(32, LINE_H * 4, ",");
+            ips200_show_uint(40, LINE_H * 4, view->art_col, 2);
+        }
+        else
+        {
+            ips200_show_string(16, LINE_H * 4, "--,--");
+        }
+        ips200_show_string(80, LINE_H * 4, "N:");
+        ips200_show_uint(96, LINE_H * 4, view->art_player_count, 2);
+    }
 
     /* 6. 绘制按键提示 */
     if(EXEC_STATE_PAUSED == view->state)

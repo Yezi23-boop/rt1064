@@ -9,7 +9,7 @@
 #define DRIVE_SPEED_LOOP_TEST_ENABLE (0)
 /** 速度环闭环测试目标，单位为 encoder count/20ms；可改成负值检查反馈方向。 */
 #define DRIVE_SPEED_LOOP_TEST_TARGET_COUNT (100.0f)
-
+y
 /** 原地姿态角闭环测试开关；置 1 后上电只给目标 yaw 偏移，不给 vx/vy 平移。 */
 #define DRIVE_ATTITUDE_LOOP_TEST_ENABLE (0)
 /** 原地姿态角闭环测试目标偏移，单位 degree；0 表示锁住上电当前 yaw，手拨后自动回正。 */

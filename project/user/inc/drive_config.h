@@ -88,6 +88,10 @@
 #define EXEC_ARRIVAL_STABLE_TICKS (3u)
 /** waypoint 切换前的停稳时间，单位 ms；只在拐点/路径点边界停，不拆连续直线段。 */
 #define EXEC_SEGMENT_SETTLE_MS (150u)
+/** ART 来源执行时，段末等待 OpenART 小车格子确认的最长时间，单位 ms。 */
+#define EXEC_ART_VERIFY_TIMEOUT_MS (800u)
+/** ART 来源执行时，目标格需要连续确认的新地图帧数。 */
+#define EXEC_ART_CONFIRM_FRAMES (1u)
 
 /** 底盘统一轮序，混控、硬件映射和调试输出均不得更换该顺序。 */
 typedef enum

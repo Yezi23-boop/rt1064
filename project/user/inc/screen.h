@@ -70,6 +70,11 @@ typedef struct
     uint8 start_col;
     float pose_x_cm;
     float pose_y_cm;
+    uint8 art_player_enabled;
+    uint8 art_player_valid;
+    uint8 art_player_count;
+    uint8 art_row;
+    uint8 art_col;
 } screen_execute_view_struct;
 
 /**

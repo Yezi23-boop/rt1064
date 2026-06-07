@@ -719,7 +719,9 @@ static void execute_current_selection(void)
             }
 
             executor_start(last_result.waypoints, last_result.waypoint_count,
-                           exec_start_row, exec_start_col, single_step);
+                           exec_start_row, exec_start_col, single_step,
+                           (MAP_SOURCE_ART == settings_get_source()) ? 1u : 0u,
+                           &last_solve_source);
             enter_page(MENU_PAGE_RUN_EXECUTE);
         }
     }
@@ -794,6 +796,9 @@ static void build_run_view(screen_run_view_struct *view)
 static void build_execute_view(screen_execute_view_struct *view)
 {
     const drive_pose_struct *pose = drive_pose_get();
+    uint8 art_row = 0;
+    uint8 art_col = 0;
+    uint8 art_count = 0;
 
     view->current_map = current_map;
     view->source = last_or_selected_map_source();
@@ -807,6 +812,18 @@ static void build_execute_view(screen_execute_view_struct *view)
     view->start_col = exec_start_col;
     view->pose_x_cm = pose->x_cm;
     view->pose_y_cm = pose->y_cm;
+    view->art_player_enabled = (MAP_SOURCE_ART == settings_get_source()) ? 1u : 0u;
+    if(0 != view->art_player_enabled)
+    {
+        view->art_player_valid = openart_find_player_cell(&art_row, &art_col, &art_count);
+    }
+    else
+    {
+        view->art_player_valid = 0;
+    }
+    view->art_player_count = art_count;
+    view->art_row = art_row;
+    view->art_col = art_col;
 }
 
 static void draw_home_page(void)

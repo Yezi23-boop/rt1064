@@ -11,22 +11,22 @@ UART_MAP_DRAIN_RX = True     # True=清空 MCU 回包，避免 ACK 堆满 OpenAR
 
 # ==================== USER_SWITCHES：现场最常改 ===================
 # 调试开关：正式跑帧率时建议 DEBUG_ENABLE=False。
-DEBUG_ENABLE = True          # True=打印地图并绘制调试图形；False=正式高速运行
-DEBUG_DRAW_ROI = True        # True=画绿色地图边界/拉正边框
-DEBUG_DRAW_GRID_LINES = True # True=画 16x12 网格线，用于检查格子是否对齐
-DEBUG_DRAW_POINTS = True     # True=画识别结果圆点；False=画面更干净、显示更快
+DEBUG_ENABLE = False          # True=打印地图并绘制调试图形；False=正式高速运行
+DEBUG_DRAW_ROI = False        # True=画绿色地图边界/拉正边框
+DEBUG_DRAW_GRID_LINES = False # True=画 16x12 网格线，用于检查格子是否对齐
+DEBUG_DRAW_POINTS = False     # True=画识别结果圆点；False=画面更干净、显示更快
 DEBUG_PRINT_PERIOD_MS = 1000
 
 # 显示/识别路径：
 # 标定看图：SHOW_RECTIFIED_VIEW=True,  USE_RECTIFIED_RECOGNITION=True
 # 正式高速：SHOW_RECTIFIED_VIEW=False, USE_RECTIFIED_RECOGNITION=False
 # 只看拉正：SHOW_RECTIFIED_VIEW=True,  USE_RECTIFIED_RECOGNITION=False
-SHOW_RECTIFIED_VIEW = True       # True=IDE 显示拉正图；False=IDE 显示原图
-USE_RECTIFIED_RECOGNITION = True # True=在拉正图上识别；False=在原图投影点上识别
+SHOW_RECTIFIED_VIEW = False       # True=IDE 显示拉正图；False=IDE 显示原图
+USE_RECTIFIED_RECOGNITION = False # True=在拉正图上识别；False=在原图投影点上识别
 
 # 稳定输出地图：同一格连续多帧识别为新类型后才切换。
 STABILIZE_OUTPUT = True # True=过滤单帧跳动；False=直接输出当前帧识别
-STABLE_CHANGE_COUNT = 2
+STABLE_CHANGE_COUNT = 5
 
 # 相机自动项锁定。固定后画面和 snapshot() 帧周期更稳定。
 CAMERA_MANUAL_EXPOSURE = True # True=手动曝光；False=自动曝光
@@ -53,10 +53,10 @@ GRID_ROWS = 12
 # MAP_CORNERS 表示屏幕地图外边界，用于四角透视标定。
 # 四点按 左上、右上、右下、左下 填写，指向完整 16x12 地图外边界。
 MAP_CORNERS = (
-    (11, 5),
-    (315, 6),
-    (310, 214),
-    (16, 222),
+    (22, 15),
+    (308, 14),
+    (310, 218),
+    (25, 224),
 )
 
 # 拉正图上的有效采样区域边距。四角已对齐但整张网格略偏时，只调这里。
