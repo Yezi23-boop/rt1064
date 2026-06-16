@@ -10,7 +10,7 @@
 #define VOFA_CURVE_OUTPUT_ENABLE (0)
 /** VOFA+ 曲线刷新周期，单位 ms；需要边看曲线边遥控时先用低频，避免挤占摇杆 RX。 */
 #define VOFA_SEND_PERIOD_MS (100)
-/** 位姿调试输出开关；置 1 后 FireWater 只发送 pose_x/y/yaw 和车体本周期 vx/vy 位移。 */
+/** 位姿调试输出开关；置 1 后 FireWater 只发送 pose_x/y/yaw 和车体本周期 X/Y 位移增量。 */
 #define VOFA_POSE_ONLY_ENABLE (0)
 /** 摇杆接管底盘开关；先保持关闭，确认上位机发送格式后再置 1 接入主程序。 */
 #define VOFA_JOYSTICK_CONTROL_ENABLE (0)
@@ -25,25 +25,22 @@
 /** 一行摇杆命令的最大缓存长度。 */
 #define VOFA_RX_LINE_SIZE (64u)
 
-/** 主循环写入并读取的发送节拍记录，不在 ISR 中访问。 */
-static uint32 vofa_last_send_ms;
-/** 最近一次有效摇杆命令的时间，用于无线控制超时停车。 */
-static uint32 vofa_last_joystick_ms;
-/** 已收到过有效摇杆命令时置位，避免上电未连接 VOFA+ 时反复 stop。 */
-static uint8 vofa_joystick_active;
-/** 无线串口文本行缓存。 */
-static char vofa_rx_line[VOFA_RX_LINE_SIZE];
-static uint8 vofa_rx_line_len;
-/** 本轮主循环内解析到的最新摇杆坐标；只提交最后一帧，避免积压旧坐标造成手感滞后。 */
-static int16 vofa_pending_x;
-static int16 vofa_pending_y;
-static uint8 vofa_pending_valid;
+static uint32 vofa_last_send_ms;       // 主循环写入并读取的曲线发送节拍，单位 ms；不在 ISR 中访问。
+static uint32 vofa_last_joystick_ms;   // 最近一次有效摇杆命令时间，单位 ms；超过超时窗口后强制停车。
+static uint8 vofa_joystick_active;     // 已收到过有效摇杆命令时置 1，避免上电未连接 VOFA+ 时反复 stop。
+static char vofa_rx_line[VOFA_RX_LINE_SIZE]; // 无线串口行缓存，只保存一行摇杆文本，不缓存历史命令。
+static uint8 vofa_rx_line_len;         // 当前行长度，不含结尾 NUL；溢出时整行丢弃。
+static int16 vofa_pending_x;           // 本轮主循环内最新摇杆 X，范围最终钳制到 [-1000, 1000]。
+static int16 vofa_pending_y;           // 本轮主循环内最新摇杆 Y，范围最终钳制到 [-1000, 1000]。
+static uint8 vofa_pending_valid;       // 1 表示本轮已解析到新坐标，只提交最后一帧以降低遥控滞后。
 
+// 只解析 VOFA 文本协议中的 ASCII 数字；不依赖 ctype，避免不同 C 库 locale/宏实现带来的体积和可移植性问题。
 static uint8 vofa_is_digit(char ch)
 {
     return (('0' <= ch) && ('9' >= ch)) ? 1 : 0;
 }
 
+// MaterialJoystick 可能带控件名前缀或浮点文本，这里提取整数部分即可满足 [-1000, 1000] 摇杆量程。
 static uint8 vofa_parse_int_token(const char **cursor, int16 *value)
 {
     const char *p = *cursor;
@@ -133,6 +130,7 @@ static void vofa_apply_joystick(int16 x, int16 y)
     x = vofa_limit_joystick_value(x);
     y = vofa_limit_joystick_value(y);
 
+    // VOFA 坐标归一化后直接映射到底盘速度接口；限幅放在接入点，避免异常上位机数据穿透到底层控制。
     vx = (float)x / (float)VOFA_JOYSTICK_MAX_ABS;
     vy = (float)y / (float)VOFA_JOYSTICK_MAX_ABS;
     set_motion(limit_float(vx, -1.0f, 1.0f), limit_float(vy, -1.0f, 1.0f));
@@ -148,6 +146,7 @@ static void vofa_parse_line(const char *line)
     int16 x;
     int16 y;
 
+    // 支持 `MaterialJoystick:x,y` 和 `JOY:x,y` 两种形式；冒号前的控件名不参与数值解析。
     while ('\0' != *colon_cursor)
     {
         if (':' == *colon_cursor)
@@ -186,6 +185,7 @@ static void vofa_rx_push_byte(uint8 data)
     }
     else
     {
+        // 行缓存溢出通常意味着上位机格式错误或丢换行，整行丢弃比截断解析更安全。
         vofa_rx_line_len = 0;
     }
 }
@@ -196,6 +196,7 @@ static void vofa_receive_joystick(void)
     uint32 length;
     uint32 i;
 
+    // 一次服务尽量清空当前 FIFO，但每次按固定块读取，避免主循环在无线串口高流量下长期停留。
     do
     {
         length = wireless_uart_read_buffer(buffer, VOFA_RX_CHUNK_SIZE);
@@ -207,6 +208,7 @@ static void vofa_receive_joystick(void)
 
     if (0 != vofa_pending_valid)
     {
+        // 同一轮主循环只提交最新坐标，减少无线缓存积压造成的遥控滞后。
         vofa_apply_joystick(vofa_pending_x, vofa_pending_y);
         vofa_pending_valid = 0;
     }
@@ -217,6 +219,7 @@ static void vofa_check_joystick_timeout(uint32 now_ms)
     if ((0 != vofa_joystick_active) &&
         ((now_ms - vofa_last_joystick_ms) >= VOFA_JOYSTICK_TIMEOUT_MS))
     {
+        // 无线链路断开时旧摇杆值不能继续驱动车；超时后停车并丢弃半行输入。
         stop_motion();
         vofa_joystick_active = 0;
         vofa_rx_line_len = 0;
@@ -244,17 +247,17 @@ void vofa_init(void)
  * @brief 按配置处理 VOFA+ MaterialJoystick 控制，并周期输出底盘调试曲线。
  *
  * 摇杆控件未绑定命令时，VOFA+ 会发送类似 `MaterialJoystick:x,y` 的字符串；
- * 绑定命令时建议使用 `JOY:%d,%d\n` 或 `JOY:%f,%f\n`。这里按行提取前两个数字，
+ * 绑定命令时建议使用 `JOY:%d,%d\n`，量程为 [-1000, 1000]。这里按行提取前两个整数，
  * 映射关系为 X 轴右正、Y 轴上正，对应底盘 `vx` 右正、`vy` 前正。
  * 当前 `VOFA_JOYSTICK_CONTROL_ENABLE` 为 1 时接管底盘；遥控模式下默认关闭曲线输出，
- * 避免同一无线串口上 20ms printf 和摇杆命令互相挤占。
+ * 避免同一无线串口上周期 printf 和摇杆命令互相挤占。
  *
- * 每 20ms 输出一行文本 CSV，一行就是 VOFA+ FireWater 的一帧数据。
+ * 每 `VOFA_SEND_PERIOD_MS` 输出一行文本 CSV，一行就是 VOFA+ FireWater 的一帧数据。
  * `VOFA_POSE_ONLY_ENABLE=0` 时，字段前 12 个来自 `get_control_status()`，后 5 个来自 `drive_pose_get()`：
  *
- * 1. target_lf, target_rf, target_lb, target_rb：四轮目标编码器增量，单位 count/20ms。
- * 2. feedback_lf, feedback_rf, feedback_lb, feedback_rb：四轮实际编码器增量，单位 count/20ms。
- * 3. pwm_lf, pwm_rf, pwm_lb, pwm_rb：四轮 signed PWM 输出，正负号表示电机方向。
+ * 1. target_lf, target_rf, target_lb, target_rb：VOFA 曲线顺序下的四轮目标编码器增量，单位 count/20ms。
+ * 2. feedback_lf, feedback_rf, feedback_lb, feedback_rb：VOFA 曲线顺序下的四轮实际编码器增量，单位 count/20ms。
+ * 3. pwm_lf, pwm_rf, pwm_lb, pwm_rb：VOFA 曲线顺序下的四轮 signed PWM 输出，正负号表示电机方向。
  * 4. pose_x_cm, pose_y_cm, pose_yaw_deg：全局位姿。
  * 5. body_vx_cm, body_vy_cm：本周期车体坐标位移增量，单位 cm/20ms。
  *
@@ -293,7 +296,7 @@ void vofa_service(void)
            pose->body_vx_cm,
            pose->body_vy_cm);
 #else
-    /* FireWater 没有字段名，VOFA+ 端曲线名需要按下面顺序手动配置：
+    /* FireWater 没有字段名，VOFA+ 端曲线名需要按下面顺序手动配置；这里使用 LF/RF/LB/RB 的曲线显示顺序：
      * target_lf,target_rf,target_lb,target_rb,
      * feedback_lf,feedback_rf,feedback_lb,feedback_rb,
      * pwm_lf,pwm_rf,pwm_lb,pwm_rb,

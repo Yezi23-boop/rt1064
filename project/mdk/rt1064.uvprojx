@@ -445,14 +445,19 @@
               <FilePath>..\user\src\maps.c</FilePath>
             </File>
             <File>
-              <FileName>plan_output.c</FileName>
-              <FileType>1</FileType>
-              <FilePath>..\user\src\plan_output.c</FilePath>
-            </File>
-            <File>
               <FileName>solver.c</FileName>
               <FileType>1</FileType>
               <FilePath>..\user\src\solver.c</FilePath>
+            </File>
+            <File>
+              <FileName>map_utils.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>..\user\src\map_utils.c</FilePath>
+            </File>
+            <File>
+              <FileName>art_replan.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>..\user\src\art_replan.c</FilePath>
             </File>
             <File>
               <FileName>settings.c</FileName>
@@ -560,11 +565,6 @@
               <FilePath>..\user\inc\maps.h</FilePath>
             </File>
             <File>
-              <FileName>plan_output.h</FileName>
-              <FileType>5</FileType>
-              <FilePath>..\user\inc\plan_output.h</FilePath>
-            </File>
-            <File>
               <FileName>solver.h</FileName>
               <FileType>5</FileType>
               <FilePath>..\user\inc\solver.h</FilePath>
@@ -573,6 +573,16 @@
               <FileName>map_types.h</FileName>
               <FileType>5</FileType>
               <FilePath>..\user\inc\map_types.h</FilePath>
+            </File>
+            <File>
+              <FileName>map_utils.h</FileName>
+              <FileType>5</FileType>
+              <FilePath>..\user\inc\map_utils.h</FilePath>
+            </File>
+            <File>
+              <FileName>art_replan.h</FileName>
+              <FileType>5</FileType>
+              <FilePath>..\user\inc\art_replan.h</FilePath>
             </File>
             <File>
               <FileName>settings.h</FileName>

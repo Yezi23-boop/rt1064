@@ -1,6 +1,7 @@
 #include "zf_common_headfile.h"
 #include "screen.h"
-#include "maps.h"
+#include "drive_config.h"
+#include "map_utils.h"
 
 #define IPS200_TYPE             (IPS200_TYPE_SPI)
 #define LINE_H                  (16)    // IPS200 8x16 字体的行高，单位 pixel。
@@ -15,41 +16,41 @@
 #define MENU_ROW_Y(row)         ((uint16)(((row) + 1) * LINE_H))
 #define SCREEN_TEXT_COLOR       (RGB565_BLACK)
 #define SCREEN_BG_COLOR         (RGB565_WHITE)
+// 地图色块语义与推箱子元素一致：墙/障碍黑色、箱子黄色、目标紫色、虚拟车青色。
+// 执行页的蓝色车格表示 MCU 根据起点和里程计推算的位置，用于和 ART 识别车格对照。
 #define WALL_COLOR              (RGB565_BLACK)
 #define BOX_COLOR               (RGB565_YELLOW)
 #define TARGET_COLOR            (RGB565_PURPLE)
 #define CAR_COLOR               (RGB565_CYAN)
 #define POSE_CAR_COLOR          (RGB565_BLUE)
 #define EMPTY_COLOR             (RGB565_WHITE)
-#define GRID_COLOR              (RGB565_GRAY)
 #define FILL_BUFFER_PIXELS      (240 * LINE_H) // 单行文字清屏所需最大像素数，复用作小矩形填充缓存。
 
 typedef enum
 {
-    SCREEN_PAGE_NONE = 0,
-    SCREEN_PAGE_HOME,
-    SCREEN_PAGE_RUN,
-    SCREEN_PAGE_RUN_MAP,
-    SCREEN_PAGE_MODE_SELECT,
-    SCREEN_PAGE_PLAYBACK,
-    SCREEN_PAGE_DEBUG,
-    SCREEN_PAGE_RUN_EXECUTE,
-    SCREEN_PAGE_INFO,
-    SCREEN_PAGE_ART_MAP,
+    SCREEN_PAGE_NONE = 0,    /**< 尚未绘制任何页面，下一次 begin_page 必须清屏。 */
+    SCREEN_PAGE_HOME,        /**< Home 菜单页。 */
+    SCREEN_PAGE_RUN,         /**< Run 工作台页。 */
+    SCREEN_PAGE_MODE_SELECT, /**< Run 子页：模式选择。 */
+    SCREEN_PAGE_PLAYBACK,    /**< 求解结果回放页。 */
+    SCREEN_PAGE_DEBUG,       /**< 本地 pose 地图调试页。 */
+    SCREEN_PAGE_RUN_EXECUTE, /**< executor 执行页。 */
+    SCREEN_PAGE_INFO,        /**< 信息页。 */
+    SCREEN_PAGE_ART_MAP,     /**< OpenART 最近完整帧预览页。 */
 } screen_page_enum;
 
 typedef struct
 {
-    const map_source_struct *source;
-    const solve_result_struct *result;
-    uint16 step;
-    uint8 use_pose;
-    uint8 start_row;
-    uint8 start_col;
-    float pose_x_cm;
-    float pose_y_cm;
-    uint8 *pose_row;
-    uint8 *pose_col;
+    const map_source_struct *source;     /**< 待绘制的地图来源，可为 NULL。 */
+    const solve_result_struct *result;   /**< 可选求解结果；用于按 action step 回放动态箱子位置。 */
+    uint16 step;                         /**< 当前 action/waypoint 对应的动作步，下游会跳过 `|` 分隔符。 */
+    uint8 use_pose;                      /**< 非 0 时叠加 MCU 本地 pose 推算车格。 */
+    uint8 start_row;                     /**< pose 坐标原点对应的地图行，仅 `use_pose` 时使用。 */
+    uint8 start_col;                     /**< pose 坐标原点对应的地图列，仅 `use_pose` 时使用。 */
+    float pose_x_cm;                     /**< MCU 本地 X 位移，单位 cm，右移为正。 */
+    float pose_y_cm;                     /**< MCU 本地 Y 位移，单位 cm，前进为正。 */
+    uint8 *pose_row;                     /**< 输出：pose 换算后的行号，可为 NULL。 */
+    uint8 *pose_col;                     /**< 输出：pose 换算后的列号，可为 NULL。 */
 } screen_map_render_struct;
 
 static screen_page_enum active_page = SCREEN_PAGE_NONE; // 只在页面切换时整屏清空，减少白底页面刷新闪烁。
@@ -65,21 +66,6 @@ static void begin_page(screen_page_enum page)
         ips200_clear();
         active_page = page;
     }
-}
-
-static uint16 cell_index_local(uint8 row, uint8 col)
-{
-    return (uint16)(row * MAP_COLS + col);
-}
-
-static uint8 cell_row_local(uint16 cell)
-{
-    return (uint8)(cell / MAP_COLS);
-}
-
-static uint8 cell_col_local(uint16 cell)
-{
-    return (uint8)(cell % MAP_COLS);
 }
 
 static void fill_rect(uint16 x, uint16 y, uint16 w, uint16 h, uint16 color)
@@ -108,7 +94,7 @@ static void add_cell(uint16 *cells, uint8 *count, uint8 row, uint8 col)
 {
     if(*count < MAX_BOXES)
     {
-        cells[*count] = cell_index_local(row, col);
+        cells[*count] = map_cell_index(row, col);
         (*count)++;
     }
 }
@@ -122,11 +108,6 @@ static void show_text_value(uint16 x, uint16 y, const char *text, uint8 max_char
 {
     clear_text_area(x, y, max_chars);
     ips200_show_string(x, y, text);
-}
-
-static void show_uint_value(uint16 x, uint16 y, uint32 value, uint8 digits)
-{
-    ips200_show_uint(x, y, value, digits);
 }
 
 static void show_float_value(uint16 x, uint16 y, float value, uint8 int_digits, uint8 frac_digits)
@@ -197,6 +178,7 @@ static void remove_solved_boxes(uint16 *boxes, uint8 *box_count, uint16 *targets
         {
             if(boxes[box_i] == targets[target_i])
             {
+                // `|` 分隔符表示一个箱子任务完成；完成后的箱子/目标不再参与后续回放绘制。
                 remove_index(boxes, box_count, box_i);
                 remove_index(targets, target_count, target_i);
                 removed = 1;
@@ -229,11 +211,12 @@ static void parse_source(const map_source_struct *source, char grid[MAP_ROWS][MA
 
             if(('#' == value) || ('X' == value))
             {
+                // 屏幕和求解器都把 X 当作不可通行障碍显示，避免动态地图与实际约束不一致。
                 grid[row][col] = '#';
             }
             else if('C' == value)
             {
-                *car = cell_index_local(row, col);
+                *car = map_cell_index(row, col);
             }
             else if('B' == value)
             {
@@ -262,6 +245,7 @@ static void apply_actions(uint16 *car, uint16 *boxes, uint8 *box_count, uint16 *
         action = actions[i];
         if('|' == action)
         {
+            // 分隔符不是车辆动作，只触发“已完成目标消失”的回放效果。
             remove_solved_boxes(boxes, box_count, targets, target_count);
             continue;
         }
@@ -285,14 +269,14 @@ static void apply_actions(uint16 *car, uint16 *boxes, uint8 *box_count, uint16 *
             dc = 1;
         }
 
-        next_car = cell_index_local((uint8)((int16)cell_row_local(*car) + dr), (uint8)((int16)cell_col_local(*car) + dc));
+        next_car = map_cell_index((uint8)((int16)map_cell_row(*car) + dr), (uint8)((int16)map_cell_col(*car) + dc));
         if((action >= 'A') && (action <= 'Z'))
         {
             for(box_i = 0; box_i < *box_count; box_i++)
             {
                 if(boxes[box_i] == next_car)
                 {
-                    next_box = cell_index_local((uint8)((int16)cell_row_local(boxes[box_i]) + dr), (uint8)((int16)cell_col_local(boxes[box_i]) + dc));
+                    next_box = map_cell_index((uint8)((int16)map_cell_row(boxes[box_i]) + dr), (uint8)((int16)map_cell_col(boxes[box_i]) + dc));
                     boxes[box_i] = next_box;
                     break;
                 }
@@ -402,6 +386,7 @@ static uint16 action_step_for_execute_preview(const solve_result_struct *result,
         return action_step;
     }
 
+    // 执行页按 waypoint 显示，推箱 waypoint 需要预览到 action_end，才能让箱子位置与当前目标一致。
     if(wp->action_end > result->action_count)
     {
         return result->action_count;
@@ -483,11 +468,13 @@ static void draw_map_render(const screen_map_render_struct *render)
 
     if(0 != render->use_pose)
     {
+        // pose_x 向右为正、pose_y 向前为正；地图行号向下增加，所以 Y 位移要反向换算成行偏移。
+        // 越界时夹到屏幕边界，只影响显示诊断，不改变执行器或求解状态。
         pose_col_value = (int16)render->start_col + round_cm_to_grid_delta(render->pose_x_cm);
         pose_row_value = (int16)render->start_row - round_cm_to_grid_delta(render->pose_y_cm);
         *render->pose_row = clamp_grid_index(pose_row_value, MAP_ROWS);
         *render->pose_col = clamp_grid_index(pose_col_value, MAP_COLS);
-        pose_car = cell_index_local(*render->pose_row, *render->pose_col);
+        pose_car = map_cell_index(*render->pose_row, *render->pose_col);
     }
     else
     {
@@ -498,7 +485,7 @@ static void draw_map_render(const screen_map_render_struct *render)
     {
         for(col = 0; col < MAP_COLS; col++)
         {
-            cell = cell_index_local(row, col);
+            cell = map_cell_index(row, col);
             if(0 != render->use_pose)
             {
                 color = color_for_pose_cell(grid[row][col], cell, pose_car, boxes, box_count, targets, target_count);
@@ -516,6 +503,7 @@ static void draw_color_map(const map_source_struct *source, const solve_result_s
 {
     screen_map_render_struct render;
 
+    // 回放/ART Map 使用虚拟车位置；执行页才叠加 MCU 本地 pose 推算车格。
     render.source = source;
     render.result = result;
     render.step = step;
@@ -531,18 +519,14 @@ static void draw_color_map(const map_source_struct *source, const solve_result_s
 
 static uint16 find_start_car(const map_source_struct *source)
 {
-    uint8 row;
-    uint8 col;
+    uint8 row = 0;
+    uint8 col = 0;
+    uint8 count = 0;
 
-    for(row = 0; row < MAP_ROWS; row++)
+    (void)map_find_car(source, &row, &col, &count);
+    if(0 != count)
     {
-        for(col = 0; col < MAP_COLS; col++)
-        {
-            if('C' == source->rows[row][col])
-            {
-                return cell_index_local(row, col);
-            }
-        }
+        return map_cell_index(row, col);
     }
     return 0;
 }
@@ -553,8 +537,8 @@ static void draw_pose_map(const map_source_struct *source, float pose_x_cm, floa
 
     start_car = find_start_car(source);
     draw_pose_map_from_start(source, 0, 0, pose_x_cm, pose_y_cm,
-                             cell_row_local(start_car),
-                             cell_col_local(start_car),
+                             map_cell_row(start_car),
+                             map_cell_col(start_car),
                              pose_row,
                              pose_col);
 }
@@ -659,7 +643,7 @@ static void draw_home_status_values(const float encoder_count[WHEEL_COUNT], floa
     show_float_value(16, LINE_H * 13, pose_x_cm, 4, 1);
     show_float_value(120, LINE_H * 13, pose_y_cm, 4, 1);
 
-    show_uint_value(32, LINE_H * 14, openart_frame_count, 5);
+    ips200_show_uint(32, LINE_H * 14, openart_frame_count, 5);
 }
 
 void screen_draw_home(const screen_home_view_struct *view)
@@ -712,22 +696,6 @@ void screen_draw_nav_cursor(uint8 previous_cursor, uint8 cursor)
     ips200_show_string(MENU_CURSOR_X, MENU_ROW_Y(cursor), ">");
 }
 
-void screen_draw_map_select(uint8 current_map, uint8 candidate_map, save_state_enum save_state, const char *state)
-{
-    begin_page(SCREEN_PAGE_RUN_MAP);
-    ips200_show_string(0, 0, "Run/Map");
-    ips200_show_string(0, LINE_H, "Current: V");
-    ips200_show_uint(80, LINE_H, current_map + 1, 2);
-    ips200_show_string(0, LINE_H * 2, "Select : V");
-    ips200_show_uint(80, LINE_H * 2, candidate_map + 1, 2);
-    ips200_show_string(0, LINE_H * 3, "Save   : ");
-    show_text_value(80, LINE_H * 3, save_state_name(save_state), 12);
-    ips200_show_string(0, LINE_H * 4, "State  : ");
-    show_text_value(80, LINE_H * 4, state, 10);
-    draw_color_map(map_get(candidate_map), 0, 0);
-    show_hint("K1/K2 Map  K3 OK", "K4 Cancel  K4L Home");
-}
-
 void screen_draw_mode_page(run_mode_enum candidate_mode)
 {
     draw_mode_select(candidate_mode);
@@ -768,7 +736,7 @@ static void draw_executor_status(const screen_run_view_struct *view)
 
     display_task_progress(view->result, view->current_step, &current_task, &total_tasks);
 
-    /* 行0：状态 + 步数 */
+    // Run 页只在执行器活跃时显示压缩状态，给地图区域保留固定尺寸，避免页面跳动。
     ips200_show_string(0, y0, "S:");
     clear_text_area(16, y0, 10);
     ips200_show_string(16, y0, executor_state_text(view->executor_state));
@@ -777,7 +745,6 @@ static void draw_executor_status(const screen_run_view_struct *view)
     ips200_show_string(148, y0, "/");
     ips200_show_uint(156, y0, view->total_steps, 3);
 
-    /* 行1：箱子数 + 位置，ERROR 时追加错误码 */
     ips200_show_string(0, y1, "B:");
     ips200_show_uint(16, y1, current_task, 2);
     ips200_show_string(32, y1, "/");
@@ -865,6 +832,7 @@ void screen_draw_playback(uint8 map_index, const map_source_struct *source, cons
         state_name = "Fail";
     }
 
+    // `|` 是任务边界，不是用户可执行动作；可见步数隐藏它，方便人工逐步核对路径。
     visible_step = count_visible_actions_to_step(result, step);
     visible_total = count_visible_actions(result);
 
@@ -940,7 +908,7 @@ void screen_draw_execute(const screen_execute_view_struct *view)
     }
     display_task_progress(view->result, view->current_step, &current_task, &total_tasks);
 
-    /* 1. 绘制顶部信息栏 */
+    // 执行页固定显示同一张求解快照，避免 ART 实时帧刷新导致车辆还在跑时地图底图跳变。
     begin_page(SCREEN_PAGE_RUN_EXECUTE);
     ips200_show_string(0, 0, "Execute");
     ips200_show_string(0, LINE_H, "Map:");
@@ -953,7 +921,7 @@ void screen_draw_execute(const screen_execute_view_struct *view)
         return;
     }
 
-    /* 2. 按启动时保存的起点绘制实时位姿 */
+    // 本地 pose 必须从执行启动格换算，不能从当前 ART 车格换算；否则识别抖动会污染里程计诊断。
     draw_pose_map_from_start(view->source,
                              view->result,
                              view->current_step,
@@ -964,11 +932,10 @@ void screen_draw_execute(const screen_execute_view_struct *view)
                              &pose_row,
                              &pose_col);
 
-    /* 3. 绘制状态信息 */
     ips200_show_string(0, LINE_H * 2, "S:");
     show_text_value(16, LINE_H * 2,
-                    (0 != view->art_launch_pending) ? "READY" : executor_state_text(view->state),
-                    7);
+                    (0 != view->art_launch_pending) ? "Ready K3" : executor_state_text(view->state),
+                    8);
     ips200_show_string(80, LINE_H * 2, "St:");
     ips200_show_uint(104, LINE_H * 2, view->current_step, 3);
     ips200_show_string(128, LINE_H * 2, "/");
@@ -978,13 +945,12 @@ void screen_draw_execute(const screen_execute_view_struct *view)
         ips200_show_string(176, LINE_H * 2, executor_error_text(view->error));
     }
 
-    /* 4. 绘制箱子信息 */
     ips200_show_string(0, LINE_H * 3, "B:");
     ips200_show_uint(16, LINE_H * 3, current_task, 2);
     ips200_show_string(32, LINE_H * 3, "/");
     ips200_show_uint(40, LINE_H * 3, total_tasks, 2);
 
-    /* 5. 绘制 MCU 本地 pose 换算格子与当前 waypoint 目标 */
+    // M 是 MCU 本地推算格，W 是当前 waypoint；两者分开显示便于区分控制偏差和规划目标。
     ips200_show_string(64, LINE_H * 3, "M:");
     ips200_show_uint(80, LINE_H * 3, pose_row, 2);
     ips200_show_string(96, LINE_H * 3, ",");
@@ -1007,6 +973,7 @@ void screen_draw_execute(const screen_execute_view_struct *view)
 
     if(0 != view->art_player_enabled)
     {
+        // A/N 显示 OpenART 再识别到的 C 位置和数量；N!=1 时该坐标不可信，只用于诊断。
         ips200_show_string(0, LINE_H * 5, "A:");
         if(0 != view->art_player_valid)
         {
@@ -1022,7 +989,6 @@ void screen_draw_execute(const screen_execute_view_struct *view)
         ips200_show_uint(96, LINE_H * 5, view->art_player_count, 2);
     }
 
-    /* 6. 绘制按键提示 */
     if(0 != view->art_launch_pending)
     {
         show_hint("K3 Launch", "K4 Stop");
@@ -1060,6 +1026,7 @@ void screen_draw_art_map(uint32 frame_count, uint32 age_s, const map_source_stru
     {
         ips200_show_uint(56, LINE_H * 2, age_s, 5);
         ips200_show_string(96, LINE_H * 2, "s");
+        // ART Map 页显示最近完整帧快照；若串口正在接收下一帧，也不会把半帧画出来。
         draw_color_map(source, 0, 0);
     }
 

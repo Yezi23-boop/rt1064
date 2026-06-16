@@ -2,8 +2,8 @@
 #include "base_io.h"
 #include "wheel_pid.h"
 
-static wheel_pid_struct wheel_pid[WHEEL_COUNT];
-static float start_pwm_ramp_limit = (float)DRIVE_START_PWM_RAMP_INITIAL_LIMIT;
+static wheel_pid_struct wheel_pid[WHEEL_COUNT]; // 目标/反馈单位为 count/20ms，输出单位为 signed PWM。
+static float start_pwm_ramp_limit = (float)DRIVE_START_PWM_RAMP_INITIAL_LIMIT; // 当前起步 PWM 绝对值窗口，停车后收回到初值。
 
 static void reset_start_pwm_ramp(void)
 {
@@ -45,6 +45,7 @@ static void limit_start_pwm_ramp(float pwm[WHEEL_COUNT])
         }
     }
 
+    // 四轮等比压缩起步 PWM，保持麦轮合成方向比例不被单轮限幅破坏。
     if ((0.0f == max_abs) || (max_abs <= start_pwm_ramp_limit))
     {
         return;
@@ -76,6 +77,7 @@ static void update_start_pwm_ramp(const float pwm[WHEEL_COUNT])
 
     if (0 == has_output)
     {
+        // 停车后重新收紧起步窗口，下一次起步仍从低 PWM 开始。
         reset_start_pwm_ramp();
         return;
     }
@@ -99,6 +101,7 @@ static uint8 wheel_target_allows_deadband(float target_count)
     {
         target_count = -target_count;
     }
+    // 小目标通常来自段末姿态微调；此时放大到死区以上会造成车身抖动。
     return (target_count >= MOTOR_PWM_DEADBAND_TARGET_THRESHOLD_COUNT) ? 1u : 0u;
 }
 
@@ -190,6 +193,7 @@ void drive_output_update_and_output(control_status_struct *status)
     {
         if (0 != wheel_target_is_stop(status->wheel_target_count[i]))
         {
+            // 目标接近 0 时清 PID 累计量，防止下一次起步继承旧 signed PWM。
             wheel_pid_reset(&wheel_pid[i]);
             status->signed_pwm[i] = 0.0f;
         }

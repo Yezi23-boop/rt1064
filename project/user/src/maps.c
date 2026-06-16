@@ -2,7 +2,8 @@
 
 static const map_source_struct offline_maps[] =
 {
-    // 地图内容编译进固件常量表；Flash 菜单只保存选中的编号。
+    // 离线地图使用与 OpenART UART 相同的 16x12 字符协议，方便求解器复用同一解析入口。
+    // Flash 菜单只保存选中的编号，避免把整张地图写入用户设置扇区。
     {
         "Map1",
         {

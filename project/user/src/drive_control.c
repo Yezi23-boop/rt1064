@@ -7,9 +7,9 @@
 #include "drive_test.h"
 #include "motion_math.h"
 
-static control_status_struct control_status;
-static uint32 startup_yaw_wait_ms = 0;
-static uint8 startup_yaw_locked = 0;
+static control_status_struct control_status; // 20ms ISR 写入，主循环只读显示；跨字段不保证原子快照。
+static uint32 startup_yaw_wait_ms = 0;        // 上电 yaw 稳定等待时间，同时作为电机非零输出安全门。
+static uint8 startup_yaw_locked = 0;          // 延时结束后只锁定一次 yaw 零点，避免后续重置位姿。
 
 static uint8 motion_is_translating(void)
 {
@@ -20,6 +20,7 @@ static void limit_translation_attitude_output(void)
 {
     if(0 != motion_is_translating())
     {
+        // 平移时限制姿态修正占比，避免 yaw 环为抢角度把横移/前进目标完全压扁。
         control_status.vzt = limit_float(control_status.vzt,
                                          -YAW_TRANSLATION_MAX_VZ,
                                          YAW_TRANSLATION_MAX_VZ);
@@ -30,6 +31,7 @@ static uint8 update_startup_guard_20ms(void)
 {
     if (startup_yaw_wait_ms < IMU_YAW_STARTUP_STABLE_DELAY_MS)
     {
+        // IMU 上电前几秒 yaw 会漂移；此阶段持续锁当前 yaw，并确保底层 PWM 为 0。
         drive_output_clear_motion_outputs(&control_status);
         drive_output_stop(&control_status);
         drive_imu_lock_current_yaw(&control_status);
@@ -44,6 +46,7 @@ static uint8 update_startup_guard_20ms(void)
 
     if (0 == startup_yaw_locked)
     {
+        // 稳定窗口结束后，以此刻 yaw 作为位姿零点，后续执行器的局部坐标才有统一参考。
         startup_yaw_locked = 1;
         drive_imu_lock_current_yaw(&control_status);
         drive_pose_reset_origin(control_status.current_yaw);
@@ -75,6 +78,7 @@ uint8 control_init(void)
 
 void update_control_20ms(void)
 {
+    // 本函数与 executor_update_20ms() 共用 PIT_CH1 节拍：先读反馈/姿态，再决定本周期输出。
     read_encoder_counts(control_status.wheel_feedback_count);
     drive_imu_sync_status(&control_status);
 
@@ -87,6 +91,7 @@ void update_control_20ms(void)
 
     if (0 != drive_test_manual_pwm_active())
     {
+        // 单轮点动直接写 PWM；闭环继续接管会掩盖接线/死区测试结果。
         return;
     }
 

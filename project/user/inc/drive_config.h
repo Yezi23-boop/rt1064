@@ -30,10 +30,13 @@
 #define PWM_FREQ_HZ (17000)
 /** 电机最小有效 PWM 补偿开关；置 1 后非零小 PWM 会抬到死区以上。 */
 #define MOTOR_PWM_DEADBAND_ENABLE (1)
-/** 四轮最小有效 PWM，占空比量程同 MAX_PWM_DUTY/PWM_DUTY_MAX，轮序为 LF/LB/RF/RB。 */
+/** 左前轮最小有效 PWM，占空比量程同 MAX_PWM_DUTY/PWM_DUTY_MAX。 */
 #define MOTOR_PWM_DEADBAND_LF (500)
+/** 左后轮最小有效 PWM，占空比量程同 MAX_PWM_DUTY/PWM_DUTY_MAX。 */
 #define MOTOR_PWM_DEADBAND_LB (700)
+/** 右前轮最小有效 PWM，占空比量程同 MAX_PWM_DUTY/PWM_DUTY_MAX。 */
 #define MOTOR_PWM_DEADBAND_RF (500)
+/** 右后轮最小有效 PWM，占空比量程同 MAX_PWM_DUTY/PWM_DUTY_MAX。 */
 #define MOTOR_PWM_DEADBAND_RB (400)
 
 /** yaw 姿态 PD 比例系数；误差单位为 degree，输出为归一化姿态修正分量 vzt。 */
@@ -76,17 +79,17 @@
 /** 每个 20ms 控制周期放开的 signed PWM 窗口增量。 */
 #define DRIVE_START_PWM_RAMP_STEP (100)
 
-/** 路径跟踪PID比例系数；误差单位为cm，输出为归一化速度。 */
+/** 路径跟踪 PID 比例系数；误差单位为 cm，输出为归一化速度。 */
 #define PATH_KP (0.08f)
-/** 路径跟踪PID积分系数；用于消除稳态误差。 */
+/** 路径跟踪 PID 积分系数；当前默认 0，避免里程计漂移时累积横向误差。 */
 #define PATH_KI (0.0f)
-/** 路径跟踪PID微分系数；用于减少超调。 */
+/** 路径跟踪 PID 微分系数；当前默认 0，避免 20ms 位姿增量噪声放大。 */
 #define PATH_KD (0.0f)
-/** 路径跟踪PID最大输出速度，归一化到 MAX_WHEEL_TARGET_COUNT。 */
+/** 路径跟踪 PID 最大输出速度，归一化到 MAX_WHEEL_TARGET_COUNT。 */
 #define PATH_MAX_SPEED (1.0f)
-/** 路径跟踪PID积分限幅，防积分饱和。 */
+/** 路径跟踪 PID 积分限幅，单位 cm*s；只有 PATH_KI 非 0 时才影响输出。 */
 #define PATH_MAX_INTEGRAL (5.0f)
-/** 路径跟踪PID到点阈值，单位cm。 */
+/** 路径跟踪 PID 到点阈值，单位 cm。 */
 #define PATH_ARRIVAL_THRESHOLD_CM (1.0f)
 /** 执行器到点需要连续满足阈值的 20ms 周期数，用于过滤瞬时越界和惯性抖动。 */
 #define EXEC_ARRIVAL_STABLE_TICKS (3u)

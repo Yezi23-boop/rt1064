@@ -6,7 +6,8 @@
 /**
  * @brief 菜单运行模式。
  *
- * 模式只决定 Run 页面按 K3 后执行哪类动作，不改变地图来源。
+ * 模式只决定 Run 页面按 K3 后执行哪类动作，不改变地图来源或地图内容。
+ * 枚举值会写入 Flash 记录，新增值时需要同步更新记录版本和显示名。
  */
 typedef enum
 {
@@ -20,6 +21,7 @@ typedef enum
  * @brief 地图来源。
  *
  * 来源决定求解器使用离线地图还是 OpenART 实时地图。
+ * 该值只描述数据来源，不保证 OpenART 帧已经有效。
  */
 typedef enum
 {
@@ -31,7 +33,7 @@ typedef enum
 /**
  * @brief Flash 中保存项的当前状态。
  *
- * 状态用于屏幕提示，不作为底盘控制的安全条件。
+ * 状态用于屏幕提示，不作为底盘控制的安全条件。写入失败时仍保留 RAM 中的当前设置。
  */
 typedef enum
 {
@@ -46,15 +48,17 @@ typedef enum
 /**
  * @brief 初始化掉电设置模块。
  *
- * 函数会读取 Flash 中保存的地图编号和运行模式；无有效数据时使用默认值。
+ * 函数会读取 Flash 中保存的地图编号、运行模式和地图来源；无有效数据时使用默认值。
  *
- * @note 只在启动阶段调用一次；不会主动写 Flash。
+ * @note 只在启动阶段调用一次；依赖底层 Flash 驱动初始化，不会主动写 Flash。
  */
 void settings_init(void);
 
 /**
  * @brief 获取当前运行地图编号。
  * @return 当前地图编号，范围会被限制在内置地图数量内。
+ *
+ * @note 地图来源为 OpenART 时，该编号仍作为离线地图选择保留，不代表实时地图内容。
  */
 uint8 settings_get_map(void);
 
@@ -77,15 +81,17 @@ save_state_enum settings_get_save_state(void);
  * @param[in] run_mode 当前运行模式。
  *
  * @note 该函数只修改 RAM 中的运行设置并标记 Dirty，不立即写 Flash。
+ * Flash 写入由用户显式保存触发，避免菜单浏览时频繁擦写同一扇区。
  */
 void settings_set_runtime(uint8 current_map, run_mode_enum run_mode);
 
 /**
- * @brief 将当前地图编号和运行模式写入 Flash。
+ * @brief 将当前地图编号、运行模式和地图来源写入 Flash。
  *
- * @return 1 表示写入成功；0 表示写入失败。
+ * @return 1 表示写入成功并通过回读校验；0 表示写入失败或校验失败。
  *
  * @note Flash 写入有擦写代价，因此只由 Home 页 K4 短按触发，不在每次切换地图时写入。
+ * 不应在 ISR 或控制闭环中调用。
  */
 uint8 settings_save(void);
 
@@ -107,28 +113,28 @@ void settings_set_source(map_source_enum source);
 /**
  * @brief 获取运行模式显示名。
  * @param[in] mode 运行模式。
- * @return 常量字符串地址。
+ * @return 常量字符串地址；越界值返回默认模式名。
  */
 const char *mode_name(run_mode_enum mode);
 
 /**
  * @brief 获取地图来源显示名。
  * @param[in] source 地图来源。
- * @return 常量字符串地址。
+ * @return 常量字符串地址；越界值返回默认来源名。
  */
 const char *source_name(map_source_enum source);
 
 /**
  * @brief 获取保存状态显示名。
  * @param[in] state 保存状态。
- * @return 常量字符串地址。
+ * @return 常量字符串地址；越界值返回 `"Empty"`。
  */
 const char *save_state_name(save_state_enum state);
 
 /**
  * @brief 获取 Flash 状态显示名。
  * @param[in] state 保存状态。
- * @return 常量字符串地址。
+ * @return 常量字符串地址；越界值返回 `"Empty"`。
  */
 const char *flash_state_name(save_state_enum state);
 

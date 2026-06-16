@@ -4,30 +4,31 @@
 #include "motion_math.h"
 #include <math.h>
 
-/* 执行器内部状态 */
-static executor_state_enum exec_state = EXEC_STATE_IDLE;
-static executor_error_enum exec_error = EXEC_ERROR_NONE;
+/* 执行器状态由主循环启动/停止、PIT_CH1 20ms 推进共同访问；
+ * 这里不做阻塞等待，ART 同步等待交给主循环处理。 */
+static executor_state_enum exec_state = EXEC_STATE_IDLE; // 主循环查询、PIT_CH1 更新；非 IDLE 时底盘可能被执行器占用。
+static executor_error_enum exec_error = EXEC_ERROR_NONE; // 最近一次执行错误，供 Execute 页显示和 ART 失败路径区分。
 
-/* 路径数据 */
-static const waypoint_struct *exec_waypoints = NULL;
-static uint16 exec_waypoint_count = 0;
-static uint16 current_step = 0;
-static uint8 start_row = 0;
-static uint8 start_col = 0;
+/* waypoints 指向求解器输出缓冲区，executor_start() 后调用方必须保证其生命周期覆盖执行过程。 */
+static const waypoint_struct *exec_waypoints = NULL; // 指向 last_result.waypoints，不拥有内存；重算/清空结果前必须先停止 executor。
+static uint16 exec_waypoint_count = 0;               // 当前路径点总数，决定 DONE 判定边界。
+static uint16 current_step = 0;                      // 当前正在逼近的 waypoint 下标，由 20ms 周期推进。
+static uint8 start_row = 0;                          // 执行开始时 C 的行号，作为本地 pose 到地图坐标的原点。
+static uint8 start_col = 0;                          // 执行开始时 C 的列号，作为本地 pose 到地图坐标的原点。
 
-/* 路径跟踪PID实例 */
-static path_pid_struct x_pid;
-static path_pid_struct y_pid;
+/* X/Y 两个位置式 PID 的误差单位为 cm，输出为世界坐标归一化速度分量。 */
+static path_pid_struct x_pid; // 世界 X 方向位置环；到点或切段时重置，避免上一段积分残留。
+static path_pid_struct y_pid; // 世界 Y 方向位置环；与 X 独立限幅后再旋转到车体系。
 
-/* 单步模式 */
-static uint8 single_step_mode = 0;
-static uint8 arrival_stable_ticks = 0;
-static uint8 segment_settling = 0;
-static uint16 segment_settle_elapsed_ms = 0;
-static uint8 art_sync_enabled = 0;
-static uint8 segment_waiting_art = 0;
+/* 段内状态均以 20ms 为时间基准；到点稳定计数用于滤掉里程计瞬时越界。 */
+static uint8 single_step_mode = 0;        // 1 表示每个 waypoint 后暂停等待 K3，便于低速调试路径。
+static uint8 arrival_stable_ticks = 0;    // 连续到点计数，过滤横移惯性和里程计抖动导致的瞬时命中。
+static uint8 segment_settling = 0;        // 1 表示已到 waypoint，正在段间停稳窗口内保持停止。
+static uint16 segment_settle_elapsed_ms = 0; // 段间停稳累计时间，单位 ms，由 20ms 周期累加。
+static uint8 art_sync_enabled = 0;        // ART 来源执行时置 1，段末到点后交给主循环重识别/重解算。
+static uint8 segment_waiting_art = 0;     // 1 表示已停车并等待 ART 重解算，PIT 内只保持停止不做求解。
 
-/* 将网格坐标转换为物理坐标（以起点为原点） */
+/* 地图 row 向下增大，而本地物理 Y 约定前进为正，因此 row 差值需要取反。 */
 static void grid_to_physical(uint8 row, uint8 col, float *x_cm, float *y_cm)
 {
     *x_cm = (float)(col - start_col) * GRID_SIZE_CM;
@@ -36,7 +37,6 @@ static void grid_to_physical(uint8 row, uint8 col, float *x_cm, float *y_cm)
 
 void executor_init(void)
 {
-    /* 初始化路径跟踪PID */
     path_pid_init(&x_pid, PATH_KP, PATH_KI, PATH_KD, PATH_MAX_SPEED, PATH_MAX_INTEGRAL);
     path_pid_init(&y_pid, PATH_KP, PATH_KI, PATH_KD, PATH_MAX_SPEED, PATH_MAX_INTEGRAL);
 }
@@ -66,7 +66,7 @@ static float abs_float(float value)
     return (value < 0.0f) ? -value : value;
 }
 
-/* 检查是否到达当前 action 对应的目标轴 */
+/* 到点判定同时约束主轴和副轴，避免只穿过目标线但横向偏差仍很大时提前切段。 */
 static uint8 is_axis_arrived(float target_x, float target_y, char action)
 {
     const drive_pose_struct *pose = drive_pose_get();
@@ -87,7 +87,7 @@ static uint8 is_axis_arrived(float target_x, float target_y, char action)
     return (distance < PATH_ARRIVAL_THRESHOLD_CM);
 }
 
-/* 世界坐标转车体坐标 */
+/* 路径 PID 先在局部世界坐标算速度，再旋转到车体系 vx/vy；底盘混控只接受车体系分量。 */
 static void world_velocity_to_body(float vx_world, float vy_world, float yaw_deg, float *vx_body, float *vy_body)
 {
     float yaw_rad = yaw_deg * 3.1415926f / 180.0f;
@@ -109,7 +109,7 @@ static float path_pid_update_with_arrival_deadband(path_pid_struct *pid, float e
     return path_pid_update(pid, error, CONTROL_DT_S);
 }
 
-/* 向目标位置移动（使用PID） */
+/* 每个 20ms 周期只给一组速度分量；真实 PWM 仍由后续底盘控制链路限幅和闭环。 */
 static void move_to_target(float target_x, float target_y, char action)
 {
     const drive_pose_struct *pose = drive_pose_get();
@@ -118,14 +118,11 @@ static void move_to_target(float target_x, float target_y, char action)
     float vx_world, vy_world;
     float vx_body, vy_body;
 
-    /* 使用PID计算世界坐标速度 */
     vx_world = path_pid_update_with_arrival_deadband(&x_pid, dx);
     vy_world = path_pid_update_with_arrival_deadband(&y_pid, dy);
 
-    /* 世界坐标转车体坐标 */
     world_velocity_to_body(vx_world, vy_world, pose->yaw_deg, &vx_body, &vy_body);
 
-    /* 设置运动 */
     set_motion(vx_body, vy_body);
 }
 
@@ -135,7 +132,6 @@ void executor_start(const waypoint_struct *waypoints, uint16 count,
 {
     const drive_pose_struct *pose;
 
-    /* 参数检查 */
     if (waypoints == NULL || count == 0)
     {
         exec_state = EXEC_STATE_ERROR;
@@ -143,7 +139,6 @@ void executor_start(const waypoint_struct *waypoints, uint16 count,
         return;
     }
 
-    /* 保存路径数据 */
     exec_waypoints = waypoints;
     exec_waypoint_count = count;
     start_row = start_row_param;
@@ -151,7 +146,6 @@ void executor_start(const waypoint_struct *waypoints, uint16 count,
     single_step_mode = single_step;
     art_sync_enabled = art_sync;
 
-    /* 重置状态 */
     current_step = 0;
     exec_error = EXEC_ERROR_NONE;
     executor_reset_segment_state();
@@ -160,7 +154,6 @@ void executor_start(const waypoint_struct *waypoints, uint16 count,
     pose = drive_pose_get();
     drive_pose_reset(0.0f, 0.0f, pose->yaw_deg);
 
-    /* 设置初始状态 */
     if (single_step_mode)
     {
         exec_state = EXEC_STATE_PAUSED;
@@ -241,6 +234,7 @@ static void executor_advance_after_segment(void)
 
 static void executor_enter_art_wait(void)
 {
+    /* ART 识别和重解算可能耗时，不能放在 PIT ISR；这里只停车并暴露 pending 状态给主循环。 */
     segment_settling = 0;
     segment_settle_elapsed_ms = 0;
     segment_waiting_art = 1;
@@ -274,13 +268,11 @@ static void executor_update_segment_settle_20ms(void)
 
 void executor_update_20ms(void)
 {
-    /* 只在运行状态执行 */
     if (exec_state != EXEC_STATE_RUNNING)
     {
         return;
     }
 
-    /* 检查是否完成所有步骤 */
     if (current_step >= exec_waypoint_count)
     {
         stop_motion();
@@ -288,7 +280,6 @@ void executor_update_20ms(void)
         return;
     }
 
-    /* 获取当前目标 */
     const waypoint_struct *wp = &exec_waypoints[current_step];
     float target_x, target_y;
     grid_to_physical(wp->row, wp->col, &target_x, &target_y);
@@ -301,6 +292,7 @@ void executor_update_20ms(void)
 
     if (0 != segment_waiting_art)
     {
+        /* 等 ART 期间每个 20ms 都保持段间停止，避免低频重定位时车继续滑动。 */
         reset_motion_segment();
         return;
     }
@@ -321,7 +313,6 @@ void executor_update_20ms(void)
     else
     {
         arrival_stable_ticks = 0;
-        /* 向目标移动 */
         move_to_target(target_x, target_y, wp->action);
     }
 }
@@ -363,30 +354,4 @@ uint16 executor_get_current_step(void)
 uint16 executor_get_total_steps(void)
 {
     return exec_waypoint_count;
-}
-
-void executor_debug_output(void)
-{
-    const drive_pose_struct *pose = drive_pose_get();
-    const waypoint_struct *wp;
-    float target_x, target_y;
-
-    if (exec_state != EXEC_STATE_RUNNING)
-    {
-        return;
-    }
-
-    if (current_step >= exec_waypoint_count)
-    {
-        return;
-    }
-
-    wp = &exec_waypoints[current_step];
-    grid_to_physical(wp->row, wp->col, &target_x, &target_y);
-
-    printf("EXEC: target=(%.2f,%.2f) current=(%.2f,%.2f) error=(%.2f,%.2f)\r\n",
-           target_x, target_y, pose->x_cm, pose->y_cm,
-           target_x - pose->x_cm, target_y - pose->y_cm);
-    printf("PID: x_integral=%.3f y_integral=%.3f\r\n",
-           path_pid_get_integral(&x_pid), path_pid_get_integral(&y_pid));
 }

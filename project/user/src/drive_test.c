@@ -7,17 +7,18 @@
 #include "motion_math.h"
 #include "timebase.h"
 
-static uint8 translate_test_started;
-static uint8 translate_test_stopped;
-static uint8 square_test_started;
-static uint8 square_test_stopped;
-static uint8 square_test_step;
-static uint32 square_test_step_start_ms;
-static float square_test_origin_x_cm;
-static float square_test_origin_y_cm;
-static uint8 wheel_jog_started;
-static uint8 wheel_jog_stopped;
-static uint8 manual_pwm_active;
+// 这些开关式测试状态只在主循环轮询中写；manual_pwm_active 会被 20ms 控制链路读取。
+static uint8 translate_test_started;      // 平移测试是否已发出启动命令，避免主循环重复下发 set_motion_command。
+static uint8 translate_test_stopped;      // 平移测试是否已到时停车，避免反复调用 stop_motion。
+static uint8 square_test_started;         // 小方形测试是否已经锁定起点并进入第一段。
+static uint8 square_test_stopped;         // 小方形测试是否已完成四段或超时停车。
+static uint8 square_test_step;            // 当前小方形边序号，0..3 分别对应右、后、左、前。
+static uint32 square_test_step_start_ms;  // 当前边开始时间，单位 ms；固定时长和超时保护共用。
+static float square_test_origin_x_cm;     // 当前边起点 X，单位 cm；位姿切段模式用来判断边长。
+static float square_test_origin_y_cm;     // 当前边起点 Y，单位 cm；位姿切段模式用来判断边长。
+static uint8 wheel_jog_started;           // 单轮点动是否已输出一次人工 PWM。
+static uint8 wheel_jog_stopped;           // 单轮点动是否已到时退出，防止旧人工 PWM 留在底层。
+static uint8 manual_pwm_active;           // 1 表示点动测试占用电机输出，20ms 闭环本周期应让出。
 
 void drive_test_init(void)
 {
@@ -228,6 +229,7 @@ static void drive_wheel_jog_poll(void)
 
     if((0 == wheel_jog_started) && (now_ms >= DRIVE_WHEEL_JOG_START_MS))
     {
+        // 点动模式绕过速度环，便于确认电机线序、方向和真实死区。
         test_wheel(DRIVE_WHEEL_JOG_WHEEL, DRIVE_WHEEL_JOG_PWM);
         wheel_jog_started = 1;
     }

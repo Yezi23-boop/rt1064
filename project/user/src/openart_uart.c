@@ -14,6 +14,7 @@
 
 #include "zf_common_headfile.h"
 #include "openart_uart.h"
+#include "map_utils.h"
 #include "timebase.h"
 
 #define OPENART_UART_INDEX          (UART_1)
@@ -23,72 +24,34 @@
 
 typedef enum
 {
-    PARSE_WAIT_BEGIN = 0,
-    PARSE_READ_MAP,
+    PARSE_WAIT_BEGIN = 0, /**< 等待 MAP_BEGIN；其它文本行都会被忽略。 */
+    PARSE_READ_MAP,       /**< 已进入 12 行地图读取阶段，任何非法行都会放弃本帧。 */
 } openart_parse_state_enum;
 
-static volatile uint8 hw_rx_buffer[OPENART_HW_RX_BUFFER_SIZE];
-static volatile uint16 hw_rx_write_index;
-static volatile uint16 hw_rx_read_index;
-static volatile uint32 hw_rx_overflow_count;
+static volatile uint8 hw_rx_buffer[OPENART_HW_RX_BUFFER_SIZE];   // UART1 ISR 写入、主循环读取；只缓存原始字节，不存整帧历史。
+static volatile uint16 hw_rx_write_index;                        // ISR 推进的写下标；主循环不写，避免无锁双写。
+static volatile uint16 hw_rx_read_index;                         // 主循环推进的读下标；丢弃旧帧时在临界区追平写下标。
+static volatile uint32 hw_rx_overflow_count;                     // 环形缓冲满时累加，保留给串口吞吐诊断。
 
-static openart_parse_state_enum parse_state;
-static char line_buffer[OPENART_LINE_SIZE];
-static uint8 line_length;
-static uint8 recv_row;
-static uint32 last_rx_ms;
+static openart_parse_state_enum parse_state;                     // 主循环协议解析状态，ISR 不访问。
+static char line_buffer[OPENART_LINE_SIZE];                      // 单行文本缓存，容量覆盖 16 字符地图行和 MAP_* 标记。
+static uint8 line_length;                                        // 当前行已接收字符数，不含结尾 NUL。
+static uint8 recv_row;                                           // 当前帧已经接收的地图行数，必须到 MAP_ROWS 才接受 MAP_END。
+static uint32 last_rx_ms;                                        // 最近一次解析到完整文本行的时间戳，单位 ms，用于半帧超时。
 
-static char staging_map[MAP_ROWS][MAP_COLS + 1];
-static char map_snapshot[MAP_ROWS][MAP_COLS + 1];
-static map_source_struct openart_map_source;
-static uint8 map_valid;
-static uint32 frame_count;
-static uint32 error_count;
-static uint8 player_row;
-static uint8 player_col;
-static uint8 player_count;
-static uint16 box_cells[MAX_BOXES];
-static uint8 box_count;
-
-static uint16 map_cell_index(uint8 row, uint8 col)
-{
-    return (uint16)(row * MAP_COLS + col);
-}
+static char staging_map[MAP_ROWS][MAP_COLS + 1];                 // 当前正在接收的半帧地图，只有 MAP_END 合法后才发布。
+static char map_snapshot[MAP_ROWS][MAP_COLS + 1];                // 最近一次完整帧快照，供屏幕/菜单读取稳定数据。
+static map_source_struct openart_map_source;                     // 指向 `map_snapshot` 行缓存的地图描述符，生命周期覆盖整个运行期。
+static uint8 map_valid;                                          // 1 表示至少接收过一帧完整合法地图。
+static uint32 frame_count;                                       // 完整合法地图帧计数，用于等待新帧和诊断延迟。
+static uint32 error_count;                                       // 协议错误/半帧超时次数，当前主要供后续调试扩展。
+static uint8 player_row;                                         // 最近完整帧中第一个 `C` 的行号。
+static uint8 player_col;                                         // 最近完整帧中第一个 `C` 的列号。
+static uint8 player_count;                                       // 最近完整帧中 `C` 的数量，非 1 时位置只作诊断。
 
 static void update_map_object_cache(void)
 {
-    uint8 r;
-    uint8 c;
-    uint8 found_count = 0;
-    uint8 first_row = 0;
-    uint8 first_col = 0;
-    uint8 found_boxes = 0;
-
-    for(r = 0; r < MAP_ROWS; r++)
-    {
-        for(c = 0; c < MAP_COLS; c++)
-        {
-            if('C' == map_snapshot[r][c])
-            {
-                if(0 == found_count)
-                {
-                    first_row = r;
-                    first_col = c;
-                }
-                found_count++;
-            }
-            else if(('B' == map_snapshot[r][c]) && (found_boxes < MAX_BOXES))
-            {
-                box_cells[found_boxes] = map_cell_index(r, c);
-                found_boxes++;
-            }
-        }
-    }
-
-    player_row = first_row;
-    player_col = first_col;
-    player_count = found_count;
-    box_count = found_boxes;
+    (void)map_find_car(&openart_map_source, &player_row, &player_col, &player_count);
 }
 
 static uint16 next_hw_rx_index(uint16 index)
@@ -103,6 +66,7 @@ static uint16 next_hw_rx_index(uint16 index)
 
 static uint8 hw_rx_pop(uint8 *data)
 {
+    // UART ISR 只推进 write_index，主循环只推进 read_index；读空表示当前没有待解析字节。
     if(hw_rx_read_index == hw_rx_write_index)
     {
         return 0;
@@ -150,6 +114,7 @@ static uint8 is_valid_map_line(const char *line)
 
 static void reset_frame_parser(void)
 {
+    // 只重置半帧解析器，不清除最近一次成功地图；屏幕和重解算仍可使用旧完整快照。
     parse_state = PARSE_WAIT_BEGIN;
     line_length = 0;
     recv_row = 0;
@@ -159,6 +124,8 @@ static void accept_map(void)
 {
     uint8 row;
 
+    // staging_map 只保存正在接收的帧；完整帧通过 MAP_END 校验后再一次性发布快照。
+    // 这样屏幕和求解器不会读到半帧地图。
     for(row = 0; row < MAP_ROWS; row++)
     {
         memcpy(map_snapshot[row], staging_map[row], MAP_COLS + 1);
@@ -179,6 +146,7 @@ static void parse_line(void)
 
     if(str_equal(line_buffer, "MAP_BEGIN"))
     {
+        // 新 MAP_BEGIN 直接开始新帧；若上一帧残缺，后续 MAP_END 行数校验会让它失效。
         parse_state = PARSE_READ_MAP;
         recv_row = 0;
         return;
@@ -256,7 +224,6 @@ void openart_uart_init(void)
     player_row = 0;
     player_col = 0;
     player_count = 0;
-    box_count = 0;
     reset_frame_parser();
 
     for(row = 0; row < MAP_ROWS; row++)
@@ -277,6 +244,7 @@ void openart_uart_poll(void)
        (0 != last_rx_ms) &&
        ((now_ms - last_rx_ms) >= OPENART_RX_TIMEOUT_MS))
     {
+        // OpenART 串口可能在一帧中途断开；超时后丢弃半帧，避免下一帧尾部拼到旧数据上。
         error_count++;
         reset_frame_parser();
     }
@@ -315,6 +283,7 @@ void openart_uart_discard_pending(void)
 {
     uint32 primask;
 
+    // read/write 指针由主循环和 UART ISR 分别访问，调整读指针时短暂关中断保证一致性。
     primask = interrupt_global_disable();
     hw_rx_read_index = hw_rx_write_index;
     interrupt_global_enable(primask);
@@ -322,11 +291,6 @@ void openart_uart_discard_pending(void)
 }
 
 uint8 openart_find_player_cell(uint8 *row, uint8 *col, uint8 *count)
-{
-    return openart_get_player_cell(row, col, count, 0);
-}
-
-uint8 openart_get_player_cell(uint8 *row, uint8 *col, uint8 *count, uint32 *frame)
 {
     if(0 != row)
     {
@@ -340,35 +304,8 @@ uint8 openart_get_player_cell(uint8 *row, uint8 *col, uint8 *count, uint32 *fram
     {
         *count = player_count;
     }
-    if(0 != frame)
-    {
-        *frame = frame_count;
-    }
 
     return ((0 != map_valid) && (1u == player_count)) ? 1u : 0u;
-}
-
-uint8 openart_get_box_cells(uint16 boxes[MAX_BOXES], uint8 *count, uint32 *frame)
-{
-    uint8 i;
-
-    if(0 != boxes)
-    {
-        for(i = 0; i < box_count; i++)
-        {
-            boxes[i] = box_cells[i];
-        }
-    }
-    if(0 != count)
-    {
-        *count = box_count;
-    }
-    if(0 != frame)
-    {
-        *frame = frame_count;
-    }
-
-    return (0 != map_valid) ? 1u : 0u;
 }
 
 void openart_uart_push_byte(uint8 data)
@@ -377,6 +314,7 @@ void openart_uart_push_byte(uint8 data)
 
     if(next_index == hw_rx_read_index)
     {
+        // ISR 中不能阻塞等待主循环解析；溢出时丢当前字节，下一次 MAP_BEGIN 会恢复同步。
         hw_rx_overflow_count++;
         return;
     }

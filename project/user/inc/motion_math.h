@@ -13,15 +13,15 @@ typedef struct
     float last_error;                    /**< 上一次最短角度误差，单位为 degree。 */
 } attitude_pd_struct;
 
-/** 路径跟踪位置式PID状态，输入输出节拍固定为20ms。 */
+/** 路径跟踪位置式 PID 状态，输入误差单位为 cm，输出为归一化速度分量。 */
 typedef struct
 {
     float kp;                            /**< 比例系数。 */
     float ki;                            /**< 积分系数。 */
     float kd;                            /**< 微分系数。 */
-    float integral;                      /**< 积分累积。 */
-    float last_error;                    /**< 上一次误差。 */
-    float last_output;                   /**< 上一次输出（用于限幅）。 */
+    float integral;                      /**< 积分累积，单位 cm*s。 */
+    float last_error;                    /**< 上一次位置误差，单位 cm。 */
+    float last_output;                   /**< 最近一次限幅后的输出，当前保留给调试和后续斜率限制扩展。 */
     float max_output;                    /**< 最大输出限幅。 */
     float max_integral;                  /**< 积分限幅（防积分饱和）。 */
 } path_pid_struct;
@@ -85,13 +85,6 @@ void path_pid_reset(path_pid_struct *pid);
  * @return 限幅后的速度输出，范围[-max_output, max_output]。
  */
 float path_pid_update(path_pid_struct *pid, float error, float dt_s);
-
-/**
- * @brief 获取当前积分值（用于调试）。
- * @param[in] pid PID状态。
- * @return 当前积分值。
- */
-float path_pid_get_integral(const path_pid_struct *pid);
 
 /**
  * @brief 将浮点值约束在给定闭区间内。

@@ -3,40 +3,44 @@
 
 #include "zf_common_typedef.h"
 
-/** 地图行数，单位为格；当前比赛地图固定为 12 行。 */
+/** @brief 地图行数，单位为格；当前比赛地图固定为 12 行。 */
 #define MAP_ROWS                (12)
-/** 地图列数，单位为格；当前比赛地图固定为 16 列。 */
+/** @brief 地图列数，单位为格；当前比赛地图固定为 16 列。 */
 #define MAP_COLS                (16)
-/** 地图总格数，用于把 row/col 压成一维 cell 编号。 */
+/** @brief 地图总格数，用于把 row/col 压成一维 cell 编号。 */
 #define MAP_CELLS               (MAP_ROWS * MAP_COLS)
-/** 单箱 BFS 状态数，状态由 player cell 和 box cell 组合而成。 */
+/** @brief 单箱 BFS 状态数，状态由 player cell 和 box cell 组合而成。 */
 #define SEARCH_STATE_COUNT             (MAP_CELLS * MAP_CELLS)
-/** 无效状态哨兵值；`uint16` 最大值不会和 12x16 地图 cell 冲突。 */
+/** @brief 无效状态哨兵值；`uint16` 最大值不会和 12x16 地图 cell 冲突。 */
 #define INVALID_STATE              (0xFFFF)
-/** 当前静态数组支持的最大箱子数量。 */
+/** @brief 当前静态数组支持的最大箱子数量。 */
 #define MAX_BOXES               (8)
-/** 单次单箱 BFS 动作上限，单位为 action 字符。 */
+/** @brief 单次单箱 BFS 动作上限，单位为 action 字符。 */
 #define MAX_SINGLE_PATH         (512)
-/** 多箱任务合并后的动作上限，单位为 action 字符。 */
+/** @brief 多箱任务合并后的动作上限，单位为 action 字符。 */
 #define MAX_TOTAL_ACTIONS       (1024)
-/** 屏幕/执行层路径点上限，单位为格点。 */
+/** @brief 屏幕/执行层路径点上限，单位为格点。 */
 #define MAX_WAYPOINTS           (256)
 /**
  * @brief 一张离线地图的只读来源。
  *
- * 地图统一使用 RT 字符：# 墙，. 空地，B 箱子，T 目标点，C 小车，X 炸弹/障碍。
+ * 地图统一使用 RT 字符：`#` 墙，`.` 空地，`B` 箱子，`T` 目标点，`C` 小车，`X` 炸弹/障碍。
  * 地图内容在固件中以常量表保存，Flash 菜单只保存地图编号和模式，不保存整张地图数据。
+ *
+ * @note `rows` 指向的每行必须在调用期间保持有效；离线地图使用静态常量，
+ * OpenART 或缓存快照需要由调用方提供稳定的行缓存。
  */
 typedef struct
 {
     const char *name;                   /**< 地图显示名，用于串口或调试输出。 */
-    const char *rows[MAP_ROWS];         /**< 12 行地图文本，每行至少包含 `MAP_COLS` 个字符。 */
+    const char *rows[MAP_ROWS];         /**< 12 行地图文本，每行必须恰好 `MAP_COLS` 个字符并以 NUL 结尾。 */
 } map_source_struct;
 
 /**
  * @brief 求解器内部使用的地图状态。
  *
  * 该结构是从只读地图解析出的可变状态，BFS 和多箱拆解过程会更新其中的箱子位置。
+ * `grid` 只保存静态障碍，动态箱子位置单独放在 `boxes` 中，避免推箱后反复改写字符地图。
  */
 typedef struct
 {
@@ -50,6 +54,9 @@ typedef struct
 
 /**
  * @brief 屏幕回放或后续执行层使用的格点动作。
+ *
+ * 连续同方向、同类型的动作会被合并成一个 waypoint，以减少屏幕回放和后续底盘路径点数量。
+ * `action_start`/`action_end` 保留原动作区间，便于调试时回查 `actions` 中的任务边界。
  */
 typedef struct
 {
@@ -64,7 +71,7 @@ typedef struct
  * @brief Push Box 求解输出。
  *
  * `actions` 中用 `|` 分隔多箱拆解任务；屏幕回放会跳过该分隔符，
- * 但它对理解多箱任务边界有用。
+ * 但它对理解多箱任务边界有用，也避免 waypoint 合并跨过两个单箱任务。
  */
 typedef struct
 {

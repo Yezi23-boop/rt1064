@@ -9,18 +9,21 @@
 void CSI_IRQHandler(void)
 {
     CSI_DriverIRQHandler();
+    // NXP 建议在 Cortex-M ISR 退出前做数据同步，避免外设状态写入晚于中断返回。
     __DSB();
 }
 
 void PIT_IRQHandler(void)
 {
+    // PIT_CH1 是运动控制的硬实时边界；不要在该分支加入 printf、屏幕绘制或 BFS 这类不可控耗时任务。
     if(pit_flag_get(PIT_CH1))
     {
         pit_flag_clear(PIT_CH1);
         executor_update_20ms();
-        update_control_20ms();   // 20ms 执行姿态环、混控和四轮速度 PID。
+        update_control_20ms();
     }
 
+    // 菜单按键用 5ms 节拍做消抖，主循环只消费状态，避免屏幕刷新频率影响按键手感。
     if(pit_flag_get(PIT_CH2))
     {
         pit_flag_clear(PIT_CH2);
@@ -32,14 +35,15 @@ void PIT_IRQHandler(void)
         pit_flag_clear(PIT_CH3);
     }
 
-    __DSB();                     // 退出 Cortex-M ISR 前同步总线写入，避免中断标志清除延后生效。
+    // 同步中断标志清除，降低刚退出 ISR 又因旧 pending 状态重入的风险。
+    __DSB();
 }
 
 void LPUART1_IRQHandler(void)
 {
     if(kLPUART_RxDataRegFullFlag & LPUART_GetStatusFlags(LPUART1))
     {
-        /* UART1 硬件由 debug_init 初始化；运行期接收字节归 OpenART 协议。 */
+        // LPUART1 接 OpenART B12/B13，只推字节给协议解析器；调试 printf 走 LPUART8 无线串口。
         uint8 data = LPUART_ReadByte(LPUART1);
         openart_uart_push_byte(data);
     }
@@ -99,6 +103,7 @@ void LPUART8_IRQHandler(void)
 {
     if(kLPUART_RxDataRegFullFlag & LPUART_GetStatusFlags(LPUART8))
     {
+        // 无线串口同时承担 printf/VOFA 输出和上位机输入，ISR 只搬运字节，解析放在主循环。
         wireless_module_uart_handler();
     }
 
@@ -147,7 +152,8 @@ void GPIO3_Combined_0_15_IRQHandler(void)
     if(exti_flag_get(IMU660RC_INT2_PIN))
     {
         exti_flag_clear(IMU660RC_INT2_PIN);
-        imu660rc_callback();      // 恢复 IMU660RC 驱动原始 INT2 中断触发读取四元数。
+        // 保持 IMU 驱动原始 INT2 回调路径；控制环读取的是驱动维护的最新姿态缓存。
+        imu660rc_callback();
     }
     if(exti_flag_get(D4))
     {

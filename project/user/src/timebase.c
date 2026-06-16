@@ -4,6 +4,7 @@
 void timebase_init(void)
 {
     // GPT_TIM_1 作为全局毫秒基准，主循环和菜单状态机都用无符号差值计算超时。
+    // 其它模块不要重新配置 GPT_TIM_1，否则 ART 超时、回放步进和按键扫描会共用错误时间基准。
     timer_init(GPT_TIM_1, TIMER_MS);
     timer_start(GPT_TIM_1);
 }

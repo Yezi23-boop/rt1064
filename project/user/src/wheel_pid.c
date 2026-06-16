@@ -24,7 +24,7 @@ float wheel_pid_update(wheel_pid_struct *pid, float target, float feedback)
     float delta;
 
     error = target - feedback;
-    // 增量式 PID 每 20ms 只计算本周期 PWM 增量，output 保存上一周期累计结果。
+    // target/feedback 单位为 count/20ms；增量式 PID 每周期只计算 signed PWM 增量。
     delta = pid->kp * (error - pid->error_1) +
             pid->ki * error +
             pid->kd * (error - 2.0f * pid->error_1 + pid->error_2);

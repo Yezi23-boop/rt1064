@@ -5,8 +5,8 @@
 #define M_PI (3.1415926f)
 #endif
 
-static drive_pose_struct drive_pose;
-static float pose_yaw_zero_deg;
+static drive_pose_struct drive_pose; // 20ms 控制链路写入，执行器/显示读取；用于短距离段内估计。
+static float pose_yaw_zero_deg;       // 上电稳定后锁定的 yaw 零点，用来构造局部坐标系。
 
 static float normalize_yaw_deg(float yaw_deg)
 {
@@ -66,6 +66,8 @@ void drive_pose_update_20ms(const float encoder_count[WHEEL_COUNT], float yaw_de
     dy_body_cm = body_vy_count * POSE_Y_CM_PER_COUNT * POSE_Y_DIR_SIGN;
 
     pose_yaw_deg = normalize_yaw_deg(yaw_deg - pose_yaw_zero_deg);
+    /* 车体系位移要旋转到全局局部坐标系；yaw 使用相对零点角，
+     * 否则上电时车头绝对朝向会直接污染执行器的 X/Y 目标。 */
     yaw_rad = pose_yaw_deg * (float)M_PI / 180.0f;
     cos_yaw = cosf(yaw_rad);
     sin_yaw = sinf(yaw_rad);

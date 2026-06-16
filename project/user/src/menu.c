@@ -3,33 +3,32 @@
 #include "menu_key.h"
 #include "maps.h"
 #include "solver.h"
+#include "map_utils.h"
 #include "settings.h"
 #include "screen.h"
 #include "timebase.h"
 #include "drive_control.h"
 #include "drive_pose.h"
-#include "drive_config.h"
 #include "openart_uart.h"
 #include "executor.h"
+#include "art_replan.h"
 
 #define MENU_KEY_SCAN_PERIOD_MS (5)
 #define PLAYBACK_STEP_MS        (300u)
 #define HOME_DYNAMIC_REFRESH_MS (500u)
 #define HOME_ITEM_COUNT         (4)
-#define RUN_ITEM_COUNT          (3)
 #define ROOT_PAGE_COUNT         (5)
 
 typedef enum
 {
-    MENU_PAGE_HOME         = 0,
-    MENU_PAGE_RUN          = 1,
-    MENU_PAGE_ART_MAP      = 2,
-    MENU_PAGE_DEBUG        = 3,
-    MENU_PAGE_INFO         = 4,
-    MENU_PAGE_RUN_MAP      = 11,
-    MENU_PAGE_RUN_MODE     = 12,
-    MENU_PAGE_RUN_EXECUTE  = 13,
-    MENU_PAGE_RUN_PLAYBACK = 14,
+    MENU_PAGE_HOME         = 0,  /**< 顶层菜单页。 */
+    MENU_PAGE_RUN          = 1,  /**< 运行工作台页，选择地图来源并发起求解/执行。 */
+    MENU_PAGE_ART_MAP      = 2,  /**< OpenART 最近完整帧预览页。 */
+    MENU_PAGE_DEBUG        = 3,  /**< 本地里程计映射到地图的调试页。 */
+    MENU_PAGE_INFO         = 4,  /**< 固件状态信息页。 */
+    MENU_PAGE_RUN_MODE     = 12, /**< Run 子页：候选运行模式选择。 */
+    MENU_PAGE_RUN_EXECUTE  = 13, /**< Run 子页：executor 执行态显示。 */
+    MENU_PAGE_RUN_PLAYBACK = 14, /**< Run 子页：BFS 动作回放。 */
 } menu_page_id_enum;
 
 typedef void (*menu_page_lifecycle_func)(void);
@@ -37,31 +36,15 @@ typedef void (*menu_page_key_func)(menu_key_event_enum event);
 
 typedef struct
 {
-    menu_page_id_enum id;
-    menu_page_id_enum parent;
-    uint16 refresh_ms;
-    menu_page_lifecycle_func on_enter;
-    menu_page_lifecycle_func on_exit;
-    menu_page_lifecycle_func on_draw;
-    menu_page_lifecycle_func on_refresh;
-    menu_page_key_func on_key;
+    menu_page_id_enum id;                /**< 页面唯一 ID，供 `find_page()` 查表。 */
+    menu_page_id_enum parent;            /**< K4 短按返回目标；顶层页的 parent 指向自身。 */
+    uint16 refresh_ms;                   /**< 动态局部刷新周期，单位 ms；0 表示只在事件触发时重绘。 */
+    menu_page_lifecycle_func on_enter;   /**< 进入页面时运行的钩子，可为 NULL。 */
+    menu_page_lifecycle_func on_exit;    /**< 离开页面时运行的钩子，可为 NULL。 */
+    menu_page_lifecycle_func on_draw;    /**< 整页绘制函数，不应阻塞等待按键或 ART 帧。 */
+    menu_page_lifecycle_func on_refresh; /**< 动态局部刷新函数，可为 NULL。 */
+    menu_page_key_func on_key;           /**< 页面私有按键处理函数，可为 NULL。 */
 } menu_page_def_struct;
-
-typedef enum
-{
-    ART_REPLAN_IDLE = 0,
-    ART_REPLAN_INITIAL,
-    ART_REPLAN_SEGMENT,
-} art_replan_phase_enum;
-
-typedef struct
-{
-    uint8 car_count;
-    uint8 box_count;
-    uint8 target_count;
-    uint8 car_row;
-    uint8 car_col;
-} art_map_stats_struct;
 
 static const char *const home_items[HOME_ITEM_COUNT] =
 {
@@ -79,39 +62,24 @@ static const menu_page_id_enum home_item_pages[HOME_ITEM_COUNT] =
     MENU_PAGE_INFO,
 };
 
-static const char *const run_items[RUN_ITEM_COUNT] =
-{
-    "Map",
-    "Mode",
-    "Execute",
-};
-
-static const menu_page_id_enum run_item_pages[RUN_ITEM_COUNT] =
-{
-    MENU_PAGE_RUN_MAP,
-    MENU_PAGE_RUN_MODE,
-    MENU_PAGE_RUN_EXECUTE,
-};
-
-static menu_page_id_enum current_page;
-static uint8 cursor_row;
-static uint8 previous_cursor_row;
-static uint8 page_cursor[ROOT_PAGE_COUNT];
-static uint8 current_map;
-static uint8 candidate_map;
-static run_mode_enum run_mode;
-static run_mode_enum candidate_mode;
-static solve_result_struct last_result;
-static uint32 last_elapsed_ms;
-static uint16 playback_step;
-static playback_state_enum playback_state;
-static uint32 playback_last_ms;
-static uint32 dynamic_last_ms;
-static uint8 need_redraw;
-static const char *run_state = "Idle";
-static uint8 exec_start_row = 0;
-static uint8 exec_start_col = 0;
-static char last_solve_rows[MAP_ROWS][MAP_COLS + 1];
+static menu_page_id_enum current_page;                       // 主循环唯一写入的当前页；按键/刷新都以它查表分发。
+static uint8 cursor_row;                                     // 当前页面光标行，Home 页用于一级菜单。
+static uint8 previous_cursor_row;                            // 上一次光标行，用于局部擦除旧光标。
+static uint8 page_cursor[ROOT_PAGE_COUNT];                   // 顶层页光标记忆，返回 Home 后不丢用户上次位置。
+static uint8 current_map;                                    // 当前离线地图索引，Flash 保存的是这个索引而不是地图内容。
+static run_mode_enum run_mode;                               // 已确认运行模式；Run 页 K3 执行时读取。
+static run_mode_enum candidate_mode;                         // Mode 子页临时选择，K3 确认前不写入 `run_mode`。
+static solve_result_struct last_result;                      // 屏幕回放和 executor 共用的最近一次求解结果。
+static uint32 last_elapsed_ms;                               // 最近一次 solve_map 耗时，单位 ms，仅用于显示。
+static uint16 playback_step;                                 // 当前回放 action 下标；播放 `|` 时会跳过可见动作。
+static playback_state_enum playback_state;                   // 回放页状态，和 executor 状态相互独立。
+static uint32 playback_last_ms;                              // 自动回放上一帧推进时间，单位 ms。
+static uint32 dynamic_last_ms;                               // 当前动态页上一轮局部刷新时间，单位 ms。
+static uint8 need_redraw;                                    // 页面级重绘请求，主循环消费后清零。
+static const char *run_state = "Idle";                       // Run 页短状态文本，指向常量字符串。
+static uint8 exec_start_row = 0;                             // executor 启动时的格点行，屏幕用来把 pose 映射回地图。
+static uint8 exec_start_col = 0;                             // executor 启动时的格点列，ART 重解算成功后会更新。
+static char last_solve_rows[MAP_ROWS][MAP_COLS + 1];         // 最近求解地图快照的行缓存，避免 OpenART 实时帧覆盖执行底图。
 static map_source_struct last_solve_source =
 {
     "Run",
@@ -130,22 +98,12 @@ static map_source_struct last_solve_source =
         last_solve_rows[11],
     },
 };
-static uint8 last_solve_source_valid = 0;
-static art_replan_phase_enum art_replan_phase = ART_REPLAN_IDLE;
-static char art_candidate_rows[MAP_ROWS][MAP_COLS + 1];
-static uint8 art_candidate_valid = 0;
-static uint8 art_stable_count = 0;
-static uint32 art_last_seen_frame = 0;
-static uint32 art_wait_start_ms = 0;
-static executor_error_enum art_timeout_error = EXEC_ERROR_ART_TIMEOUT;
-static uint8 art_launch_pending = 0;
+static uint8 last_solve_source_valid = 0;                    // 1 表示 `last_solve_source` 可用于 Run/Execute/Playback 显示。
 
 static void draw_current_page(void);
-static void enter_run_map_page(void);
 static void enter_run_mode_page(void);
 static void draw_home_page(void);
 static void draw_run_page(void);
-static void draw_run_map_page(void);
 static void draw_mode_page(void);
 static void draw_playback_page(void);
 static void draw_debug_page(void);
@@ -159,22 +117,21 @@ static void handle_run_key(menu_key_event_enum event);
 static void handle_debug_key(menu_key_event_enum event);
 static void handle_info_key(menu_key_event_enum event);
 static void handle_art_map_key(menu_key_event_enum event);
-static void handle_map_event(menu_key_event_enum event);
 static void handle_mode_event(menu_key_event_enum event);
 static void handle_playback_event(menu_key_event_enum event);
 static void draw_execute_page(void);
 static void refresh_execute_page(void);
 static void handle_execute_event(menu_key_event_enum event);
 static void execute_current_selection(void);
-static void art_replan_cancel(void);
-static void art_replan_tick(void);
-static void art_launch_confirm(void);
+static void build_art_replan_context(art_replan_context_struct *context);
+static void apply_art_replan_update(const art_replan_update_struct *update);
 
 static const menu_page_def_struct menu_pages[] =
 {
+    // 页面表把“如何画、如何刷新、如何处理按键”集中声明，新增页面时不需要改主轮询。
+    // refresh_ms 为 0 表示静态页；动态页只局部刷新，减少 IPS200 整屏闪烁。
     { MENU_PAGE_HOME,         MENU_PAGE_HOME, HOME_DYNAMIC_REFRESH_MS, 0,                   0, draw_home_page,     refresh_home_page,    handle_home_key      },
     { MENU_PAGE_RUN,          MENU_PAGE_HOME, 0,                       0,                   0, draw_run_page,      0,                    handle_run_key       },
-    { MENU_PAGE_RUN_MAP,      MENU_PAGE_RUN,  0,                       enter_run_map_page,  0, draw_run_map_page,  0,                    handle_map_event     },
     { MENU_PAGE_RUN_MODE,     MENU_PAGE_RUN,  0,                       enter_run_mode_page, 0, draw_mode_page,     0,                    handle_mode_event    },
     { MENU_PAGE_RUN_PLAYBACK, MENU_PAGE_RUN,  0,                       0,                   0, draw_playback_page, 0,                    handle_playback_event },
     { MENU_PAGE_RUN_EXECUTE,  MENU_PAGE_RUN,  500,                     0,                   0, draw_execute_page,  refresh_execute_page, handle_execute_event  },
@@ -226,10 +183,6 @@ static uint8 page_item_count(menu_page_id_enum page)
     if(MENU_PAGE_HOME == page)
     {
         return HOME_ITEM_COUNT;
-    }
-    if(MENU_PAGE_RUN == page)
-    {
-        return RUN_ITEM_COUNT;
     }
     if(MENU_PAGE_RUN_MODE == page)
     {
@@ -288,11 +241,6 @@ static void enter_page(menu_page_id_enum page)
     mark_redraw();
 }
 
-static void enter_run_map_page(void)
-{
-    candidate_map = current_map;
-}
-
 static void enter_run_mode_page(void)
 {
     candidate_mode = run_mode;
@@ -300,12 +248,26 @@ static void enter_run_mode_page(void)
 
 static void go_home(void)
 {
-    if(0 != art_launch_pending)
+    if(0 != art_replan_launch_pending())
     {
+        // 普通返回只取消“等待 K3 发车”的 ART 待确认状态，不强行停止已经运行的执行器。
         art_replan_cancel();
         run_state = "Idle";
     }
-    candidate_map = current_map;
+    candidate_mode = run_mode;
+    enter_page(MENU_PAGE_HOME);
+}
+
+static void safe_go_home(void)
+{
+    // K4 长按是全局安全出口：无论当前页面在哪，都取消 ART 等待并停止底盘执行。
+    // 这条路径不能写 Flash，避免紧急退出时被慢速擦写拖住。
+    art_replan_cancel();
+    if(EXEC_STATE_IDLE != executor_get_state())
+    {
+        executor_stop();
+    }
+    run_state = "Idle";
     candidate_mode = run_mode;
     enter_page(MENU_PAGE_HOME);
 }
@@ -346,17 +308,8 @@ static const map_source_struct *selected_map_source(void)
 
 static void save_solve_source_snapshot(const map_source_struct *source)
 {
-    uint8 row, col;
-
-    last_solve_source.name = source->name;
-    for(row = 0; row < MAP_ROWS; row++)
-    {
-        for(col = 0; col < MAP_COLS; col++)
-        {
-            last_solve_rows[row][col] = source->rows[row][col];
-        }
-        last_solve_rows[row][MAP_COLS] = '\0';
-    }
+    // 求解和回放必须使用同一份地图；ART 来源会持续更新，所以求解前先冻结快照。
+    map_source_snapshot(&last_solve_source, last_solve_rows, source);
     last_solve_source_valid = 1;
 }
 
@@ -392,6 +345,7 @@ static void solve_current_map(void)
 
     run_state = "Running";
     mark_redraw();
+    // BFS 可能让主循环短暂停住，先把 Running 状态画出来，避免用户误判按键无响应。
     draw_current_page();
     need_redraw = 0;
 
@@ -422,328 +376,75 @@ static void solve_current_map(void)
     playback_last_ms = time_ms();
 }
 
-static void art_replan_cancel(void)
+static void build_art_replan_context(art_replan_context_struct *context)
 {
-    art_replan_phase = ART_REPLAN_IDLE;
-    art_candidate_valid = 0;
-    art_stable_count = 0;
-    art_last_seen_frame = 0;
-    art_wait_start_ms = 0;
-    art_launch_pending = 0;
+    context->result = &last_result;
+    context->snapshot = &last_solve_source;
+    context->snapshot_rows = last_solve_rows;
+    context->snapshot_valid = &last_solve_source_valid;
+    context->elapsed_ms = &last_elapsed_ms;
+    context->start_row = &exec_start_row;
+    context->start_col = &exec_start_col;
+    context->run_mode = run_mode;
 }
 
-static void art_replan_wait_fresh_frame(void)
+static void apply_art_replan_update(const art_replan_update_struct *update)
 {
-    openart_uart_discard_pending();
-    art_candidate_valid = 0;
-    art_stable_count = 0;
-    art_last_seen_frame = openart_uart_get_frame_count();
-}
-
-static void art_copy_rows(char dst[MAP_ROWS][MAP_COLS + 1], const map_source_struct *source)
-{
-    uint8 row;
-    uint8 col;
-
-    for(row = 0; row < MAP_ROWS; row++)
-    {
-        for(col = 0; col < MAP_COLS; col++)
-        {
-            dst[row][col] = source->rows[row][col];
-        }
-        dst[row][MAP_COLS] = '\0';
-    }
-}
-
-static uint8 art_rows_match(const char rows[MAP_ROWS][MAP_COLS + 1], const map_source_struct *source)
-{
-    uint8 row;
-    uint8 col;
-
-    for(row = 0; row < MAP_ROWS; row++)
-    {
-        for(col = 0; col < MAP_COLS; col++)
-        {
-            if(rows[row][col] != source->rows[row][col])
-            {
-                return 0;
-            }
-        }
-    }
-    return 1;
-}
-
-static void art_replan_begin(art_replan_phase_enum phase)
-{
-    art_replan_phase = phase;
-    art_replan_wait_fresh_frame();
-    art_wait_start_ms = time_ms();
-    art_timeout_error = EXEC_ERROR_ART_TIMEOUT;
-    run_state = (ART_REPLAN_INITIAL == phase) ? "Wait ART" : "ART Sync";
-    mark_redraw();
-}
-
-static void art_replan_restart_stability(void)
-{
-    art_replan_wait_fresh_frame();
-}
-
-static uint8 art_get_stable_map(const map_source_struct **source_out)
-{
-    const map_source_struct *source = openart_map_get();
-    uint32 frame = openart_uart_get_frame_count();
-
-    if((0 == source) || (0 == frame))
-    {
-        return 0;
-    }
-
-    if(frame == art_last_seen_frame)
-    {
-        return 0;
-    }
-    art_last_seen_frame = frame;
-
-    if((0 != art_candidate_valid) && (0 != art_rows_match(art_candidate_rows, source)))
-    {
-        if(art_stable_count < EXEC_ART_STABLE_FRAMES)
-        {
-            art_stable_count++;
-        }
-    }
-    else
-    {
-        art_copy_rows(art_candidate_rows, source);
-        art_candidate_valid = 1;
-        art_stable_count = 1;
-    }
-
-    if(art_stable_count >= EXEC_ART_STABLE_FRAMES)
-    {
-        *source_out = source;
-        return 1;
-    }
-    return 0;
-}
-
-static void art_collect_stats(const map_source_struct *source, art_map_stats_struct *stats)
-{
-    uint8 row;
-    uint8 col;
-    char value;
-
-    stats->car_count = 0;
-    stats->box_count = 0;
-    stats->target_count = 0;
-    stats->car_row = 0;
-    stats->car_col = 0;
-
-    for(row = 0; row < MAP_ROWS; row++)
-    {
-        for(col = 0; col < MAP_COLS; col++)
-        {
-            value = source->rows[row][col];
-            if('C' == value)
-            {
-                if(0 == stats->car_count)
-                {
-                    stats->car_row = row;
-                    stats->car_col = col;
-                }
-                stats->car_count++;
-            }
-            else if('B' == value)
-            {
-                stats->box_count++;
-            }
-            else if('T' == value)
-            {
-                stats->target_count++;
-            }
-        }
-    }
-}
-
-static uint8 art_stats_done(const art_map_stats_struct *stats)
-{
-    return ((0 == stats->box_count) && (0 == stats->target_count)) ? 1u : 0u;
-}
-
-static uint8 art_stats_valid_for_solve(const art_map_stats_struct *stats)
-{
-    if(1u != stats->car_count)
-    {
-        return 0;
-    }
-    if(stats->box_count != stats->target_count)
-    {
-        return 0;
-    }
-    if((stats->box_count > MAX_BOXES) || (stats->target_count > MAX_BOXES))
-    {
-        return 0;
-    }
-    return (0 != stats->box_count) ? 1u : 0u;
-}
-
-static void art_replan_start_executor(const art_map_stats_struct *stats)
-{
-    uint8 single_step = (RUN_MODE_STEP == run_mode) ? 1u : 0u;
-
-    exec_start_row = stats->car_row;
-    exec_start_col = stats->car_col;
-    executor_start(last_result.waypoints, last_result.waypoint_count,
-                   exec_start_row, exec_start_col, single_step, 1u);
-    run_state = (0 != single_step) ? "Paused" : "Running";
-}
-
-static void art_replan_wait_launch(const art_map_stats_struct *stats)
-{
-    exec_start_row = stats->car_row;
-    exec_start_col = stats->car_col;
-    art_replan_cancel();
-    art_launch_pending = 1;
-    run_state = "Ready K3";
-    mark_redraw();
-}
-
-static void art_launch_confirm(void)
-{
-    uint8 single_step;
-
-    if(0 == art_launch_pending)
+    if(0 == update)
     {
         return;
     }
 
-    art_launch_pending = 0;
-    single_step = (RUN_MODE_STEP == run_mode) ? 1u : 0u;
-    executor_start(last_result.waypoints, last_result.waypoint_count,
-                   exec_start_row, exec_start_col, single_step, 1u);
-    run_state = (0 != single_step) ? "Paused" : "Running";
-    mark_redraw();
-}
-
-static void art_handle_stable_map(const map_source_struct *source, executor_error_enum *timeout_error)
-{
-    art_map_stats_struct stats;
-    uint32 start_ms;
-    art_replan_phase_enum phase = art_replan_phase;
-
-    save_solve_source_snapshot(source);
-    art_collect_stats(&last_solve_source, &stats);
-
-    if((1u == stats.car_count) && (0 != art_stats_done(&stats)))
+    if(0 != update->run_state)
     {
-        exec_start_row = stats.car_row;
-        exec_start_col = stats.car_col;
-        clear_result(&last_result);
-        last_elapsed_ms = 0;
-        playback_state = PLAYBACK_STATE_DONE;
-        run_state = "Done";
-        art_replan_cancel();
-        executor_finish_done();
-        printf("ART_DONE frame=%lu C=%d,%d\r\n",
-            (unsigned long)openart_uart_get_frame_count(),
-            stats.car_row,
-            stats.car_col);
-        mark_redraw();
-        return;
+        run_state = update->run_state;
     }
 
-    if(0 == art_stats_valid_for_solve(&stats))
+    if(0 != update->reset_playback_step)
     {
-        *timeout_error = EXEC_ERROR_ART_SYNC;
-        run_state = "Bad ART";
-        printf("ART_SYNC_BAD frame=%lu C=%d B=%d T=%d\r\n",
-            (unsigned long)openart_uart_get_frame_count(),
-            stats.car_count,
-            stats.box_count,
-            stats.target_count);
-        art_replan_restart_stability();
-        mark_redraw();
-        return;
-    }
-
-    openart_uart_discard_pending();
-    start_ms = time_ms();
-    if(0 != solve_map(&last_solve_source, &last_result))
-    {
-        last_elapsed_ms = time_ms() - start_ms;
-        openart_uart_discard_pending();
         playback_step = 0;
         playback_last_ms = time_ms();
-        playback_state = PLAYBACK_STATE_PAUSED;
-        if(ART_REPLAN_INITIAL == phase)
-        {
-            art_replan_wait_launch(&stats);
-        }
-        else
-        {
-            art_replan_start_executor(&stats);
-            art_replan_cancel();
-        }
-        printf("ART_REPLAN_OK phase=%d tasks=%d actions=%d waypoints=%d time=%lu\r\n",
-            phase,
-            last_result.task_count,
-            last_result.action_count,
-            last_result.waypoint_count,
-            (unsigned long)last_elapsed_ms);
-        if(ART_REPLAN_INITIAL == phase)
-        {
-            enter_page(MENU_PAGE_RUN_EXECUTE);
-        }
-        else
-        {
-            mark_redraw();
-        }
     }
-    else
+
+    if(ART_REPLAN_PLAYBACK_PAUSED == update->playback)
     {
-        last_elapsed_ms = time_ms() - start_ms;
-        art_replan_wait_fresh_frame();
+        playback_state = PLAYBACK_STATE_PAUSED;
+    }
+    else if(ART_REPLAN_PLAYBACK_DONE == update->playback)
+    {
+        playback_state = PLAYBACK_STATE_DONE;
+    }
+    else if(ART_REPLAN_PLAYBACK_FAIL == update->playback)
+    {
         playback_state = PLAYBACK_STATE_FAIL;
-        *timeout_error = EXEC_ERROR_ART_PLAN;
-        run_state = "Plan Fail";
-        printf("ART_REPLAN_FAIL phase=%d %s time=%lu\r\n",
-            phase,
-            last_result.message,
-            (unsigned long)last_elapsed_ms);
+    }
+
+    if(0 != update->enter_execute)
+    {
+        enter_page(MENU_PAGE_RUN_EXECUTE);
+    }
+    else if(0 != update->redraw)
+    {
         mark_redraw();
     }
 }
 
-static void art_replan_tick(void)
+static uint8 confirm_art_launch_if_pending(void)
 {
-    const map_source_struct *stable_source;
+    art_replan_context_struct context;
+    art_replan_update_struct update;
 
-    if((ART_REPLAN_IDLE == art_replan_phase) &&
-       (MAP_SOURCE_ART == settings_get_source()) &&
-       (0 != executor_art_sync_pending()))
+    if(0 == art_replan_launch_pending())
     {
-        art_replan_begin(ART_REPLAN_SEGMENT);
+        return 0;
     }
 
-    if(ART_REPLAN_IDLE == art_replan_phase)
-    {
-        return;
-    }
-
-    if((time_ms() - art_wait_start_ms) >= EXEC_ART_SYNC_TIMEOUT_MS)
-    {
-        run_state = "ART Timeout";
-        art_replan_cancel();
-        executor_set_error(art_timeout_error);
-        printf("ART_SYNC_TIMEOUT err=%d\r\n", art_timeout_error);
-        mark_redraw();
-        return;
-    }
-
-    stable_source = 0;
-    if(0 != art_get_stable_map(&stable_source))
-    {
-        art_handle_stable_map(stable_source, &art_timeout_error);
-    }
+    build_art_replan_context(&context);
+    // 初次 ART 求解成功后必须由 K3 消费待启动标志；若没有待启动请求，
+    // K3 才继续按页面原本的 Resume/Run 语义处理。
+    art_replan_confirm_launch(&context, &update);
+    apply_art_replan_update(&update);
+    return 1;
 }
 
 static void move_cursor(int8 delta)
@@ -774,19 +475,6 @@ static void enter_selected_item(void)
     if(MENU_PAGE_HOME == current_page)
     {
         enter_page(home_item_pages[cursor_row]);
-        return;
-    }
-
-    if(MENU_PAGE_RUN == current_page)
-    {
-        if(MENU_PAGE_RUN_EXECUTE == run_item_pages[cursor_row])
-        {
-            execute_current_selection();
-        }
-        else
-        {
-            enter_page(run_item_pages[cursor_row]);
-        }
     }
 }
 
@@ -808,6 +496,7 @@ static void handle_list_event(menu_key_event_enum event)
     {
         if(MENU_PAGE_HOME == current_page)
         {
+            // Flash 保存只在 Home 页 K4 短按触发，避免每次切换地图/模式都擦写。
             settings_save();
             mark_redraw();
         }
@@ -823,39 +512,9 @@ static void handle_home_key(menu_key_event_enum event)
     handle_list_event(event);
 }
 
-static void handle_map_event(menu_key_event_enum event)
-{
-    if(MENU_KEY_EVENT_K1_SHORT == event)
-    {
-        candidate_map = prev_index(candidate_map, map_count());
-        run_state = (candidate_map == current_map) ? "Idle" : "Pick Map";
-        mark_redraw();
-    }
-    else if(MENU_KEY_EVENT_K2_SHORT == event)
-    {
-        candidate_map = next_index(candidate_map, map_count());
-        run_state = (candidate_map == current_map) ? "Idle" : "Pick Map";
-        mark_redraw();
-    }
-    else if(MENU_KEY_EVENT_K3_SHORT == event)
-    {
-        current_map = candidate_map;
-        settings_set_runtime(current_map, run_mode);
-        clear_result_state();
-        enter_page(MENU_PAGE_RUN);
-    }
-    else if(MENU_KEY_EVENT_K4_SHORT == event)
-    {
-        candidate_map = current_map;
-        run_state = "Idle";
-        enter_page(MENU_PAGE_RUN);
-    }
-}
-
 static void select_run_map(uint8 map)
 {
     current_map = map;
-    candidate_map = current_map;
     settings_set_runtime(current_map, run_mode);
     clear_result_state();
     run_state = "Pick Map";
@@ -874,11 +533,8 @@ static void handle_run_event(menu_key_event_enum event)
     }
     else if(MENU_KEY_EVENT_K3_SHORT == event)
     {
-        if(0 != art_launch_pending)
-        {
-            art_launch_confirm();
-        }
-        else if(EXEC_STATE_PAUSED == executor_get_state())
+        if((0 == confirm_art_launch_if_pending()) &&
+           (EXEC_STATE_PAUSED == executor_get_state()))
         {
             executor_resume();
             run_state = "Running";
@@ -1043,29 +699,10 @@ static void playback_tick(void)
     }
 }
 
-static void find_car_in_source(const map_source_struct *source, uint8 *row_out, uint8 *col_out)
-{
-    uint8 r, c;
-
-    for(r = 0; r < MAP_ROWS; r++)
-    {
-        for(c = 0; c < MAP_COLS; c++)
-        {
-            if('C' == source->rows[r][c])
-            {
-                *row_out = r;
-                *col_out = c;
-                return;
-            }
-        }
-    }
-    *row_out = 0;
-    *col_out = 0;
-}
-
 static void execute_current_selection(void)
 {
-    candidate_map = current_map;
+    art_replan_update_struct update;
+
     candidate_mode = run_mode;
     art_replan_cancel();
 
@@ -1077,7 +714,8 @@ static void execute_current_selection(void)
         playback_state = PLAYBACK_STATE_PAUSED;
         last_solve_source_valid = 0;
         executor_stop();
-        art_replan_begin(ART_REPLAN_INITIAL);
+        art_replan_begin_initial(&update);
+        apply_art_replan_update(&update);
         enter_page(MENU_PAGE_RUN_EXECUTE);
         return;
     }
@@ -1096,7 +734,7 @@ static void execute_current_selection(void)
 
             if(0 != last_solve_source_valid)
             {
-                find_car_in_source(&last_solve_source, &exec_start_row, &exec_start_col);
+                (void)map_find_car(&last_solve_source, &exec_start_row, &exec_start_col, 0);
             }
 
             executor_start(last_result.waypoints, last_result.waypoint_count,
@@ -1118,7 +756,8 @@ static void dispatch_key_event(menu_key_event_enum event)
 
     if(MENU_KEY_EVENT_K4_LONG == event)
     {
-        go_home();
+        // K4 长按不交给具体页面，保证任何页面下都能走同一条安全退出路径。
+        safe_go_home();
         return;
     }
 
@@ -1189,7 +828,7 @@ static void build_execute_view(screen_execute_view_struct *view)
     view->start_col = exec_start_col;
     view->pose_x_cm = pose->x_cm;
     view->pose_y_cm = pose->y_cm;
-    view->art_launch_pending = art_launch_pending;
+    view->art_launch_pending = art_replan_launch_pending();
     view->art_player_enabled = (MAP_SOURCE_ART == settings_get_source()) ? 1u : 0u;
     if(0 != view->art_player_enabled)
     {
@@ -1225,11 +864,6 @@ static void draw_run_page(void)
 
     build_run_view(&view);
     screen_draw_run_workbench(&view);
-}
-
-static void draw_run_map_page(void)
-{
-    screen_draw_map_select(current_map, candidate_map, settings_get_save_state(), run_state);
 }
 
 static void draw_mode_page(void)
@@ -1300,6 +934,7 @@ static void refresh_current_page_dynamic(void)
     now_ms = time_ms();
     if((now_ms - dynamic_last_ms) >= page->refresh_ms)
     {
+        // 用无符号差值判断周期，即使 time_ms() 溢出也能继续刷新动态页面。
         dynamic_last_ms = now_ms;
         page->on_refresh();
     }
@@ -1328,11 +963,8 @@ static void handle_execute_event(menu_key_event_enum event)
     switch(event)
     {
         case MENU_KEY_EVENT_K3_SHORT:
-            if(0 != art_launch_pending)
-            {
-                art_launch_confirm();
-            }
-            else if(EXEC_STATE_PAUSED == executor_get_state())
+            if((0 == confirm_art_launch_if_pending()) &&
+               (EXEC_STATE_PAUSED == executor_get_state()))
             {
                 executor_resume();
                 run_state = "Running";
@@ -1341,7 +973,7 @@ static void handle_execute_event(menu_key_event_enum event)
             break;
             
         case MENU_KEY_EVENT_K4_SHORT:
-            /* 停止执行，返回 Run 页面 */
+            // 执行页 K4 是人工停止路径：同时取消 ART 等待和 executor，防止返回后后台继续跑。
             art_replan_cancel();
             executor_stop();
             go_parent();
@@ -1376,7 +1008,6 @@ void menu_init(void)
     pit_ms_init(PIT_CH2, MENU_KEY_SCAN_PERIOD_MS);
 
     current_map = settings_get_map();
-    candidate_map = current_map;
     run_mode = settings_get_mode();
     candidate_mode = run_mode;
     current_page = MENU_PAGE_HOME;
@@ -1402,6 +1033,8 @@ void menu_init(void)
 void menu_poll(void)
 {
     menu_key_event_enum event = menu_key_read_event();
+    art_replan_context_struct art_context;
+    art_replan_update_struct art_update;
 
     if(MENU_KEY_EVENT_NONE != event)
     {
@@ -1409,7 +1042,9 @@ void menu_poll(void)
     }
 
     playback_tick();
-    art_replan_tick();
+    build_art_replan_context(&art_context);
+    art_replan_tick(&art_context, (MAP_SOURCE_ART == settings_get_source()) ? 1u : 0u, &art_update);
+    apply_art_replan_update(&art_update);
 
     if(0 != need_redraw)
     {

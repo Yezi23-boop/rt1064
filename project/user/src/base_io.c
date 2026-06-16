@@ -14,7 +14,7 @@
  * 对应轮位的元素一起交换；不要只换其中一组，也不要通过 encoder_dir_sign 修正轮位错配。
  *
  * 如果轮位已经对应，只是数值正负号相反，改本文件下方的 encoder_dir_sign[]。 */
-static const encoder_index_enum encoder_index[WHEEL_COUNT] =
+static const encoder_index_enum encoder_index[WHEEL_COUNT] = // 逻辑轮位到 QTIMER 编码器实例的映射。
 {
     QTIMER2_ENCODER2,
     QTIMER1_ENCODER1,
@@ -22,7 +22,7 @@ static const encoder_index_enum encoder_index[WHEEL_COUNT] =
     QTIMER1_ENCODER2,
 };
 
-static const encoder_channel1_enum encoder_ch1[WHEEL_COUNT] =
+static const encoder_channel1_enum encoder_ch1[WHEEL_COUNT] = // 逻辑轮位到编码器 A/B 相之一的引脚映射，必须和 encoder_index 同步交换。
 {
     QTIMER2_ENCODER2_CH1_C5,
     QTIMER1_ENCODER1_CH1_C0,
@@ -30,7 +30,7 @@ static const encoder_channel1_enum encoder_ch1[WHEEL_COUNT] =
     QTIMER1_ENCODER2_CH1_C2,
 };
 
-static const encoder_channel2_enum encoder_ch2[WHEEL_COUNT] =
+static const encoder_channel2_enum encoder_ch2[WHEEL_COUNT] = // 逻辑轮位到另一相编码器引脚映射，错换会导致方向或计数异常。
 {
     QTIMER2_ENCODER2_CH2_C25,
     QTIMER1_ENCODER1_CH2_C1,
@@ -38,7 +38,7 @@ static const encoder_channel2_enum encoder_ch2[WHEEL_COUNT] =
     QTIMER1_ENCODER2_CH2_C24,
 };
 
-static const pwm_channel_enum motor_pwm1_pin[WHEEL_COUNT] =
+static const pwm_channel_enum motor_pwm1_pin[WHEEL_COUNT] = // H 桥第一路 PWM 引脚映射，和 motor_pwm2_pin 共同决定正反转输出。
 {
     PWM2_MODULE2_CHB_C11,
     PWM2_MODULE0_CHB_C7,
@@ -46,7 +46,7 @@ static const pwm_channel_enum motor_pwm1_pin[WHEEL_COUNT] =
     PWM2_MODULE1_CHB_C9,
 };
 
-static const pwm_channel_enum motor_pwm2_pin[WHEEL_COUNT] =
+static const pwm_channel_enum motor_pwm2_pin[WHEEL_COUNT] = // H 桥第二路 PWM 引脚映射；交换一对引脚会反转该轮硬件方向。
 {
     PWM2_MODULE2_CHA_C10,
     PWM2_MODULE0_CHA_C6,
@@ -108,6 +108,7 @@ static float apply_motor_pwm_deadband(wheel_enum wheel, float signed_pwm)
         abs_pwm = -abs_pwm;
     }
 
+    // 死区补偿只抬高幅值，不改变 signed PWM 方向；方向校正仍由 motor_dir_sign 统一处理。
     deadband_pwm = (float)motor_pwm_deadband_for_wheel(wheel);
     if(abs_pwm >= deadband_pwm)
     {
@@ -202,6 +203,7 @@ void set_wheel_pwm_with_deadband(wheel_enum wheel, float signed_pwm, uint8 deadb
         {
             duty = PWM_DUTY_MAX;
         }
+        // 双 PWM 输入保持一边为 0，避免同桥臂两个方向同时给占空比。
         pwm_set_duty(motor_pwm2_pin[wheel], 0);
         pwm_set_duty(motor_pwm1_pin[wheel], duty);
     }
@@ -212,6 +214,7 @@ void set_wheel_pwm_with_deadband(wheel_enum wheel, float signed_pwm, uint8 deadb
         {
             duty = PWM_DUTY_MAX;
         }
+        // 反向输出同样先关另一方向，再给当前方向占空比。
         pwm_set_duty(motor_pwm1_pin[wheel], 0);
         pwm_set_duty(motor_pwm2_pin[wheel], duty);
     }

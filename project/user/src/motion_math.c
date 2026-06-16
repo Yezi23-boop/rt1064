@@ -88,10 +88,10 @@ float path_pid_update(path_pid_struct *pid, float error, float dt_s)
     float p_term, i_term, d_term;
     float output;
 
-    /* 1. 比例项 */
+    /* 位置式 PID 的输入是 cm 级位姿误差，输出直接作为归一化速度分量。 */
     p_term = pid->kp * error;
 
-    /* 2. 积分项（带限幅，防积分饱和） */
+    /* 积分项用 cm*s 累积；限幅防止停车或定位漂移时把下一段速度顶满。 */
     pid->integral += error * dt_s;
     if (pid->integral > pid->max_integral) {
         pid->integral = pid->max_integral;
@@ -100,27 +100,22 @@ float path_pid_update(path_pid_struct *pid, float error, float dt_s)
     }
     i_term = pid->ki * pid->integral;
 
-    /* 3. 微分项 */
+    /* 微分项对 20ms 位姿噪声敏感，当前参数默认关闭但保留公式便于后续调参。 */
     d_term = pid->kd * (error - pid->last_error) / dt_s;
     pid->last_error = error;
 
-    /* 4. 计算总输出 */
     output = p_term + i_term + d_term;
 
-    /* 5. 输出限幅 */
+    /* 输出是给 set_motion() 的归一化速度，不能超过上层约定的 [-max_output, max_output]。 */
     output = limit_float(output, -pid->max_output, pid->max_output);
 
     pid->last_output = output;
     return output;
 }
 
-float path_pid_get_integral(const path_pid_struct *pid)
-{
-    return pid->integral;
-}
-
 void command_to_velocity(motion_command_enum command, float move_speed, float turn_speed, float *vx, float *vy, float *vz)
 {
+    // 车体坐标：vx 右正、vy 前正、vz 逆时针正；转向命令后续会转成目标 yaw 步进。
     *vx = 0.0f;
     *vy = 0.0f;
     *vz = 0.0f;
@@ -223,6 +218,7 @@ void wheel_targets_from_norm(const float wheel_norm[WHEEL_COUNT], float wheel_ta
 
     for(i = 0; i < WHEEL_COUNT; i++)
     {
+        // wheel_norm 是混控比例，不是编码器目标；满幅映射到 20ms 的目标 count。
         wheel_target_count[i] = limit_float(wheel_norm[i], -1.0f, 1.0f) * MAX_WHEEL_TARGET_COUNT;
     }
 }
