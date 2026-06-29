@@ -17,7 +17,6 @@ static uint32 square_test_step_start_ms;  // 当前边开始时间，单位 ms�
 static float square_test_origin_x_cm;     // 当前边起点 X，单位 cm；位姿切段模式用来判断边长。
 static float square_test_origin_y_cm;     // 当前边起点 Y，单位 cm；位姿切段模式用来判断边长。
 static uint8 wheel_jog_started;           // 单轮点动是否已输出一次人工 PWM。
-static uint8 wheel_jog_stopped;           // 单轮点动是否已到时退出，防止旧人工 PWM 留在底层。
 static uint8 manual_pwm_active;           // 1 表示点动测试占用电机输出，20ms 闭环本周期应让出。
 
 void drive_test_init(void)
@@ -31,7 +30,6 @@ void drive_test_init(void)
     square_test_origin_x_cm = 0.0f;
     square_test_origin_y_cm = 0.0f;
     wheel_jog_started = 0;
-    wheel_jog_stopped = 0;
     manual_pwm_active = 0;
 }
 
@@ -233,14 +231,6 @@ static void drive_wheel_jog_poll(void)
         test_wheel(DRIVE_WHEEL_JOG_WHEEL, DRIVE_WHEEL_JOG_PWM);
         wheel_jog_started = 1;
     }
-
-    if((0 != wheel_jog_started) &&
-       (0 == wheel_jog_stopped) &&
-       (now_ms >= (DRIVE_WHEEL_JOG_START_MS + DRIVE_WHEEL_JOG_DURATION_MS)))
-    {
-        stop_motion();
-        wheel_jog_stopped = 1;
-    }
 #endif
 }
 
@@ -293,5 +283,6 @@ void test_wheel(wheel_enum wheel, float signed_pwm)
 
     stop_motion();
     manual_pwm_active = 1;
+    set_motor_output_enabled(1);
     set_wheel_pwm(wheel, limit_float(signed_pwm, -(float)MAX_PWM_DUTY, (float)MAX_PWM_DUTY));
 }

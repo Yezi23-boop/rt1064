@@ -1,92 +1,102 @@
+// =============================================================================
+// 底盘硬件边界 — 所有电机、编码器、IMU 的初始化与 I/O。
+// 上层（控制/混控/PID）不直接访问硬件，只通过 base_io.h 声明的函数操作。
+// =============================================================================
+
 #include "zf_common_headfile.h"
 #include "base_io.h"
 #include "motion_math.h"
 
-/* 底盘硬件调试入口集中放在本文件：
- * - 轮子对应错了：改 encoder_* / motor_pwm*_pin 这些硬件映射数组。
- * - 轮子对应正确但方向反了：改 motor_dir_sign[] 或 encoder_dir_sign[]。
- *
- * 这里的数组下标固定表示逻辑轮位：0=LF，1=LB，2=RF，3=RB。
- * 数组元素表示这个轮位实际接到的编码器硬件接口。
- *
- * 如果“手转某个轮子，但 Home 页另一个轮子的 Enc 在跳”，说明物理接口和逻辑轮位
- * 没对应上。此时要把 encoder_index、encoder_ch1、encoder_ch2 这三组数组中
- * 对应轮位的元素一起交换；不要只换其中一组，也不要通过 encoder_dir_sign 修正轮位错配。
- *
- * 如果轮位已经对应，只是数值正负号相反，改本文件下方的 encoder_dir_sign[]。 */
-static const encoder_index_enum encoder_index[WHEEL_COUNT] = // 逻辑轮位到 QTIMER 编码器实例的映射。
-{
-    QTIMER2_ENCODER2,
-    QTIMER1_ENCODER1,
-    QTIMER2_ENCODER1,
-    QTIMER1_ENCODER2,
+// -----------------------------------------------------------------------------
+// 硬件映射 — 逻辑轮位 (0=LF, 1=RF, 2=LB, 3=RB) → 物理引脚
+// -----------------------------------------------------------------------------
+// 排故：
+//   "手转 LF 但 Home 页 RF 的 Enc 在跳" → 把下面 3 组 encoder 数组
+//     对应位置的元素一起交换，不要通过 encoder_dir_sign 修正轮位错配。
+//   "轮位对了但 Enc 正负号反了" → 只改下方 encoder_dir_sign[] 的 ±1。
+//   "轮位对了但电机转反了"       → 只改下方 motor_dir_sign[]   的 ±1。
+
+// —— 编码器 —— (QTIMER 正交解码)
+static const encoder_index_enum encoder_index[WHEEL_COUNT] =
+    {
+        QTIMER2_ENCODER2, // LF
+        QTIMER2_ENCODER1, // RF
+        QTIMER1_ENCODER1, // LB
+        QTIMER1_ENCODER2, // RB
 };
 
-static const encoder_channel1_enum encoder_ch1[WHEEL_COUNT] = // 逻辑轮位到编码器 A/B 相之一的引脚映射，必须和 encoder_index 同步交换。
-{
-    QTIMER2_ENCODER2_CH1_C5,
-    QTIMER1_ENCODER1_CH1_C0,
-    QTIMER2_ENCODER1_CH1_C3,
-    QTIMER1_ENCODER2_CH1_C2,
+static const encoder_channel1_enum encoder_ch1[WHEEL_COUNT] =
+    {
+        QTIMER2_ENCODER2_CH1_C5, // LF
+        QTIMER2_ENCODER1_CH1_C3, // RF
+        QTIMER1_ENCODER1_CH1_C0, // LB
+        QTIMER1_ENCODER2_CH1_C2, // RB
 };
 
-static const encoder_channel2_enum encoder_ch2[WHEEL_COUNT] = // 逻辑轮位到另一相编码器引脚映射，错换会导致方向或计数异常。
-{
-    QTIMER2_ENCODER2_CH2_C25,
-    QTIMER1_ENCODER1_CH2_C1,
-    QTIMER2_ENCODER1_CH2_C4,
-    QTIMER1_ENCODER2_CH2_C24,
+static const encoder_channel2_enum encoder_ch2[WHEEL_COUNT] =
+    {
+        QTIMER2_ENCODER2_CH2_C25, // LF
+        QTIMER2_ENCODER1_CH2_C4,  // RF
+        QTIMER1_ENCODER1_CH2_C1,  // LB
+        QTIMER1_ENCODER2_CH2_C24, // RB
 };
 
-static const pwm_channel_enum motor_pwm1_pin[WHEEL_COUNT] = // H 桥第一路 PWM 引脚映射，和 motor_pwm2_pin 共同决定正反转输出。
-{
-    PWM2_MODULE2_CHB_C11,
-    PWM2_MODULE0_CHB_C7,
-    PWM2_MODULE3_CHB_D3,
-    PWM2_MODULE1_CHB_C9,
+// —— 电机 —— (DRV8701E: 单 PWM + GPIO DIR)
+static const pwm_channel_enum motor_pwm_pin[WHEEL_COUNT] =
+    {
+        PWM2_MODULE3_CHB_D3,  // LF 左前
+        PWM2_MODULE2_CHB_C11, // RF 右前
+        PWM2_MODULE0_CHA_C6,  // LB 左后
+        PWM2_MODULE1_CHA_C8,  // RB 右后
 };
 
-static const pwm_channel_enum motor_pwm2_pin[WHEEL_COUNT] = // H 桥第二路 PWM 引脚映射；交换一对引脚会反转该轮硬件方向。
-{
-    PWM2_MODULE2_CHA_C10,
-    PWM2_MODULE0_CHA_C6,
-    PWM2_MODULE3_CHA_D2,
-    PWM2_MODULE1_CHA_C8,
+static const gpio_pin_enum motor_dir_pin[WHEEL_COUNT] =
+    {
+        D2,  // LF 左前 — HIGH = 正转
+        C10, // RF 右前
+        C7,  // LB 左后
+        C9,  // RB 右后
 };
 
-/* 电机方向校正入口。
- * 轮位已经对应正确，但某个轮子的“正 PWM”转向和期望正轮速相反时，
- * 只把对应位置从 1 改成 -1。不要通过交换数组元素修正方向问题。 */
+// -----------------------------------------------------------------------------
+// 方向校正 — 接线完成后唯二的调向入口，不要交换上方映射数组来修正方向
+// -----------------------------------------------------------------------------
+
 int8 motor_dir_sign[WHEEL_COUNT] =
-{
-    1, // LF 左前
-    1, // LB 左后
-    1, // RF 右前
-    1, // RB 右后
+    {
+        1,  // LF
+        -1, // RF
+        1,  // LB
+        -1, // RB
 };
 
-/* 编码器方向校正入口。
- * Home 页显示的轮位已经对，但手转正方向时 Enc 为负数，就把对应轮位改成 -1。
- * 如果手转 LF 却是 RF 在跳，这是轮位映射错了，应改上面的三组 encoder 数组。 */
 int8 encoder_dir_sign[WHEEL_COUNT] =
-{
-    -1, // LF 左前
-    -1, // LB 左后
-    1,  // RF 右前
-    1,  // RB 右后
+    {
+        -1, // LF
+        1,  // RF
+        -1, // LB
+        1,  // RB
 };
 
-static uint8 motor_output_enabled = 0; // 上电安全窗口结束前，底层强制所有非零 PWM 为 0。
+// -----------------------------------------------------------------------------
+// 安全门 — 上电窗口内强锁零输出，20ms 控制环窗口结束才解禁
+// -----------------------------------------------------------------------------
+
+static uint8 motor_output_enabled = 0;
+
+// -----------------------------------------------------------------------------
+// 死区补偿 — 小 PWM 抬升到电机最小启动阈值
+// -----------------------------------------------------------------------------
 
 static uint16 motor_pwm_deadband_for_wheel(wheel_enum wheel)
 {
     static const uint16 deadband[WHEEL_COUNT] =
-    {
-        MOTOR_PWM_DEADBAND_LF,
-        MOTOR_PWM_DEADBAND_LB,
-        MOTOR_PWM_DEADBAND_RF,
-        MOTOR_PWM_DEADBAND_RB,
-    };
+        {
+            MOTOR_PWM_DEADBAND_LF,
+            MOTOR_PWM_DEADBAND_RF,
+            MOTOR_PWM_DEADBAND_LB,
+            MOTOR_PWM_DEADBAND_RB,
+        };
 
     return deadband[wheel];
 }
@@ -97,20 +107,19 @@ static float apply_motor_pwm_deadband(wheel_enum wheel, float signed_pwm)
     float abs_pwm;
     float deadband_pwm;
 
-    if(0.0f == signed_pwm)
+    if (0.0f == signed_pwm)
     {
         return 0.0f;
     }
 
     abs_pwm = signed_pwm;
-    if(abs_pwm < 0.0f)
+    if (abs_pwm < 0.0f)
     {
         abs_pwm = -abs_pwm;
     }
 
-    // 死区补偿只抬高幅值，不改变 signed PWM 方向；方向校正仍由 motor_dir_sign 统一处理。
     deadband_pwm = (float)motor_pwm_deadband_for_wheel(wheel);
-    if(abs_pwm >= deadband_pwm)
+    if (abs_pwm >= deadband_pwm)
     {
         return signed_pwm;
     }
@@ -122,32 +131,37 @@ static float apply_motor_pwm_deadband(wheel_enum wheel, float signed_pwm)
 #endif
 }
 
+// =============================================================================
+// 公开函数
+// =============================================================================
+
 uint8 io_init(void)
 {
     uint8 imu_state;
 
-    // 四个轮子的初始化显式展开，方便按 LF/LB/RF/RB 对照接线和板测现象。
-    pwm_init(motor_pwm1_pin[WHEEL_LF], PWM_FREQ_HZ, 0);
-    pwm_init(motor_pwm2_pin[WHEEL_LF], PWM_FREQ_HZ, 0);
+    // 四轮显式展开，方便按 LF/LB/RF/RB 对照接线。
+    // DRV8701E：1 路 PWM (17kHz) + 1 路 GPIO DIR (初始 HIGH = 正转)。
+    pwm_init(motor_pwm_pin[WHEEL_LF], PWM_FREQ_HZ, 0);
+    gpio_init(motor_dir_pin[WHEEL_LF], GPO, GPIO_HIGH, GPO_PUSH_PULL);
     encoder_quad_init(encoder_index[WHEEL_LF], encoder_ch1[WHEEL_LF], encoder_ch2[WHEEL_LF]);
     encoder_clear_count(encoder_index[WHEEL_LF]);
 
-    pwm_init(motor_pwm1_pin[WHEEL_LB], PWM_FREQ_HZ, 0);
-    pwm_init(motor_pwm2_pin[WHEEL_LB], PWM_FREQ_HZ, 0);
+    pwm_init(motor_pwm_pin[WHEEL_LB], PWM_FREQ_HZ, 0);
+    gpio_init(motor_dir_pin[WHEEL_LB], GPO, GPIO_HIGH, GPO_PUSH_PULL);
     encoder_quad_init(encoder_index[WHEEL_LB], encoder_ch1[WHEEL_LB], encoder_ch2[WHEEL_LB]);
     encoder_clear_count(encoder_index[WHEEL_LB]);
 
-    pwm_init(motor_pwm1_pin[WHEEL_RF], PWM_FREQ_HZ, 0);
-    pwm_init(motor_pwm2_pin[WHEEL_RF], PWM_FREQ_HZ, 0);
+    pwm_init(motor_pwm_pin[WHEEL_RF], PWM_FREQ_HZ, 0);
+    gpio_init(motor_dir_pin[WHEEL_RF], GPO, GPIO_HIGH, GPO_PUSH_PULL);
     encoder_quad_init(encoder_index[WHEEL_RF], encoder_ch1[WHEEL_RF], encoder_ch2[WHEEL_RF]);
     encoder_clear_count(encoder_index[WHEEL_RF]);
 
-    pwm_init(motor_pwm1_pin[WHEEL_RB], PWM_FREQ_HZ, 0);
-    pwm_init(motor_pwm2_pin[WHEEL_RB], PWM_FREQ_HZ, 0);
+    pwm_init(motor_pwm_pin[WHEEL_RB], PWM_FREQ_HZ, 0);
+    gpio_init(motor_dir_pin[WHEEL_RB], GPO, GPIO_HIGH, GPO_PUSH_PULL);
     encoder_quad_init(encoder_index[WHEEL_RB], encoder_ch1[WHEEL_RB], encoder_ch2[WHEEL_RB]);
     encoder_clear_count(encoder_index[WHEEL_RB]);
 
-    // IMU660RC 与 660RA 在本项目使用同接口同协议；这里直接启用驱动内置 240Hz 四元数解算。
+    // IMU660RC 与 660RA 同接口同协议，启用 240Hz 四元数解算。
     imu_state = imu660rc_init(IMU660RC_QUARTERNION_240HZ);
     stop_wheels();
 
@@ -164,11 +178,10 @@ void read_encoder_counts(float wheel_feedback_count[WHEEL_COUNT])
     uint8 i;
     int16 count;
 
-    for(i = 0; i < WHEEL_COUNT; i++)
+    for (i = 0; i < WHEEL_COUNT; i++)
     {
         count = encoder_get_count(encoder_index[i]);
         encoder_clear_count(encoder_index[i]);
-        // 将物理接线方向统一到控制坐标系的正轮速定义。
         wheel_feedback_count[i] = (float)(count * encoder_dir_sign[i]);
     }
 }
@@ -178,45 +191,44 @@ void set_wheel_pwm_with_deadband(wheel_enum wheel, float signed_pwm, uint8 deadb
     float corrected_pwm;
     uint32 duty;
 
-    if(wheel >= WHEEL_COUNT)
+    if (wheel >= WHEEL_COUNT)
     {
         return;
     }
 
-    // 电机线序差异在硬件边界收敛，混控层始终只处理统一坐标系。
-    if(0 == motor_output_enabled)
+    if (0 == motor_output_enabled)
     {
         signed_pwm = 0.0f;
     }
 
     corrected_pwm = signed_pwm * (float)motor_dir_sign[wheel];
-    if(0 != deadband_enabled)
+    if (0 != deadband_enabled)
     {
         corrected_pwm = apply_motor_pwm_deadband(wheel, corrected_pwm);
     }
     corrected_pwm = limit_float(corrected_pwm, -(float)MAX_PWM_DUTY, (float)MAX_PWM_DUTY);
 
-    if(corrected_pwm >= 0.0f)
+    if (corrected_pwm >= 0.0f)
     {
+        // 正转
         duty = (uint32)corrected_pwm;
-        if(duty > PWM_DUTY_MAX)
+        if (duty > PWM_DUTY_MAX)
         {
             duty = PWM_DUTY_MAX;
         }
-        // 双 PWM 输入保持一边为 0，避免同桥臂两个方向同时给占空比。
-        pwm_set_duty(motor_pwm2_pin[wheel], 0);
-        pwm_set_duty(motor_pwm1_pin[wheel], duty);
+        gpio_set_level(motor_dir_pin[wheel], GPIO_HIGH);
+        pwm_set_duty(motor_pwm_pin[wheel], duty);
     }
     else
     {
+        // 反转
         duty = (uint32)(-corrected_pwm);
-        if(duty > PWM_DUTY_MAX)
+        if (duty > PWM_DUTY_MAX)
         {
             duty = PWM_DUTY_MAX;
         }
-        // 反向输出同样先关另一方向，再给当前方向占空比。
-        pwm_set_duty(motor_pwm1_pin[wheel], 0);
-        pwm_set_duty(motor_pwm2_pin[wheel], duty);
+        gpio_set_level(motor_dir_pin[wheel], GPIO_LOW);
+        pwm_set_duty(motor_pwm_pin[wheel], duty);
     }
 }
 
@@ -229,7 +241,7 @@ void stop_wheels(void)
 {
     uint8 i;
 
-    for(i = 0; i < WHEEL_COUNT; i++)
+    for (i = 0; i < WHEEL_COUNT; i++)
     {
         set_wheel_pwm((wheel_enum)i, 0.0f);
     }

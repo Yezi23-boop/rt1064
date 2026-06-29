@@ -174,7 +174,7 @@ void command_to_velocity(motion_command_enum command, float move_speed, float tu
 
 void mecanum_mix(float vx, float vy, float vz, float vzt, float wheel_norm[WHEEL_COUNT])
 {
-    // 车体坐标约定：vx 向右、vy 向前、vz/vzt 逆时针；四轮顺序固定为 LF/LB/RF/RB。
+    // 车体坐标约定：vx 向右、vy 向前、vz/vzt 逆时针；四轮顺序固定为 LF/RF/LB/RB。
     wheel_norm[WHEEL_LF] = vy + vx - vz - vzt;
     wheel_norm[WHEEL_LB] = vy - vx - vz - vzt;
     wheel_norm[WHEEL_RF] = vy - vx + vz + vzt;

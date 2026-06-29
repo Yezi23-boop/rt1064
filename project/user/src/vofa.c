@@ -6,33 +6,14 @@
 #include "motion_math.h"
 #include "timebase.h"
 
-/** VOFA+ 曲线输出开关；遥控时保持低频输出，避免同一无线串口边发曲线边收摇杆导致延迟。 */
-#define VOFA_CURVE_OUTPUT_ENABLE (0)
-/** VOFA+ 曲线刷新周期，单位 ms；需要边看曲线边遥控时先用低频，避免挤占摇杆 RX。 */
-#define VOFA_SEND_PERIOD_MS (100)
-/** 位姿调试输出开关；置 1 后 FireWater 只发送 pose_x/y/yaw 和车体本周期 X/Y 位移增量。 */
-#define VOFA_POSE_ONLY_ENABLE (0)
-/** 摇杆接管底盘开关；先保持关闭，确认上位机发送格式后再置 1 接入主程序。 */
-#define VOFA_JOYSTICK_CONTROL_ENABLE (0)
-/** 摇杆命令超时时间，超过该时间未收到新坐标即停车，避免无线链路中断后保持旧速度。 */
-#define VOFA_JOYSTICK_TIMEOUT_MS (300u)
-/** MaterialJoystick 默认范围为 [-1000, 1000]，中点为 0。 */
-#define VOFA_JOYSTICK_MAX_ABS (1000)
-/** 小死区用于过滤摇杆中心回弹和手指轻微抖动。 */
-#define VOFA_JOYSTICK_DEADBAND (30)
-/** 单次从无线串口 FIFO 取出的字节数。 */
-#define VOFA_RX_CHUNK_SIZE (32u)
-/** 一行摇杆命令的最大缓存长度。 */
-#define VOFA_RX_LINE_SIZE (64u)
-
-static uint32 vofa_last_send_ms;       // 主循环写入并读取的曲线发送节拍，单位 ms；不在 ISR 中访问。
-static uint32 vofa_last_joystick_ms;   // 最近一次有效摇杆命令时间，单位 ms；超过超时窗口后强制停车。
-static uint8 vofa_joystick_active;     // 已收到过有效摇杆命令时置 1，避免上电未连接 VOFA+ 时反复 stop。
+static uint32 vofa_last_send_ms;             // 主循环写入并读取的曲线发送节拍，单位 ms；不在 ISR 中访问。
+static uint32 vofa_last_joystick_ms;         // 最近一次有效摇杆命令时间，单位 ms；超过超时窗口后强制停车。
+static uint8 vofa_joystick_active;           // 已收到过有效摇杆命令时置 1，避免上电未连接 VOFA+ 时反复 stop。
 static char vofa_rx_line[VOFA_RX_LINE_SIZE]; // 无线串口行缓存，只保存一行摇杆文本，不缓存历史命令。
-static uint8 vofa_rx_line_len;         // 当前行长度，不含结尾 NUL；溢出时整行丢弃。
-static int16 vofa_pending_x;           // 本轮主循环内最新摇杆 X，范围最终钳制到 [-1000, 1000]。
-static int16 vofa_pending_y;           // 本轮主循环内最新摇杆 Y，范围最终钳制到 [-1000, 1000]。
-static uint8 vofa_pending_valid;       // 1 表示本轮已解析到新坐标，只提交最后一帧以降低遥控滞后。
+static uint8 vofa_rx_line_len;               // 当前行长度，不含结尾 NUL；溢出时整行丢弃。
+static int16 vofa_pending_x;                 // 本轮主循环内最新摇杆 X，范围最终钳制到 [-1000, 1000]。
+static int16 vofa_pending_y;                 // 本轮主循环内最新摇杆 Y，范围最终钳制到 [-1000, 1000]。
+static uint8 vofa_pending_valid;             // 1 表示本轮已解析到新坐标，只提交最后一帧以降低遥控滞后。
 
 // 只解析 VOFA 文本协议中的 ASCII 数字；不依赖 ctype，避免不同 C 库 locale/宏实现带来的体积和可移植性问题。
 static uint8 vofa_is_digit(char ch)

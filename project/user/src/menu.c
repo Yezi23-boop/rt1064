@@ -15,7 +15,7 @@
 
 #define MENU_KEY_SCAN_PERIOD_MS (5)
 #define PLAYBACK_STEP_MS        (300u)
-#define HOME_DYNAMIC_REFRESH_MS (500u)
+#define HOME_DYNAMIC_REFRESH_MS (100u)
 #define HOME_ITEM_COUNT         (4)
 #define ROOT_PAGE_COUNT         (5)
 
@@ -135,9 +135,9 @@ static const menu_page_def_struct menu_pages[] =
     { MENU_PAGE_RUN_MODE,     MENU_PAGE_RUN,  0,                       enter_run_mode_page, 0, draw_mode_page,     0,                    handle_mode_event    },
     { MENU_PAGE_RUN_PLAYBACK, MENU_PAGE_RUN,  0,                       0,                   0, draw_playback_page, 0,                    handle_playback_event },
     { MENU_PAGE_RUN_EXECUTE,  MENU_PAGE_RUN,  500,                     0,                   0, draw_execute_page,  refresh_execute_page, handle_execute_event  },
-    { MENU_PAGE_DEBUG,        MENU_PAGE_HOME, HOME_DYNAMIC_REFRESH_MS, 0,                   0, draw_debug_page,    refresh_debug_page,   handle_debug_key     },
+    { MENU_PAGE_DEBUG,        MENU_PAGE_HOME, 500,                     0,                   0, draw_debug_page,    refresh_debug_page,   handle_debug_key     },
     { MENU_PAGE_INFO,         MENU_PAGE_HOME, 0,                       0,                   0, draw_info_page,     0,                    handle_info_key      },
-    { MENU_PAGE_ART_MAP,      MENU_PAGE_HOME, HOME_DYNAMIC_REFRESH_MS, 0,                   0, draw_art_map_page,  refresh_art_map_page, handle_art_map_key   },
+    { MENU_PAGE_ART_MAP,      MENU_PAGE_HOME, 500,                     0,                   0, draw_art_map_page,  refresh_art_map_page, handle_art_map_key   },
 };
 
 static void mark_redraw(void)

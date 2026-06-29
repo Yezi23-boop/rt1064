@@ -104,8 +104,8 @@
 typedef enum
 {
     WHEEL_LF = 0, /**< 左前轮。 */
-    WHEEL_LB,     /**< 左后轮。 */
     WHEEL_RF,     /**< 右前轮。 */
+    WHEEL_LB,     /**< 左后轮。 */
     WHEEL_RB,     /**< 右后轮。 */
 } wheel_enum;
 

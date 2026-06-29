@@ -82,18 +82,18 @@ void update_control_20ms(void)
     read_encoder_counts(control_status.wheel_feedback_count);
     drive_imu_sync_status(&control_status);
 
+    if (0 != drive_test_manual_pwm_active())
+    {
+        // 单轮点动直接写 PWM；闭环继续接管会掩盖接线/死区测试结果。
+        return;
+    }
+
     if (0 != update_startup_guard_20ms())
     {
         return;
     }
     drive_pose_update_20ms(control_status.wheel_feedback_count, control_status.current_yaw);
     set_motor_output_enabled(1);
-
-    if (0 != drive_test_manual_pwm_active())
-    {
-        // 单轮点动直接写 PWM；闭环继续接管会掩盖接线/死区测试结果。
-        return;
-    }
 
     if (0 != drive_test_try_update_speed_loop_20ms(&control_status))
     {

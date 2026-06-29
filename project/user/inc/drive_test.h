@@ -8,7 +8,7 @@
 /** 速度环闭环测试开关；置 1 后 20ms 控制只给四轮同一个目标 count，不走 IMU/麦轮混控。 */
 #define DRIVE_SPEED_LOOP_TEST_ENABLE (0)
 /** 速度环闭环测试目标，单位为 encoder count/20ms；可改成负值检查反馈方向。 */
-#define DRIVE_SPEED_LOOP_TEST_TARGET_COUNT (100.0f)
+#define DRIVE_SPEED_LOOP_TEST_TARGET_COUNT (-100.0f)
 /** 原地姿态角闭环测试开关；置 1 后上电只给目标 yaw 偏移，不给 vx/vy 平移。 */
 #define DRIVE_ATTITUDE_LOOP_TEST_ENABLE (0)
 /** 原地姿态角闭环测试目标偏移，单位 degree；0 表示锁住上电当前 yaw，手拨后自动回正。 */
@@ -32,7 +32,7 @@
 /** 小方形测试启动时间，单位 ms；默认等同上电 yaw 稳定/电机输出安全窗口。 */
 #define DRIVE_SQUARE_TEST_START_MS (IMU_YAW_STARTUP_STABLE_DELAY_MS)
 /** 小方形每条边运行时长，单位 ms；按场地实际一格距离微调。 */
-#define DRIVE_SQUARE_TEST_SIDE_DURATION_MS (3000)
+#define DRIVE_SQUARE_TEST_SIDE_DURATION_MS (1500)
 /** 小方形按位姿切段时的单段最大运行时间，超时自动停车。 */
 #define DRIVE_SQUARE_TEST_STEP_TIMEOUT_MS (DRIVE_SQUARE_TEST_SIDE_DURATION_MS)
 /** 小方形边长，单位 cm；默认一格。 */
@@ -47,10 +47,9 @@
  * 修改下面 4 个宏后重新编译下载即可，不经过菜单页面。 */
 #define DRIVE_WHEEL_JOG_ENABLE (0)
 #define DRIVE_WHEEL_JOG_WHEEL (WHEEL_RF)
-/* 可选轮位：WHEEL_LF 左前、WHEEL_LB 左后、WHEEL_RF 右前、WHEEL_RB 右后。 */
-#define DRIVE_WHEEL_JOG_PWM (300.0f)
-#define DRIVE_WHEEL_JOG_START_MS (IMU_YAW_STARTUP_STABLE_DELAY_MS + 500u)
-#define DRIVE_WHEEL_JOG_DURATION_MS (2000u)
+/* 可选轮位：WHEEL_LF 左前、WHEEL_RF 右前、WHEEL_LB 左后、WHEEL_RB 右后。 */
+#define DRIVE_WHEEL_JOG_PWM (1000.0f)
+#define DRIVE_WHEEL_JOG_START_MS (100u)
 
 /**
  * @brief 初始化代码开关式底盘调车测试状态。
