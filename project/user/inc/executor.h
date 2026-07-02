@@ -41,7 +41,8 @@ void executor_init(void);
  * @param[in] start_row 起始格子行号，用作局部坐标原点。
  * @param[in] start_col 起始格子列号，用作局部坐标原点。
  * @param[in] single_step 非 0 表示段间暂停等待人工继续。
- * @param[in] art_sync 非 0 表示每段停稳后等待 ART 地图同步并重解算。
+ * @param[in] art_sync 非 0 表示每个 waypoint 停稳后都先等 ART 稳定地图。
+ *                    普通 waypoint 只做同步确认；推箱 waypoint 还会检查 B/T 是否真的减少。
  * @note 会把当前位姿重置为以起始 C 格为原点；yaw 保留当前 IMU 相对航向。
  */
 void executor_start(const waypoint_struct *waypoints, uint16 count,
@@ -72,6 +73,12 @@ void executor_resume(void);
  * @return 1 表示当前 waypoint 已本地到点停车，等待主循环读取稳定 ART 地图并重解算。
  */
 uint8 executor_art_sync_pending(void);
+
+/**
+ * @brief 获取触发当前 ART 等待的已完成 waypoint 动作。
+ * @return 动作字符；大写表示刚完成推箱动作，小写表示普通移动，0 表示当前没有 ART 等待。
+ */
+char executor_get_art_sync_action(void);
 
 /**
  * @brief 主循环确认任务已完成后，把执行器置为 DONE。

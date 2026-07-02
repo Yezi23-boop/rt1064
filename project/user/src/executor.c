@@ -27,6 +27,7 @@ static uint8 segment_settling = 0;        // 1 表示已到 waypoint，正在段
 static uint16 segment_settle_elapsed_ms = 0; // 段间停稳累计时间，单位 ms，由 20ms 周期累加。
 static uint8 art_sync_enabled = 0;        // ART 来源执行时置 1，段末到点后交给主循环重识别/重解算。
 static uint8 segment_waiting_art = 0;     // 1 表示已停车并等待 ART 重解算，PIT 内只保持停止不做求解。
+static char last_completed_action = '\0'; // 最近完成并触发 ART 等待的 waypoint 动作；主循环用它区分普通移动/推箱确认。
 
 /* 地图 row 向下增大，而本地物理 Y 约定前进为正，因此 row 差值需要取反。 */
 static void grid_to_physical(uint8 row, uint8 col, float *x_cm, float *y_cm)
@@ -149,6 +150,7 @@ void executor_start(const waypoint_struct *waypoints, uint16 count,
     current_step = 0;
     exec_error = EXEC_ERROR_NONE;
     executor_reset_segment_state();
+    last_completed_action = '\0';
 
     /* 重置局部位置，以最新 C 格为原点；yaw 保留当前 IMU 相对航向。 */
     pose = drive_pose_get();
@@ -173,6 +175,7 @@ void executor_stop(void)
     exec_waypoint_count = 0;
     current_step = 0;
     art_sync_enabled = 0;
+    last_completed_action = '\0';
     executor_reset_segment_state();
 }
 
@@ -188,6 +191,15 @@ void executor_resume(void)
 uint8 executor_art_sync_pending(void)
 {
     return ((EXEC_STATE_RUNNING == exec_state) && (0 != segment_waiting_art)) ? 1u : 0u;
+}
+
+char executor_get_art_sync_action(void)
+{
+    if(0 == executor_art_sync_pending())
+    {
+        return '\0';
+    }
+    return last_completed_action;
 }
 
 void executor_finish_done(void)
@@ -232,22 +244,30 @@ static void executor_advance_after_segment(void)
     }
 }
 
-static void executor_enter_art_wait(void)
+static void executor_enter_art_wait(char action)
 {
     /* ART 识别和重解算可能耗时，不能放在 PIT ISR；这里只停车并暴露 pending 状态给主循环。 */
     segment_settling = 0;
     segment_settle_elapsed_ms = 0;
+    last_completed_action = action;
     segment_waiting_art = 1;
 }
 
 static void executor_finish_segment_settle(void)
 {
+    char action = '\0';
+
     segment_settling = 0;
     segment_settle_elapsed_ms = 0;
 
+    if((0 != exec_waypoints) && (current_step < exec_waypoint_count))
+    {
+        action = exec_waypoints[current_step].action;
+    }
+
     if (0 != art_sync_enabled)
     {
-        executor_enter_art_wait();
+        executor_enter_art_wait(action);
         return;
     }
 

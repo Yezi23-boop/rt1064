@@ -9,7 +9,9 @@
 
 // 这些开关式测试状态只在主循环轮询中写；manual_pwm_active 会被 20ms 控制链路读取。
 static uint8 translate_test_started;      // 平移测试是否已发出启动命令，避免主循环重复下发 set_motion_command。
-static uint8 translate_test_stopped;      // 平移测试是否已到时停车，避免反复调用 stop_motion。
+static uint8 translate_test_stopped;      // 平移测试是否已到距离停车，避免反复调用 stop_motion。
+static float translate_test_origin_x_cm;  // 平移测试起点 X，单位 cm。
+static float translate_test_origin_y_cm;  // 平移测试起点 Y，单位 cm。
 static uint8 square_test_started;         // 小方形测试是否已经锁定起点并进入第一段。
 static uint8 square_test_stopped;         // 小方形测试是否已完成四段或超时停车。
 static uint8 square_test_step;            // 当前小方形边序号，0..3 分别对应右、后、左、前。
@@ -23,6 +25,8 @@ void drive_test_init(void)
 {
     translate_test_started = 0;
     translate_test_stopped = 0;
+    translate_test_origin_x_cm = 0.0f;
+    translate_test_origin_y_cm = 0.0f;
     square_test_started = 0;
     square_test_stopped = 0;
     square_test_step = 0;
@@ -37,20 +41,30 @@ static void drive_translate_test_poll(void)
 {
 #if DRIVE_TRANSLATE_TEST_ENABLE
     uint32 now_ms = time_ms();
+    const drive_pose_struct *pose;
 
     /* 平移测试只负责发一次上层命令；实际姿态环和速度环仍在 PIT 里按 20ms 执行。 */
     if((0 == translate_test_started) && (now_ms >= DRIVE_TRANSLATE_TEST_START_MS))
     {
+        pose = drive_pose_get();
+        translate_test_origin_x_cm = pose->x_cm;
+        translate_test_origin_y_cm = pose->y_cm;
         set_motion_command(DRIVE_TRANSLATE_TEST_COMMAND, DRIVE_TRANSLATE_TEST_SPEED, 0.0f);
         translate_test_started = 1;
     }
 
-    if((0 != translate_test_started) &&
-       (0 == translate_test_stopped) &&
-       (now_ms >= (DRIVE_TRANSLATE_TEST_START_MS + DRIVE_TRANSLATE_TEST_DURATION_MS)))
+    if((0 != translate_test_started) && (0 == translate_test_stopped))
     {
-        stop_motion();
-        translate_test_stopped = 1;
+        float dx, dy;
+
+        pose = drive_pose_get();
+        dx = pose->x_cm - translate_test_origin_x_cm;
+        dy = pose->y_cm - translate_test_origin_y_cm;
+        if((dx * dx + dy * dy) >= (DRIVE_TRANSLATE_TEST_DISTANCE_CM * DRIVE_TRANSLATE_TEST_DISTANCE_CM))
+        {
+            stop_motion();
+            translate_test_stopped = 1;
+        }
     }
 #endif
 }

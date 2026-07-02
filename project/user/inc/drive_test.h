@@ -18,10 +18,10 @@
 #define DRIVE_TRANSLATE_TEST_ENABLE (0)
 /** 平移测试启动时间，单位 ms；默认等同上电 yaw 稳定/电机输出安全窗口。 */
 #define DRIVE_TRANSLATE_TEST_START_MS (IMU_YAW_STARTUP_STABLE_DELAY_MS)
-/** 平移测试持续时间，单位 ms；到时自动 stop_motion()。 */
-#define DRIVE_TRANSLATE_TEST_DURATION_MS (3000u)
+/** 平移测试目标距离，单位 cm；到位后自动 stop_motion()。 */
+#define DRIVE_TRANSLATE_TEST_DISTANCE_CM (100.0f)
 /** 平移测试方向；可改为 MOTION_BACKWARD/MOTION_LEFT/MOTION_RIGHT 分别测试四个基本方向。 */
-#define DRIVE_TRANSLATE_TEST_COMMAND (MOTION_RIGHT)
+#define DRIVE_TRANSLATE_TEST_COMMAND (MOTION_BACKWARD)
 /** 平移测试速度幅值，范围 [0, 1]，先用低速观察姿态保持。 */
 #define DRIVE_TRANSLATE_TEST_SPEED (1.0f)
 

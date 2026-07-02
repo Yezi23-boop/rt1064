@@ -15,11 +15,9 @@
 /** 第一版上板使用的保守目标轮速上限，单位为 encoder count/20ms。 */
 #define MAX_WHEEL_TARGET_COUNT (100.0f)
 /** 前后方向编码器增量到地面位移的标定系数，单位 cm/count；上下准时保持该值不动。 */
-#define POSE_Y_CM_PER_COUNT (0.0086f)
+#define POSE_Y_CM_PER_COUNT (0.0085f)//86
 /** 左右横移编码器增量到地面位移的标定系数，单位 cm/count；麦轮横移滑移通常需要单独标定。 */
-#define POSE_X_CM_PER_COUNT (0.0072f)
-/** 兼容旧调试说明的基础比例；新代码实际使用 X/Y 两个独立比例。 */
-#define POSE_CM_PER_COUNT (POSE_Y_CM_PER_COUNT)
+#define POSE_X_CM_PER_COUNT (0.0085f)
 /** 位姿 X 轴方向校正；当前取 +1，表示麦轮反解的正 X 直接对应右移为正。 */
 #define POSE_X_DIR_SIGN (1.0f)
 /** 位姿 Y 轴方向校正；当前取 +1，表示麦轮反解的正 Y 直接对应前进为正。 */
@@ -33,18 +31,18 @@
 /** 左前轮最小有效 PWM，占空比量程同 MAX_PWM_DUTY/PWM_DUTY_MAX。 */
 #define MOTOR_PWM_DEADBAND_LF (500)
 /** 左后轮最小有效 PWM，占空比量程同 MAX_PWM_DUTY/PWM_DUTY_MAX。 */
-#define MOTOR_PWM_DEADBAND_LB (700)
+#define MOTOR_PWM_DEADBAND_LB (500)
 /** 右前轮最小有效 PWM，占空比量程同 MAX_PWM_DUTY/PWM_DUTY_MAX。 */
 #define MOTOR_PWM_DEADBAND_RF (500)
 /** 右后轮最小有效 PWM，占空比量程同 MAX_PWM_DUTY/PWM_DUTY_MAX。 */
-#define MOTOR_PWM_DEADBAND_RB (400)
+#define MOTOR_PWM_DEADBAND_RB (500)
 
 /** yaw 姿态 PD 比例系数；误差单位为 degree，输出为归一化姿态修正分量 vzt。 */
-#define YAW_KP (0.08f)
+#define YAW_KP (0.05f)
 /** yaw 姿态 PD 微分系数；不加入积分项，避免静态角度误差累积导致过冲。 */
 #define YAW_KD (0.0001f)
 /** yaw 姿态环硬死区，单位 degree；死区内不输出姿态修正，避免零点附近 IMU 小抖动带动车轮。 */
-#define YAW_DEADBAND_DEG (0.5f)
+#define YAW_DEADBAND_DEG (0.15f)
 /** 姿态环允许输出的最大归一化旋转分量。 */
 #define MAX_VZ (1.0f)
 /** 平移/路径执行时姿态保持允许叠加的最大旋转修正，避免横移被 yaw 环抢占。 */
@@ -68,7 +66,7 @@
 /** 四轮增量式速度 PID 微分初值；第一版关闭微分。 */
 #define WHEEL_PID_KD (0.0f)
 /** 目标轮速小于该阈值时认为该轮应停转，不让编码器微小抖动触发速度环补偿。 */
-#define WHEEL_TARGET_STOP_EPS_COUNT (1.0f)
+#define WHEEL_TARGET_STOP_EPS_COUNT (0.5f)
 /** 目标轮速达到该阈值才允许电机死区补偿，避免段末 yaw 小修正被放大成抖动。 */
 #define MOTOR_PWM_DEADBAND_TARGET_THRESHOLD_COUNT (25.0f)
 
@@ -80,9 +78,9 @@
 #define DRIVE_START_PWM_RAMP_STEP (100)
 
 /** 路径跟踪 PID 比例系数；误差单位为 cm，输出为归一化速度。 */
-#define PATH_KP (0.08f)
+#define PATH_KP (0.1f)
 /** 路径跟踪 PID 积分系数；当前默认 0，避免里程计漂移时累积横向误差。 */
-#define PATH_KI (0.0f)
+#define PATH_KI (0.01f)
 /** 路径跟踪 PID 微分系数；当前默认 0，避免 20ms 位姿增量噪声放大。 */
 #define PATH_KD (0.0f)
 /** 路径跟踪 PID 最大输出速度，归一化到 MAX_WHEEL_TARGET_COUNT。 */

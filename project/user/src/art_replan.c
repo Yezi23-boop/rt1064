@@ -1,17 +1,21 @@
 #include "zf_common_headfile.h"
 #include "art_replan.h"
 #include "drive_config.h"
+#include "drive_pose.h"
 #include "executor.h"
 #include "map_utils.h"
 #include "openart_uart.h"
 #include "solver.h"
 #include "timebase.h"
 
+#define ART_LAUNCH_DELAY_MS  (5000u)  /**< 发车前等人离场延迟，单位 ms。 */
+
 typedef enum
 {
-    ART_REPLAN_IDLE = 0,   /**< 未等待 ART 稳定帧，tick 只处理 executor 段末请求。 */
-    ART_REPLAN_INITIAL,    /**< 初始 ART 求解阶段，成功后必须等待 K3 人工确认发车。 */
-    ART_REPLAN_SEGMENT,    /**< 段末低频重定位阶段，成功后直接续跑 executor。 */
+    ART_REPLAN_IDLE = 0,         /**< 空闲态：不主动等待 ART，只响应 executor 触发的同步请求。 */
+    ART_REPLAN_WAIT_LAUNCH,      /**< 发车前等待态：持续收图，但只计时不求解。 */
+    ART_REPLAN_INITIAL,          /**< 首次建图/求解：拿到稳定 ART 地图后直接启动执行器。 */
+    ART_REPLAN_SEGMENT,          /**< waypoint 段末同步：每到一个点都按 ART 最新地图做确认。 */
 } art_replan_phase_enum;
 
 static art_replan_phase_enum art_replan_phase = ART_REPLAN_IDLE; // 主循环写入和读取；决定稳定帧成功后的启动策略。
@@ -20,8 +24,11 @@ static uint8 art_candidate_valid = 0;                            // 1 表示 `ar
 static uint8 art_stable_count = 0;                               // 连续一致的新完整帧计数，达到 EXEC_ART_STABLE_FRAMES 才求解。
 static uint32 art_last_seen_frame = 0;                            // 已处理到的 OpenART 帧号；用于丢弃等待前的旧帧。
 static uint32 art_wait_start_ms = 0;                              // 本轮 ART 等待起点，单位 ms；用于统一初始/段末超时。
-static executor_error_enum art_timeout_error = EXEC_ERROR_ART_TIMEOUT; // 等待过程中若先遇到坏图，超时后映射为更具体错误码。
 static uint8 art_launch_pending = 0;                              // 初始 ART 求解成功后置 1，必须 K3 确认才允许 executor_start。
+static uint32 art_launch_delay_start_ms = 0;                      // 5 秒延迟起点。
+static uint8 confirmed_box_count = 0;                             // 上一次被 ART 认定为“同步完成”的箱子数基线。
+static uint8 confirmed_target_count = 0;                          // 上一次被 ART 认定为“同步完成”的目标数基线。
+static uint8 confirmed_counts_valid = 0;                           // 1 表示上面的 B/T 基线有效，可用于判断是否发生了消除。
 
 static void art_replan_update_reset(art_replan_update_struct *update)
 {
@@ -38,8 +45,8 @@ static void art_replan_update_reset(art_replan_update_struct *update)
 
 static void art_replan_wait_fresh_frame(void)
 {
-    // 进入等待态时丢掉半帧和旧缓冲，只把之后完成的 OpenART 帧作为候选。
-    // 这样可以避免上一页残留数据触发“刚进入执行页就用旧地图重算”。
+    // 切入等待态时，先丢掉半帧和旧缓冲。
+    // 这样后续只有“等待之后新产生的完整帧”才会参与稳定性判断。
     openart_uart_discard_pending();
     art_candidate_valid = 0;
     art_stable_count = 0;
@@ -51,9 +58,9 @@ static void art_replan_begin(art_replan_phase_enum phase, art_replan_update_stru
     art_replan_phase = phase;
     art_replan_wait_fresh_frame();
     art_wait_start_ms = time_ms();
-    art_timeout_error = EXEC_ERROR_ART_TIMEOUT;
     if(0 != update)
     {
+        // 初始阶段强调“等 ART 建图”，段末阶段强调“等 ART 同步”。
         update->run_state = (ART_REPLAN_INITIAL == phase) ? "Wait ART" : "ART Sync";
         update->redraw = 1;
     }
@@ -80,8 +87,8 @@ static uint8 art_get_stable_map(const map_source_struct **source_out)
     }
     art_last_seen_frame = frame;
 
-    // OpenART 屏幕再识别可能在页面刷新瞬间抖动；只有连续完整帧完全一致，
-    // 才把地图交给 BFS。稳定计数按“完成帧”推进，而不是按主循环轮询次数推进。
+    // OpenART 在页面刷新瞬间会抖动，所以这里只接受“连续完整帧一致”的地图。
+    // 稳定计数按帧推进，不按主循环次数推进。
     if((0 != art_candidate_valid) && (0 != map_rows_equal(art_candidate_rows, source)))
     {
         if(art_stable_count < EXEC_ART_STABLE_FRAMES)
@@ -112,8 +119,8 @@ static uint8 art_stats_done(const map_scan_stats_struct *stats)
 
 static uint8 art_stats_valid_for_solve(const map_scan_stats_struct *stats)
 {
-    // BFS 只能处理“一个车、箱子数等于目标数、数量不超过数组容量”的快照。
-    // 不满足时继续等新稳定帧，而不是在可疑识别结果上规划车辆动作。
+    // BFS 只接受可解的虚拟地图快照：必须只有一个车，且箱子数等于目标数。
+    // 不满足时继续等新稳定帧，不拿可疑识别结果硬算路径。
     if(1u != stats->car_count)
     {
         return 0;
@@ -127,6 +134,38 @@ static uint8 art_stats_valid_for_solve(const map_scan_stats_struct *stats)
         return 0;
     }
     return (0 != stats->box_count) ? 1u : 0u;
+}
+
+static void art_update_confirmed_counts(const map_scan_stats_struct *stats)
+{
+    // 记录当前稳定帧的 B/T 数量，作为下一次段末同步的对照基线。
+    confirmed_box_count = stats->box_count;
+    confirmed_target_count = stats->target_count;
+    confirmed_counts_valid = 1;
+}
+
+static uint8 art_stats_count_decreased(const map_scan_stats_struct *stats)
+{
+    if(0 == confirmed_counts_valid)
+    {
+        return 0;
+    }
+    // 只要 B 或 T 真的减少，就说明上位机已经把这次推箱结果消掉了。
+    if(stats->box_count < confirmed_box_count)
+    {
+        return 1;
+    }
+    if(stats->target_count < confirmed_target_count)
+    {
+        return 1;
+    }
+    return 0;
+}
+
+static uint8 art_action_is_push(char action)
+{
+    // 大写动作保留为“推箱语义”；普通小写只表示普通移动同步。
+    return ((action >= 'A') && (action <= 'Z')) ? 1u : 0u;
 }
 
 static void art_replan_save_snapshot(const art_replan_context_struct *context,
@@ -182,6 +221,7 @@ static void art_handle_stable_map(const art_replan_context_struct *context,
     {
         *context->start_row = stats.car_row;
         *context->start_col = stats.car_col;
+        art_update_confirmed_counts(&stats);
         clear_result(context->result);
         *context->elapsed_ms = 0;
         art_replan_cancel();
@@ -201,24 +241,59 @@ static void art_handle_stable_map(const art_replan_context_struct *context,
 
     if(0 == art_stats_valid_for_solve(&stats))
     {
-        art_timeout_error = EXEC_ERROR_ART_SYNC;
-        // 错帧本身不能作为下一轮稳定候选，否则同一个坏识别会被反复求解失败。
+        // 地图还没稳定到可解，重新进入稳定性等待，不在这张图上继续推进。
         art_replan_restart_stability();
         if(0 != update)
         {
-            update->run_state = "Bad ART";
+            update->run_state = "ART Retry";
             update->redraw = 1;
         }
-        printf("ART_SYNC_BAD frame=%lu C=%d B=%d T=%d\r\n",
-            (unsigned long)openart_uart_get_frame_count(),
-            stats.car_count,
-            stats.box_count,
-            stats.target_count);
         return;
     }
 
-    // 求解可能占用较长主循环时间；求解前后清空未解析字节，保证下一次同步等待的是
-    // 求解完成后的新屏幕状态，而不是求解期间积压的旧画面。
+    if(ART_REPLAN_INITIAL == phase)
+    {
+        // 初次求解只建立基线，不拿 B/T 变化做成败判断。
+        art_update_confirmed_counts(&stats);
+    }
+    else if(ART_REPLAN_SEGMENT == phase)
+    {
+        char sync_action = executor_get_art_sync_action();
+
+        if(0 == art_action_is_push(sync_action))
+        {
+            // 普通 waypoint：只要 ART 稳定帧来了，就认为虚拟状态已同步，刷新基线即可。
+            art_update_confirmed_counts(&stats);
+        }
+        else if(0 != art_stats_count_decreased(&stats))
+        {
+            // 推箱 waypoint：必须看到 B/T 真的减少，才算上位机已确认这次箱子消除。
+            art_update_confirmed_counts(&stats);
+            if(0 != update)
+            {
+                update->run_state = "Box OK";
+            }
+        }
+        else
+        {
+            // 推箱动作后 B/T 没变，说明这次箱子任务还没被 ART 接受，后续应重算/重试。
+            if(0 != update)
+            {
+                update->run_state = "Push Retry";
+            }
+            printf("ART_PUSH_NOT_CONFIRMED action=%c frame=%lu B=%d/%d T=%d/%d C=%d,%d\r\n",
+                sync_action,
+                (unsigned long)openart_uart_get_frame_count(),
+                stats.box_count,
+                confirmed_box_count,
+                stats.target_count,
+                confirmed_target_count,
+                stats.car_row,
+                stats.car_col);
+        }
+    }
+
+    // 求解可能占用较长主循环时间；求解前后清空未解析字节，避免旧画面积压进下一轮同步。
     openart_uart_discard_pending();
     start_ms = time_ms();
     if(0 != solve_map(context->snapshot, context->result))
@@ -232,12 +307,13 @@ static void art_handle_stable_map(const art_replan_context_struct *context,
         }
         if(ART_REPLAN_INITIAL == phase)
         {
-            // 初次 ART 求解成功只进入待发车状态，必须由 K3 确认，避免识别到误帧后自动启动。
-            art_replan_wait_launch(context, &stats, update);
+            // 初始阶段求解成功后直接进入执行。
+            art_replan_start_executor(context, &stats, update);
+            art_replan_cancel();
         }
         else
         {
-            // 分段重解算来自执行器的同步请求，车辆已处在执行流程中，稳定帧通过后直接续跑。
+            // 段末重解算来自执行器的同步请求，稳定帧通过后直接续跑，不再额外停一层。
             art_replan_start_executor(context, &stats, update);
             art_replan_cancel();
             if(0 != update)
@@ -254,23 +330,18 @@ static void art_handle_stable_map(const art_replan_context_struct *context,
         if((ART_REPLAN_INITIAL == phase) && (0 != update))
         {
             update->enter_execute = 1;
+            update->redraw = 1;
         }
     }
     else
     {
         *context->elapsed_ms = time_ms() - start_ms;
         art_replan_wait_fresh_frame();
-        art_timeout_error = EXEC_ERROR_ART_PLAN;
         if(0 != update)
         {
-            update->playback = ART_REPLAN_PLAYBACK_FAIL;
-            update->run_state = "Plan Fail";
+            update->run_state = "ART Retry";
             update->redraw = 1;
         }
-        printf("ART_REPLAN_FAIL phase=%d %s time=%lu\r\n",
-            phase,
-            context->result->message,
-            (unsigned long)*context->elapsed_ms);
     }
 }
 
@@ -282,12 +353,22 @@ void art_replan_cancel(void)
     art_last_seen_frame = 0;
     art_wait_start_ms = 0;
     art_launch_pending = 0;
+    art_launch_delay_start_ms = 0;
 }
 
 void art_replan_begin_initial(art_replan_update_struct *update)
 {
     art_replan_update_reset(update);
-    art_replan_begin(ART_REPLAN_INITIAL, update);
+    art_replan_phase = ART_REPLAN_WAIT_LAUNCH;
+    art_launch_delay_start_ms = time_ms();
+    confirmed_box_count = 0;
+    confirmed_target_count = 0;
+    confirmed_counts_valid = 0;
+    if(0 != update)
+    {
+        update->run_state = "Wait 5s";
+        update->redraw = 1;
+    }
 }
 
 void art_replan_tick(const art_replan_context_struct *context,
@@ -310,17 +391,31 @@ void art_replan_tick(const art_replan_context_struct *context,
         return;
     }
 
+    if(ART_REPLAN_WAIT_LAUNCH == art_replan_phase)
+    {
+        if((time_ms() - art_launch_delay_start_ms) >= ART_LAUNCH_DELAY_MS)
+        {
+            art_replan_begin(ART_REPLAN_INITIAL, update);
+        }
+        else
+        {
+            if(0 != update)
+            {
+                update->run_state = "Wait 5s";
+            }
+        }
+        return;
+    }
+
     if((time_ms() - art_wait_start_ms) >= EXEC_ART_SYNC_TIMEOUT_MS)
     {
-        // 超时错误码保留最近一次失败原因：一直没有稳定帧是 TIMEOUT，稳定坏帧则升级为 SYNC/PLAN。
-        art_replan_cancel();
-        executor_set_error(art_timeout_error);
+        // ART 超时不停车，重启等待继续获取最新地图。
+        art_replan_begin(art_replan_phase, update);
         if(0 != update)
         {
-            update->run_state = "ART Timeout";
+            update->run_state = "ART Retry";
             update->redraw = 1;
         }
-        printf("ART_SYNC_TIMEOUT err=%d\r\n", art_timeout_error);
         return;
     }
 
