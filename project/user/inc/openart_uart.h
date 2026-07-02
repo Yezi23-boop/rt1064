@@ -74,6 +74,19 @@ void openart_uart_discard_pending(void);
 uint8 openart_find_player_cell(uint8 *row, uint8 *col, uint8 *count);
 
 /**
+ * @brief 获取最近一次 OpenART 视觉中心点样本。
+ *
+ * OpenART 发送 `PLAYER_CENTER_GRID col_q,row_q valid`，其中 q 单位为 1/100 格，
+ * 例如 `750,650` 表示列 7.50、行 6.50。
+ *
+ * @param[out] col_q 列坐标，单位为 1/100 格，可传 NULL。
+ * @param[out] row_q 行坐标，单位为 1/100 格，可传 NULL。
+ * @param[out] valid 1 表示当前样本有效；0 表示无有效中心点。
+ * @return 自 `openart_uart_init()` 后累计接收的中心点样本序号。
+ */
+uint32 openart_get_player_center(uint16 *col_q, uint16 *row_q, uint8 *valid);
+
+/**
  * @brief 从 UART1 ISR 投递一个接收字节。
  *
  * @param[in] data UART1 收到的原始字节。

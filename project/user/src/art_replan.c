@@ -29,6 +29,8 @@ static uint32 art_launch_delay_start_ms = 0;                      // 5 秒延迟
 static uint8 confirmed_box_count = 0;                             // 上一次被 ART 认定为“同步完成”的箱子数基线。
 static uint8 confirmed_target_count = 0;                          // 上一次被 ART 认定为“同步完成”的目标数基线。
 static uint8 confirmed_counts_valid = 0;                           // 1 表示上面的 B/T 基线有效，可用于判断是否发生了消除。
+static uint32 art_last_player_center_sample = 0;                   // 本轮段末同步已处理到的视觉中心样本序号。
+static uint8 art_center_sampling_was_active = 0;                   // 1 表示上一轮已经处在段末中心采样窗口。
 
 static void art_replan_update_reset(art_replan_update_struct *update)
 {
@@ -51,6 +53,7 @@ static void art_replan_wait_fresh_frame(void)
     art_candidate_valid = 0;
     art_stable_count = 0;
     art_last_seen_frame = openart_uart_get_frame_count();
+    art_last_player_center_sample = openart_get_player_center(0, 0, 0);
 }
 
 static void art_replan_begin(art_replan_phase_enum phase, art_replan_update_struct *update)
@@ -191,6 +194,34 @@ static void art_replan_start_executor(const art_replan_context_struct *context,
     }
 }
 
+static void art_replan_collect_player_center(void)
+{
+    uint16 center_col_q;
+    uint16 center_row_q;
+    uint8 center_valid;
+    uint32 sample_count;
+    uint8 sampling_active = executor_art_center_sampling_active();
+
+    if(0 == sampling_active)
+    {
+        art_center_sampling_was_active = 0;
+        return;
+    }
+    if(0 == art_center_sampling_was_active)
+    {
+        art_last_player_center_sample = openart_get_player_center(0, 0, 0);
+        art_center_sampling_was_active = 1;
+        return;
+    }
+    sample_count = openart_get_player_center(&center_col_q, &center_row_q, &center_valid);
+    if((sample_count == art_last_player_center_sample) || (0 == center_valid))
+    {
+        return;
+    }
+    art_last_player_center_sample = sample_count;
+    (void)executor_apply_art_player_center(center_col_q, center_row_q, sample_count);
+}
+
 static void art_replan_wait_launch(const art_replan_context_struct *context,
                                    const map_scan_stats_struct *stats,
                                    art_replan_update_struct *update)
@@ -315,6 +346,7 @@ static void art_handle_stable_map(const art_replan_context_struct *context,
         {
             // 段末重解算来自执行器的同步请求，稳定帧通过后直接续跑，不再额外停一层。
             art_replan_start_executor(context, &stats, update);
+            (void)executor_commit_art_player_center();
             art_replan_cancel();
             if(0 != update)
             {
@@ -388,8 +420,11 @@ void art_replan_tick(const art_replan_context_struct *context,
 
     if(ART_REPLAN_IDLE == art_replan_phase)
     {
+        art_replan_collect_player_center();
         return;
     }
+
+    art_replan_collect_player_center();
 
     if(ART_REPLAN_WAIT_LAUNCH == art_replan_phase)
     {

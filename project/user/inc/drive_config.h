@@ -62,7 +62,7 @@
 /** 四轮增量式速度 PID 比例初值；上板后根据 encoder count/20ms 反馈调整。 */
 #define WHEEL_PID_KP (5.0f)
 /** 四轮增量式速度 PID 积分初值；单位随 count/20ms 误差和 PWM 输出共同确定。 */
-#define WHEEL_PID_KI (0.5f)
+#define WHEEL_PID_KI (1.0f)
 /** 四轮增量式速度 PID 微分初值；第一版关闭微分。 */
 #define WHEEL_PID_KD (0.0f)
 /** 目标轮速小于该阈值时认为该轮应停转，不让编码器微小抖动触发速度环补偿。 */
@@ -92,7 +92,11 @@
 /** 执行器到点需要连续满足阈值的 20ms 周期数，用于过滤瞬时越界和惯性抖动。 */
 #define EXEC_ARRIVAL_STABLE_TICKS (3u)
 /** waypoint 切换前的停稳时间，单位 ms；只在拐点/路径点边界停，不拆连续直线段。 */
-#define EXEC_SEGMENT_SETTLE_MS (500u)
+#define EXEC_SEGMENT_SETTLE_MS (600u)
+/** 推箱动作目标点越界补偿开关；只作用于 U/D/L/R，不改变普通移动。 */
+#define EXEC_PUSH_OVERSHOOT_ENABLE (0)
+/** 推箱动作额外前压比例，单位为格；0.20 表示每格 20cm 时多走 4cm。 */
+#define EXEC_PUSH_OVERSHOOT_RATIO (0.20f)
 /** ART 来源执行时，初始/段末等待稳定完整地图的最长时间，单位 ms。 */
 #define EXEC_ART_SYNC_TIMEOUT_MS (3000u)
 /** ART 来源执行时，完整地图需要连续一致的新帧数量。 */

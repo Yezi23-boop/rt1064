@@ -4,6 +4,8 @@
 #include "motion_math.h"
 #include <math.h>
 
+#define ART_PLAYER_CENTER_FILTER_WINDOW (3u)
+
 /* 执行器状态由主循环启动/停止、PIT_CH1 20ms 推进共同访问；
  * 这里不做阻塞等待，ART 同步等待交给主循环处理。 */
 static executor_state_enum exec_state = EXEC_STATE_IDLE; // 主循环查询、PIT_CH1 更新；非 IDLE 时底盘可能被执行器占用。
@@ -28,12 +30,29 @@ static uint16 segment_settle_elapsed_ms = 0; // 段间停稳累计时间，单�
 static uint8 art_sync_enabled = 0;        // ART 来源执行时置 1，段末到点后交给主循环重识别/重解算。
 static uint8 segment_waiting_art = 0;     // 1 表示已停车并等待 ART 重解算，PIT 内只保持停止不做求解。
 static char last_completed_action = '\0'; // 最近完成并触发 ART 等待的 waypoint 动作；主循环用它区分普通移动/推箱确认。
+static uint16 art_player_center_x_history[ART_PLAYER_CENTER_FILTER_WINDOW];
+static uint16 art_player_center_y_history[ART_PLAYER_CENTER_FILTER_WINDOW];
+static uint8 art_player_center_history_count = 0;
+static uint8 art_player_center_history_head = 0;
+static uint32 art_player_center_history_frame[ART_PLAYER_CENTER_FILTER_WINDOW];
+static uint16 art_player_center_median_col_q = 0;
+static uint16 art_player_center_median_row_q = 0;
+static uint8 art_player_center_median_valid = 0;
 
 /* 地图 row 向下增大，而本地物理 Y 约定前进为正，因此 row 差值需要取反。 */
 static void grid_to_physical(uint8 row, uint8 col, float *x_cm, float *y_cm)
 {
     *x_cm = (float)(col - start_col) * GRID_SIZE_CM;
     *y_cm = -(float)(row - start_row) * GRID_SIZE_CM;
+}
+
+static void grid_q_to_physical(uint16 row_q, uint16 col_q, float *x_cm, float *y_cm)
+{
+    float col_center_q = ((float)start_col + 0.5f) * 100.0f;
+    float row_center_q = ((float)start_row + 0.5f) * 100.0f;
+
+    *x_cm = (((float)col_q - col_center_q) / 100.0f) * GRID_SIZE_CM;
+    *y_cm = -(((float)row_q - row_center_q) / 100.0f) * GRID_SIZE_CM;
 }
 
 void executor_init(void)
@@ -52,6 +71,31 @@ static void executor_reset_segment_state(void)
     path_pid_reset(&y_pid);
 }
 
+static uint16 median_u16_3(uint16 a, uint16 b, uint16 c)
+{
+    if(a > b)
+    {
+        uint16 t = a; a = b; b = t;
+    }
+    if(b > c)
+    {
+        uint16 t = b; b = c; c = t;
+    }
+    if(a > b)
+    {
+        uint16 t = a; a = b; b = t;
+    }
+    return b;
+}
+
+static uint8 center_q_matches_current_cell(uint16 row_q, uint16 col_q)
+{
+    uint8 center_row = (uint8)(row_q / 100u);
+    uint8 center_col = (uint8)(col_q / 100u);
+
+    return ((center_row == start_row) && (center_col == start_col)) ? 1u : 0u;
+}
+
 static uint8 action_is_x_axis(char action)
 {
     return (('l' == action) || ('L' == action) || ('r' == action) || ('R' == action)) ? 1u : 0u;
@@ -60,6 +104,11 @@ static uint8 action_is_x_axis(char action)
 static uint8 action_is_y_axis(char action)
 {
     return (('u' == action) || ('U' == action) || ('d' == action) || ('D' == action)) ? 1u : 0u;
+}
+
+static uint8 action_is_push(char action)
+{
+    return ((action >= 'A') && (action <= 'Z')) ? 1u : 0u;
 }
 
 static float abs_float(float value)
@@ -125,6 +174,39 @@ static void move_to_target(float target_x, float target_y, char action)
     world_velocity_to_body(vx_world, vy_world, pose->yaw_deg, &vx_body, &vy_body);
 
     set_motion(vx_body, vy_body);
+}
+
+static void apply_push_overshoot(float *target_x, float *target_y, char action)
+{
+#if EXEC_PUSH_OVERSHOOT_ENABLE
+    float overshoot_cm = GRID_SIZE_CM * EXEC_PUSH_OVERSHOOT_RATIO;
+
+    if(0 == action_is_push(action))
+    {
+        return;
+    }
+
+    if('L' == action)
+    {
+        *target_x -= overshoot_cm;
+    }
+    else if('R' == action)
+    {
+        *target_x += overshoot_cm;
+    }
+    else if('U' == action)
+    {
+        *target_y += overshoot_cm;
+    }
+    else if('D' == action)
+    {
+        *target_y -= overshoot_cm;
+    }
+#else
+    (void)target_x;
+    (void)target_y;
+    (void)action;
+#endif
 }
 
 void executor_start(const waypoint_struct *waypoints, uint16 count,
@@ -193,6 +275,15 @@ uint8 executor_art_sync_pending(void)
     return ((EXEC_STATE_RUNNING == exec_state) && (0 != segment_waiting_art)) ? 1u : 0u;
 }
 
+uint8 executor_art_center_sampling_active(void)
+{
+    if((EXEC_STATE_RUNNING != exec_state) || (0 == art_sync_enabled))
+    {
+        return 0;
+    }
+    return ((0 != segment_settling) || (0 != segment_waiting_art)) ? 1u : 0u;
+}
+
 char executor_get_art_sync_action(void)
 {
     if(0 == executor_art_sync_pending())
@@ -216,6 +307,77 @@ void executor_set_error(executor_error_enum error)
     exec_error = error;
     exec_state = EXEC_STATE_ERROR;
     executor_reset_segment_state();
+}
+
+uint8 executor_apply_art_player_center(uint16 center_col_q, uint16 center_row_q, uint32 sample_count)
+{
+    uint8 index;
+    uint8 sample_index;
+
+    index = art_player_center_history_head;
+    for(sample_index = 0; sample_index < art_player_center_history_count; sample_index++)
+    {
+        if(sample_count == art_player_center_history_frame[sample_index])
+        {
+            return 0;
+        }
+    }
+
+    art_player_center_x_history[index] = center_col_q;
+    art_player_center_y_history[index] = center_row_q;
+    art_player_center_history_frame[index] = sample_count;
+    art_player_center_history_head++;
+    if(art_player_center_history_head >= ART_PLAYER_CENTER_FILTER_WINDOW)
+    {
+        art_player_center_history_head = 0;
+    }
+    if(art_player_center_history_count < ART_PLAYER_CENTER_FILTER_WINDOW)
+    {
+        art_player_center_history_count++;
+    }
+
+    if(art_player_center_history_count < ART_PLAYER_CENTER_FILTER_WINDOW)
+    {
+        return 0;
+    }
+
+    art_player_center_median_col_q = median_u16_3(art_player_center_x_history[0],
+                                                  art_player_center_x_history[1],
+                                                  art_player_center_x_history[2]);
+    art_player_center_median_row_q = median_u16_3(art_player_center_y_history[0],
+                                                  art_player_center_y_history[1],
+                                                  art_player_center_y_history[2]);
+    art_player_center_median_valid = 1;
+    return 1;
+}
+
+uint8 executor_commit_art_player_center(void)
+{
+    const drive_pose_struct *pose;
+    float corrected_x_cm;
+    float corrected_y_cm;
+    float pose_yaw;
+
+    if(0 == art_player_center_median_valid)
+    {
+        return 0;
+    }
+    if(0 == center_q_matches_current_cell(art_player_center_median_row_q,
+                                          art_player_center_median_col_q))
+    {
+        art_player_center_median_valid = 0;
+        return 0;
+    }
+
+    grid_q_to_physical(art_player_center_median_row_q,
+                       art_player_center_median_col_q,
+                       &corrected_x_cm,
+                       &corrected_y_cm);
+    pose = drive_pose_get();
+    pose_yaw = pose->yaw_deg;
+    drive_pose_reset(corrected_x_cm, corrected_y_cm, pose_yaw);
+    art_player_center_median_valid = 0;
+    return 1;
 }
 
 static void executor_enter_segment_settle(void)
@@ -251,6 +413,9 @@ static void executor_enter_art_wait(char action)
     segment_settle_elapsed_ms = 0;
     last_completed_action = action;
     segment_waiting_art = 1;
+    art_player_center_history_count = 0;
+    art_player_center_history_head = 0;
+    art_player_center_median_valid = 0;
 }
 
 static void executor_finish_segment_settle(void)
@@ -303,6 +468,7 @@ void executor_update_20ms(void)
     const waypoint_struct *wp = &exec_waypoints[current_step];
     float target_x, target_y;
     grid_to_physical(wp->row, wp->col, &target_x, &target_y);
+    apply_push_overshoot(&target_x, &target_y, wp->action);
 
     if (0 != segment_settling)
     {

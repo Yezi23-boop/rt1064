@@ -7,6 +7,7 @@
  *   12 行 RT 地图，每行 16 字符：
  *   # 墙，. 空地，B 箱子，T 目标点，C 小车，X 炸弹/障碍
  *   MAP_END
+ *   PLAYER_CENTER_GRID col_q,row_q valid
  *
  * UART1 底层初始化由 debug_init() 完成；运行期 LPUART1_IRQHandler()
  * 只投递字节到本模块，协议解析在主循环 openart_uart_poll() 中完成。
@@ -19,7 +20,7 @@
 
 #define OPENART_UART_INDEX          (UART_1)
 #define OPENART_HW_RX_BUFFER_SIZE   (384u)
-#define OPENART_LINE_SIZE           (24u)
+#define OPENART_LINE_SIZE           (40u)
 #define OPENART_RX_TIMEOUT_MS       (1000u)
 
 typedef enum
@@ -48,6 +49,10 @@ static uint32 error_count;                                       // 协议错误
 static uint8 player_row;                                         // 最近完整帧中第一个 `C` 的行号。
 static uint8 player_col;                                         // 最近完整帧中第一个 `C` 的列号。
 static uint8 player_count;                                       // 最近完整帧中 `C` 的数量，非 1 时位置只作诊断。
+static uint16 player_center_col_q;                               // 最近视觉中心列坐标，单位 1/100 格。
+static uint16 player_center_row_q;                               // 最近视觉中心行坐标，单位 1/100 格。
+static uint8 player_center_valid;                                // 1 表示最近一次样本有效。
+static uint32 player_center_count;                               // 视觉中心点样本累计计数。
 
 static void update_map_object_cache(void)
 {
@@ -139,6 +144,116 @@ static void accept_map(void)
     uart_write_string(OPENART_UART_INDEX, "MAP_OK rows=12 cols=16\r\n");
 }
 
+static uint8 parse_uint16_text(const char *text, uint16 *value)
+{
+    uint32 result = 0;
+    uint8 index = 0;
+
+    if((0 == text) || ('\0' == text[0]))
+    {
+        return 0;
+    }
+
+    while('\0' != text[index])
+    {
+        if((text[index] < '0') || (text[index] > '9'))
+        {
+            return 0;
+        }
+        result = (result * 10u) + (uint32)(text[index] - '0');
+        if(result > 65535u)
+        {
+            return 0;
+        }
+        index++;
+    }
+
+    *value = (uint16)result;
+    return 1u;
+}
+
+static void skip_spaces(char **text)
+{
+    while((' ' == **text) || ('\t' == **text))
+    {
+        (*text)++;
+    }
+}
+
+static uint8 parse_u16_pair_valid_line(const char *prefix,
+                                       uint16 *first_value,
+                                       uint16 *second_value,
+                                       uint8 *valid_value)
+{
+    char *text;
+    char *first_text;
+    char *second_text;
+    char *valid_text;
+    uint16 prefix_len;
+    uint16 valid_u16;
+
+    prefix_len = (uint16)strlen(prefix);
+    text = line_buffer;
+    if(0 != strncmp(text, prefix, prefix_len))
+    {
+        return 0;
+    }
+
+    text += prefix_len;
+    skip_spaces(&text);
+    first_text = text;
+    while(('\0' != *text) && (',' != *text))
+    {
+        text++;
+    }
+    if(',' != *text)
+    {
+        return 0;
+    }
+    *text = '\0';
+    text++;
+    skip_spaces(&text);
+    second_text = text;
+    while(('\0' != *text) && (' ' != *text))
+    {
+        text++;
+    }
+    if((' ' == *text) || ('\t' == *text))
+    {
+        *text = '\0';
+        text++;
+    }
+    skip_spaces(&text);
+    valid_text = text;
+
+    if((0 != parse_uint16_text(first_text, first_value)) &&
+       (0 != parse_uint16_text(second_text, second_value)) &&
+       (0 != parse_uint16_text(valid_text, &valid_u16)))
+    {
+        *valid_value = (0 != valid_u16) ? 1u : 0u;
+        return 1;
+    }
+    return 0;
+}
+
+static void parse_player_center_line(void)
+{
+    uint16 first_value;
+    uint16 second_value;
+    uint8 valid_value;
+
+    if(0 != parse_u16_pair_valid_line("PLAYER_CENTER_GRID ",
+                                      &first_value,
+                                      &second_value,
+                                      &valid_value))
+    {
+        player_center_col_q = first_value;
+        player_center_row_q = second_value;
+        player_center_valid = valid_value;
+        player_center_count++;
+    }
+}
+
 static void parse_line(void)
 {
     line_buffer[line_length] = '\0';
@@ -149,6 +264,12 @@ static void parse_line(void)
         // 新 MAP_BEGIN 直接开始新帧；若上一帧残缺，后续 MAP_END 行数校验会让它失效。
         parse_state = PARSE_READ_MAP;
         recv_row = 0;
+        return;
+    }
+
+    if(0 == strncmp(line_buffer, "PLAYER_CENTER_GRID ", 19))
+    {
+        parse_player_center_line();
         return;
     }
 
@@ -224,6 +345,10 @@ void openart_uart_init(void)
     player_row = 0;
     player_col = 0;
     player_count = 0;
+    player_center_col_q = 0;
+    player_center_row_q = 0;
+    player_center_valid = 0;
+    player_center_count = 0;
     reset_frame_parser();
 
     for(row = 0; row < MAP_ROWS; row++)
@@ -306,6 +431,23 @@ uint8 openart_find_player_cell(uint8 *row, uint8 *col, uint8 *count)
     }
 
     return ((0 != map_valid) && (1u == player_count)) ? 1u : 0u;
+}
+
+uint32 openart_get_player_center(uint16 *col_q, uint16 *row_q, uint8 *valid)
+{
+    if(0 != col_q)
+    {
+        *col_q = player_center_col_q;
+    }
+    if(0 != row_q)
+    {
+        *row_q = player_center_row_q;
+    }
+    if(0 != valid)
+    {
+        *valid = player_center_valid;
+    }
+    return player_center_count;
 }
 
 void openart_uart_push_byte(uint8 data)

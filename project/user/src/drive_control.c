@@ -92,6 +92,16 @@ void update_control_20ms(void)
     {
         return;
     }
+
+    // 启动保护结束后的第一个控制周期：用最新 IMU 读数重新锁一次 yaw。
+    // 原因：保护窗口最后一个 lock 发生在 20ms 前，IMU 在这 20ms 内可能继续漂移，
+    // 导致 target_yaw 和当前 yaw 在电机使能的同一瞬间存在误差，表现为启动时车体突然摆动。
+    if (1 == startup_yaw_locked)
+    {
+        drive_imu_lock_current_yaw(&control_status);
+        startup_yaw_locked = 2;
+    }
+
     drive_pose_update_20ms(control_status.wheel_feedback_count, control_status.current_yaw);
     set_motor_output_enabled(1);
 

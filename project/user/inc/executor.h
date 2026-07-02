@@ -75,6 +75,12 @@ void executor_resume(void);
 uint8 executor_art_sync_pending(void);
 
 /**
+ * @brief ART 段末视觉中心采样窗口是否打开。
+ * @return 1 表示当前 waypoint 已到点，正在停稳或等待 ART，同步层可以收集中心样本。
+ */
+uint8 executor_art_center_sampling_active(void);
+
+/**
  * @brief 获取触发当前 ART 等待的已完成 waypoint 动作。
  * @return 动作字符；大写表示刚完成推箱动作，小写表示普通移动，0 表示当前没有 ART 等待。
  */
@@ -92,6 +98,22 @@ void executor_finish_done(void);
  * @note 调用时会停止底盘，并清除段内 PID/等待状态。
  */
 void executor_set_error(executor_error_enum error);
+
+/**
+ * @brief 在 ART 同步段末缓存一个视觉中心点样本。
+ * @param[in] center_col_q OpenART 视觉中心列坐标，单位 1/100 格。
+ * @param[in] center_row_q OpenART 视觉中心行坐标，单位 1/100 格。
+ * @param[in] sample_count OpenART 中心点样本序号，用于过滤重复读取。
+ * @return 1 表示已经收满 3 个有效样本并得到中值；0 表示样本不足或重复。
+ * @note 这里只缓存中值，不立刻重置 pose；pose 会在 ART 稳定地图重启 executor 后应用。
+ */
+uint8 executor_apply_art_player_center(uint16 center_col_q, uint16 center_row_q, uint32 sample_count);
+
+/**
+ * @brief 把已缓存的 ART 视觉中心中值应用到当前 executor 局部位姿。
+ * @return 1 表示已应用校正；0 表示没有可用中值或中值与当前 C 格不一致。
+ */
+uint8 executor_commit_art_player_center(void);
 
 /**
  * @brief 获取当前状态。
