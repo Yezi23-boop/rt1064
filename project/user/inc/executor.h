@@ -28,6 +28,30 @@ typedef enum {
     EXEC_ERROR_ART_PLAN   /**< ART 稳定地图重解算失败。 */
 } executor_error_enum;
 
+typedef enum {
+    EXEC_ART_CENTER_NONE = 0,      /**< 没有足够中心点样本。 */
+    EXEC_ART_CENTER_IGNORED,       /**< 中心偏差很小，不修正 pose。 */
+    EXEC_ART_CENTER_APPLIED,       /**< 已按融合比例修正 pose。 */
+    EXEC_ART_CENTER_REJECTED,      /**< 中心点不可信，没有修正 pose。 */
+    EXEC_ART_CENTER_ABNORMAL       /**< 偏差过大，需要 ART 地图确认/重算。 */
+} executor_art_center_result_enum;
+
+typedef struct {
+    float target_x_cm;             /**< 当前 waypoint 目标 X，单位 cm。 */
+    float target_y_cm;             /**< 当前 waypoint 目标 Y，单位 cm。 */
+    float error_x_cm;              /**< target_x - pose_x，单位 cm。 */
+    float error_y_cm;              /**< target_y - pose_y，单位 cm。 */
+    float art_center_dx_cm;        /**< 最近一次 ART 中心观测相对本地 pose 的 X 差值。 */
+    float art_center_dy_cm;        /**< 最近一次 ART 中心观测相对本地 pose 的 Y 差值。 */
+    float art_center_diff_cm;      /**< 最近一次 ART 中心观测与本地 pose 的距离。 */
+    uint16 current_step;           /**< 当前 waypoint 下标。 */
+    uint16 total_steps;            /**< waypoint 总数。 */
+    char action;                   /**< 当前或刚完成 waypoint 动作。 */
+    uint8 state;                   /**< executor_state_enum 数值。 */
+    uint8 art_sync_pending;        /**< 1 表示正在等待 ART 同步。 */
+    uint8 art_center_result;       /**< executor_art_center_result_enum 数值。 */
+} executor_debug_status_struct;
+
 /**
  * @brief 初始化执行器路径跟踪 PID 参数。
  * @note 应在主程序初始化阶段调用一次。
@@ -58,7 +82,7 @@ void executor_stop(void);
 /**
  * @brief 20ms 中断调用，用于推进当前 waypoint 执行状态。
  *
- * @note 仅由 PIT_CH1 ISR 调用，当前调度顺序是先推进执行器，再执行底盘控制更新。
+ * @note 仅由 PIT_CH1 ISR 在反馈相位之后调用，因此读取的是本周期最新 pose。
  */
 void executor_update_20ms(void);
 
@@ -87,6 +111,12 @@ uint8 executor_art_center_sampling_active(void);
 char executor_get_art_sync_action(void);
 
 /**
+ * @brief ART 普通 waypoint 同步完成后继续当前路径。
+ * @return 1 表示已切到下一 waypoint 或任务完成；0 表示当前没有等待 ART。
+ */
+uint8 executor_continue_after_art_sync(void);
+
+/**
  * @brief 主循环确认任务已完成后，把执行器置为 DONE。
  * @note 用于 ART 重解算后发现无剩余路径的情况；调用时会停止底盘。
  */
@@ -111,9 +141,9 @@ uint8 executor_apply_art_player_center(uint16 center_col_q, uint16 center_row_q,
 
 /**
  * @brief 把已缓存的 ART 视觉中心中值应用到当前 executor 局部位姿。
- * @return 1 表示已应用校正；0 表示没有可用中值或中值与当前 C 格不一致。
+ * @return 视觉中心校正结果；只有 APPLIED 会修改 pose。
  */
-uint8 executor_commit_art_player_center(void);
+executor_art_center_result_enum executor_commit_art_player_center(void);
 
 /**
  * @brief 获取当前状态。
@@ -144,5 +174,11 @@ uint16 executor_get_current_step(void);
  * @return `executor_start()` 接收的路径点数量。
  */
 uint16 executor_get_total_steps(void);
+
+/**
+ * @brief 获取 VOFA/屏幕调试用执行器状态快照。
+ * @param[out] status 调试状态输出，不能为空。
+ */
+void executor_get_debug_status(executor_debug_status_struct *status);
 
 #endif /* _executor_h_ */

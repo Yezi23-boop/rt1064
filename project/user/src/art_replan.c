@@ -171,6 +171,11 @@ static uint8 art_action_is_push(char action)
     return ((action >= 'A') && (action <= 'Z')) ? 1u : 0u;
 }
 
+static uint8 art_center_result_needs_map(executor_art_center_result_enum center_result)
+{
+    return (EXEC_ART_CENTER_ABNORMAL == center_result) ? 1u : 0u;
+}
+
 static void art_replan_save_snapshot(const art_replan_context_struct *context,
                                      const map_source_struct *source)
 {
@@ -244,6 +249,7 @@ static void art_handle_stable_map(const art_replan_context_struct *context,
     map_scan_stats_struct stats;
     uint32 start_ms;
     art_replan_phase_enum phase = art_replan_phase;
+    executor_art_center_result_enum center_result = EXEC_ART_CENTER_NONE;
 
     art_replan_save_snapshot(context, source);
     map_scan_stats(context->snapshot, &stats);
@@ -291,10 +297,27 @@ static void art_handle_stable_map(const art_replan_context_struct *context,
     {
         char sync_action = executor_get_art_sync_action();
 
+        center_result = executor_commit_art_player_center();
+        printf("ART_CENTER result=%d action=%c\r\n", center_result, sync_action);
+
         if(0 == art_action_is_push(sync_action))
         {
-            // 普通 waypoint：只要 ART 稳定帧来了，就认为虚拟状态已同步，刷新基线即可。
             art_update_confirmed_counts(&stats);
+            if(0 == art_center_result_needs_map(center_result))
+            {
+                (void)executor_continue_after_art_sync();
+                art_replan_cancel();
+                if(0 != update)
+                {
+                    update->run_state = executor_state_name();
+                    update->redraw = 1;
+                }
+                return;
+            }
+            if(0 != update)
+            {
+                update->run_state = "ART Replan";
+            }
         }
         else if(0 != art_stats_count_decreased(&stats))
         {
@@ -346,7 +369,6 @@ static void art_handle_stable_map(const art_replan_context_struct *context,
         {
             // 段末重解算来自执行器的同步请求，稳定帧通过后直接续跑，不再额外停一层。
             art_replan_start_executor(context, &stats, update);
-            (void)executor_commit_art_player_center();
             art_replan_cancel();
             if(0 != update)
             {
@@ -485,4 +507,20 @@ void art_replan_confirm_launch(const art_replan_context_struct *context,
 uint8 art_replan_launch_pending(void)
 {
     return art_launch_pending;
+}
+
+void art_replan_get_debug_status(art_replan_debug_status_struct *status)
+{
+    if(0 == status)
+    {
+        return;
+    }
+
+    status->phase = (uint8)art_replan_phase;
+    status->stable_count = art_stable_count;
+    status->candidate_valid = art_candidate_valid;
+    status->confirmed_box_count = confirmed_box_count;
+    status->confirmed_target_count = confirmed_target_count;
+    status->confirmed_counts_valid = confirmed_counts_valid;
+    status->launch_pending = art_launch_pending;
 }

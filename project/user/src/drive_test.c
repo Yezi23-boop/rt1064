@@ -6,20 +6,128 @@
 #include "base_io.h"
 #include "motion_math.h"
 #include "timebase.h"
+#include <math.h>
 
 // 这些开关式测试状态只在主循环轮询中写；manual_pwm_active 会被 20ms 控制链路读取。
 static uint8 translate_test_started;      // 平移测试是否已发出启动命令，避免主循环重复下发 set_motion_command。
 static uint8 translate_test_stopped;      // 平移测试是否已到距离停车，避免反复调用 stop_motion。
 static float translate_test_origin_x_cm;  // 平移测试起点 X，单位 cm。
 static float translate_test_origin_y_cm;  // 平移测试起点 Y，单位 cm。
+static uint8 translate_test_arrival_ticks; // 平移测试连续到点计数，避免瞬时越界就停车。
 static uint8 square_test_started;         // 小方形测试是否已经锁定起点并进入第一段。
 static uint8 square_test_stopped;         // 小方形测试是否已完成四段或超时停车。
 static uint8 square_test_step;            // 当前小方形边序号，0..3 分别对应右、后、左、前。
 static uint32 square_test_step_start_ms;  // 当前边开始时间，单位 ms；固定时长和超时保护共用。
 static float square_test_origin_x_cm;     // 当前边起点 X，单位 cm；位姿切段模式用来判断边长。
 static float square_test_origin_y_cm;     // 当前边起点 Y，单位 cm；位姿切段模式用来判断边长。
+static uint8 square_test_arrival_ticks;   // 小方形当前边连续到点计数。
 static uint8 wheel_jog_started;           // 单轮点动是否已输出一次人工 PWM。
 static uint8 manual_pwm_active;           // 1 表示点动测试占用电机输出，20ms 闭环本周期应让出。
+static path_pid_struct test_x_pid;         // 测试用世界 X 位置环；切段/停车时清零。
+static path_pid_struct test_y_pid;         // 测试用世界 Y 位置环；切段/停车时清零。
+
+static float drive_test_abs_float(float value)
+{
+    return (value < 0.0f) ? -value : value;
+}
+
+static void drive_test_reset_position_pid(void)
+{
+    path_pid_reset(&test_x_pid);
+    path_pid_reset(&test_y_pid);
+}
+
+static void drive_test_world_velocity_to_body(float vx_world, float vy_world,
+                                              float yaw_deg, float *vx_body,
+                                              float *vy_body)
+{
+    float yaw_rad = yaw_deg * 3.1415926f / 180.0f;
+    float cos_yaw = cosf(yaw_rad);
+    float sin_yaw = sinf(yaw_rad);
+
+    *vx_body = vx_world * cos_yaw + vy_world * sin_yaw;
+    *vy_body = -vx_world * sin_yaw + vy_world * cos_yaw;
+}
+
+static uint8 drive_test_axis_arrived(float dx, float dy, float threshold_cm)
+{
+    return ((drive_test_abs_float(dx) < threshold_cm) &&
+            (drive_test_abs_float(dy) < threshold_cm)) ? 1u : 0u;
+}
+
+static float drive_test_position_output(path_pid_struct *pid, float error,
+                                        float threshold_cm, float max_speed)
+{
+    float output;
+
+    if(drive_test_abs_float(error) < threshold_cm)
+    {
+        path_pid_reset(pid);
+        return 0.0f;
+    }
+
+    output = path_pid_update(pid, error, CONTROL_DT_S);
+    return limit_float(output, -max_speed, max_speed);
+}
+
+static uint8 drive_test_move_to_target(float target_x_cm, float target_y_cm,
+                                       float threshold_cm, uint8 stable_ticks,
+                                       float max_speed, uint8 *arrival_ticks)
+{
+    const drive_pose_struct *pose = drive_pose_get();
+    float dx = target_x_cm - pose->x_cm;
+    float dy = target_y_cm - pose->y_cm;
+    float vx_world;
+    float vy_world;
+    float vx_body;
+    float vy_body;
+
+    if(0 != drive_test_axis_arrived(dx, dy, threshold_cm))
+    {
+        reset_motion_segment();
+        if(*arrival_ticks < stable_ticks)
+        {
+            (*arrival_ticks)++;
+        }
+        return (*arrival_ticks >= stable_ticks) ? 1u : 0u;
+    }
+
+    *arrival_ticks = 0;
+    vx_world = drive_test_position_output(&test_x_pid, dx, threshold_cm, max_speed);
+    vy_world = drive_test_position_output(&test_y_pid, dy, threshold_cm, max_speed);
+    drive_test_world_velocity_to_body(vx_world, vy_world, pose->yaw_deg,
+                                      &vx_body, &vy_body);
+    set_motion(vx_body, vy_body);
+    return 0;
+}
+
+static uint8 drive_translate_test_target(float *target_x_cm, float *target_y_cm)
+{
+    *target_x_cm = translate_test_origin_x_cm;
+    *target_y_cm = translate_test_origin_y_cm;
+
+    switch(DRIVE_TRANSLATE_TEST_COMMAND)
+    {
+        case MOTION_FORWARD:
+            *target_y_cm += DRIVE_TRANSLATE_TEST_DISTANCE_CM;
+            return 1u;
+
+        case MOTION_BACKWARD:
+            *target_y_cm -= DRIVE_TRANSLATE_TEST_DISTANCE_CM;
+            return 1u;
+
+        case MOTION_RIGHT:
+            *target_x_cm += DRIVE_TRANSLATE_TEST_DISTANCE_CM;
+            return 1u;
+
+        case MOTION_LEFT:
+            *target_x_cm -= DRIVE_TRANSLATE_TEST_DISTANCE_CM;
+            return 1u;
+
+        default:
+            return 0;
+    }
+}
 
 void drive_test_init(void)
 {
@@ -27,14 +135,18 @@ void drive_test_init(void)
     translate_test_stopped = 0;
     translate_test_origin_x_cm = 0.0f;
     translate_test_origin_y_cm = 0.0f;
+    translate_test_arrival_ticks = 0;
     square_test_started = 0;
     square_test_stopped = 0;
     square_test_step = 0;
     square_test_step_start_ms = 0;
     square_test_origin_x_cm = 0.0f;
     square_test_origin_y_cm = 0.0f;
+    square_test_arrival_ticks = 0;
     wheel_jog_started = 0;
     manual_pwm_active = 0;
+    path_pid_init(&test_x_pid, PATH_KP, PATH_KI, PATH_KD, 1.0f, PATH_MAX_INTEGRAL);
+    path_pid_init(&test_y_pid, PATH_KP, PATH_KI, PATH_KD, 1.0f, PATH_MAX_INTEGRAL);
 }
 
 static void drive_translate_test_poll(void)
@@ -42,57 +154,40 @@ static void drive_translate_test_poll(void)
 #if DRIVE_TRANSLATE_TEST_ENABLE
     uint32 now_ms = time_ms();
     const drive_pose_struct *pose;
+    float target_x_cm;
+    float target_y_cm;
 
-    /* 平移测试只负责发一次上层命令；实际姿态环和速度环仍在 PIT 里按 20ms 执行。 */
+    /* 平移测试按目标点位置环输出，接近目标时自动降速，停车方式贴近 executor。 */
     if((0 == translate_test_started) && (now_ms >= DRIVE_TRANSLATE_TEST_START_MS))
     {
         pose = drive_pose_get();
         translate_test_origin_x_cm = pose->x_cm;
         translate_test_origin_y_cm = pose->y_cm;
-        set_motion_command(DRIVE_TRANSLATE_TEST_COMMAND, DRIVE_TRANSLATE_TEST_SPEED, 0.0f);
+        translate_test_arrival_ticks = 0;
+        drive_test_reset_position_pid();
         translate_test_started = 1;
     }
 
     if((0 != translate_test_started) && (0 == translate_test_stopped))
     {
-        float dx, dy;
-
-        pose = drive_pose_get();
-        dx = pose->x_cm - translate_test_origin_x_cm;
-        dy = pose->y_cm - translate_test_origin_y_cm;
-        if((dx * dx + dy * dy) >= (DRIVE_TRANSLATE_TEST_DISTANCE_CM * DRIVE_TRANSLATE_TEST_DISTANCE_CM))
+        if(0 == drive_translate_test_target(&target_x_cm, &target_y_cm))
+        {
+            stop_motion();
+            translate_test_stopped = 1;
+            return;
+        }
+        if(0 != drive_test_move_to_target(target_x_cm,
+                                          target_y_cm,
+                                          DRIVE_TRANSLATE_TEST_ARRIVAL_THRESHOLD_CM,
+                                          DRIVE_TRANSLATE_TEST_ARRIVAL_STABLE_TICKS,
+                                          DRIVE_TRANSLATE_TEST_SPEED,
+                                          &translate_test_arrival_ticks))
         {
             stop_motion();
             translate_test_stopped = 1;
         }
     }
 #endif
-}
-
-static void drive_square_test_apply_step(uint8 step)
-{
-    switch(step)
-    {
-        case 0:
-            set_motion_command(MOTION_RIGHT, DRIVE_SQUARE_TEST_SPEED, 0.0f);
-            break;
-
-        case 1:
-            set_motion_command(MOTION_BACKWARD, DRIVE_SQUARE_TEST_SPEED, 0.0f);
-            break;
-
-        case 2:
-            set_motion_command(MOTION_LEFT, DRIVE_SQUARE_TEST_SPEED, 0.0f);
-            break;
-
-        case 3:
-            set_motion_command(MOTION_FORWARD, DRIVE_SQUARE_TEST_SPEED, 0.0f);
-            break;
-
-        default:
-            stop_motion();
-            break;
-    }
 }
 
 static void drive_square_test_capture_origin(uint32 now_ms)
@@ -102,6 +197,8 @@ static void drive_square_test_capture_origin(uint32 now_ms)
     square_test_origin_x_cm = pose->x_cm;
     square_test_origin_y_cm = pose->y_cm;
     square_test_step_start_ms = now_ms;
+    square_test_arrival_ticks = 0;
+    drive_test_reset_position_pid();
 }
 
 static void drive_square_test_target(uint8 step, float *target_x_cm, float *target_y_cm)
@@ -130,38 +227,6 @@ static void drive_square_test_target(uint8 step, float *target_x_cm, float *targ
     }
 }
 
-static uint8 drive_square_test_pose_arrived(uint8 step)
-{
-    const drive_pose_struct *pose = drive_pose_get();
-    float target_x_cm;
-    float target_y_cm;
-
-    drive_square_test_target(step, &target_x_cm, &target_y_cm);
-
-    switch(step)
-    {
-        case 0:
-            return (pose->x_cm >= (target_x_cm - DRIVE_SQUARE_TEST_ARRIVAL_THRESHOLD_CM)) ? 1u : 0u;
-
-        case 1:
-            return (pose->y_cm <= (target_y_cm + DRIVE_SQUARE_TEST_ARRIVAL_THRESHOLD_CM)) ? 1u : 0u;
-
-        case 2:
-            return (pose->x_cm <= (target_x_cm + DRIVE_SQUARE_TEST_ARRIVAL_THRESHOLD_CM)) ? 1u : 0u;
-
-        case 3:
-            return (pose->y_cm >= (target_y_cm - DRIVE_SQUARE_TEST_ARRIVAL_THRESHOLD_CM)) ? 1u : 0u;
-
-        default:
-            return 1u;
-    }
-}
-
-static uint8 drive_square_test_step_timeout(uint32 now_ms)
-{
-    return ((now_ms - square_test_step_start_ms) >= DRIVE_SQUARE_TEST_STEP_TIMEOUT_MS) ? 1u : 0u;
-}
-
 static void drive_square_test_next_step(uint32 now_ms)
 {
     square_test_step++;
@@ -173,13 +238,16 @@ static void drive_square_test_next_step(uint32 now_ms)
     }
 
     square_test_step_start_ms = now_ms;
-    drive_square_test_apply_step(square_test_step);
+    square_test_arrival_ticks = 0;
+    drive_test_reset_position_pid();
 }
 
 static void drive_square_test_poll(void)
 {
 #if DRIVE_SQUARE_TEST_ENABLE
     uint32 now_ms = time_ms();
+    float target_x_cm;
+    float target_y_cm;
 
     if(0 != square_test_stopped)
     {
@@ -195,42 +263,21 @@ static void drive_square_test_poll(void)
         square_test_started = 1;
         square_test_step = 0;
         drive_square_test_capture_origin(now_ms);
-        drive_square_test_apply_step(square_test_step);
         return;
     }
 
-#if DRIVE_SQUARE_TEST_POSE_MODE_ENABLE
-    if(0 != drive_square_test_pose_arrived(square_test_step))
+    drive_square_test_target(square_test_step, &target_x_cm, &target_y_cm);
+    if(0 != drive_test_move_to_target(target_x_cm,
+                                      target_y_cm,
+                                      DRIVE_SQUARE_TEST_ARRIVAL_THRESHOLD_CM,
+                                      DRIVE_SQUARE_TEST_ARRIVAL_STABLE_TICKS,
+                                      DRIVE_SQUARE_TEST_SPEED,
+                                      &square_test_arrival_ticks))
     {
         drive_square_test_next_step(now_ms);
         return;
     }
 
-    if(0 != drive_square_test_step_timeout(now_ms))
-    {
-        stop_motion();
-        square_test_stopped = 1;
-        return;
-    }
-#else
-    uint32 elapsed_ms;
-    uint8 next_step;
-
-    elapsed_ms = now_ms - DRIVE_SQUARE_TEST_START_MS;
-    next_step = (uint8)(elapsed_ms / DRIVE_SQUARE_TEST_SIDE_DURATION_MS);
-    if(4u <= next_step)
-    {
-        stop_motion();
-        square_test_stopped = 1;
-        return;
-    }
-
-    if(next_step != square_test_step)
-    {
-        square_test_step = next_step;
-        drive_square_test_apply_step(square_test_step);
-    }
-#endif
 #endif
 }
 

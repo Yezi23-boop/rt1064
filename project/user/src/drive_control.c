@@ -76,21 +76,21 @@ uint8 control_init(void)
     return hw_state;
 }
 
-void update_control_20ms(void)
+uint8 control_feedback_update_20ms(void)
 {
-    // 本函数与 executor_update_20ms() 共用 PIT_CH1 节拍：先读反馈/姿态，再决定本周期输出。
+    // 反馈相位先刷新编码器、姿态和 pose；返回 0 时本周期不推进 executor，也不输出闭环。
     read_encoder_counts(control_status.wheel_feedback_count);
     drive_imu_sync_status(&control_status);
 
     if (0 != drive_test_manual_pwm_active())
     {
-        // 单轮点动直接写 PWM；闭环继续接管会掩盖接线/死区测试结果。
-        return;
+        // 单轮点动直接写 PWM；闭环和 executor 都让出，但保留反馈刷新给屏幕观察。
+        return 0;
     }
 
     if (0 != update_startup_guard_20ms())
     {
-        return;
+        return 0;
     }
 
     // 启动保护结束后的第一个控制周期：用最新 IMU 读数重新锁一次 yaw。
@@ -104,7 +104,11 @@ void update_control_20ms(void)
 
     drive_pose_update_20ms(control_status.wheel_feedback_count, control_status.current_yaw);
     set_motor_output_enabled(1);
+    return 1;
+}
 
+void control_output_update_20ms(void)
+{
     if (0 != drive_test_try_update_speed_loop_20ms(&control_status))
     {
         return;

@@ -20,26 +20,26 @@
 #define DRIVE_TRANSLATE_TEST_START_MS (IMU_YAW_STARTUP_STABLE_DELAY_MS)
 /** 平移测试目标距离，单位 cm；到位后自动 stop_motion()。 */
 #define DRIVE_TRANSLATE_TEST_DISTANCE_CM (100.0f)
-/** 平移测试方向；可改为 MOTION_BACKWARD/MOTION_LEFT/MOTION_RIGHT 分别测试四个基本方向。 */
-#define DRIVE_TRANSLATE_TEST_COMMAND (MOTION_RIGHT)
-/** 平移测试速度幅值，范围 [0, 1]，先用低速观察姿态保持。 */
+/** 平移测试方向；可改为 MOTION_BACKWARD/MOTION_LEFT/MOTION_RIGHT/MOTION_FORWARD 分别测试四个基本方向。 */
+#define DRIVE_TRANSLATE_TEST_COMMAND (MOTION_FORWARD)
+/** 平移测试位置环最大速度，范围 [0, 1]；越小越容易停准。 */
 #define DRIVE_TRANSLATE_TEST_SPEED (1.0f)
+/** 平移测试到点阈值，单位 cm；只影响代码层平移测试。 */
+#define DRIVE_TRANSLATE_TEST_ARRIVAL_THRESHOLD_CM (0.5f)
+/** 平移测试连续到点周期数，单位为 20ms。 */
+#define DRIVE_TRANSLATE_TEST_ARRIVAL_STABLE_TICKS (3u)
 
-/** 小方形平移测试开关；右 -> 下/后退 -> 左 -> 上/前进，默认关闭。 */
+/** 小方形平移测试开关；右 -> 下/后退 -> 左 -> 上/前进，每段均按目标点位置环停车。 */
 #define DRIVE_SQUARE_TEST_ENABLE (0)
-/** 小方形按位姿切段开关；置 0 时退回按固定时间切段。 */
-#define DRIVE_SQUARE_TEST_POSE_MODE_ENABLE (0)
 /** 小方形测试启动时间，单位 ms；默认等同上电 yaw 稳定/电机输出安全窗口。 */
 #define DRIVE_SQUARE_TEST_START_MS (IMU_YAW_STARTUP_STABLE_DELAY_MS)
-/** 小方形每条边运行时长，单位 ms；按场地实际一格距离微调。 */
-#define DRIVE_SQUARE_TEST_SIDE_DURATION_MS (1500)
-/** 小方形按位姿切段时的单段最大运行时间，超时自动停车。 */
-#define DRIVE_SQUARE_TEST_STEP_TIMEOUT_MS (DRIVE_SQUARE_TEST_SIDE_DURATION_MS)
 /** 小方形边长，单位 cm；默认一格。 */
-#define DRIVE_SQUARE_TEST_SIDE_CM (GRID_SIZE_CM)
+#define DRIVE_SQUARE_TEST_SIDE_CM (GRID_SIZE_CM*3)
 /** 小方形按位姿切段的到点阈值，单位 cm。 */
-#define DRIVE_SQUARE_TEST_ARRIVAL_THRESHOLD_CM (1.0f)
-/** 小方形测试速度幅值，范围 [0, 1]。 */
+#define DRIVE_SQUARE_TEST_ARRIVAL_THRESHOLD_CM (0.2f)
+/** 小方形连续到点周期数，单位为 20ms。 */
+#define DRIVE_SQUARE_TEST_ARRIVAL_STABLE_TICKS (3u)
+/** 小方形测试位置环最大速度，范围 [0, 1]。 */
 #define DRIVE_SQUARE_TEST_SPEED (1)
 
 /* 代码层单轮点动测试：
@@ -82,7 +82,7 @@ void drive_test_clear_manual_pwm(void);
  * @brief 如果启用了速度环测试，则执行 20ms 测试链路。
  * @return 1 表示本周期已由测试链路处理，0 表示未启用测试。
  *
- * @note 仅由 `update_control_20ms()` 调用，保持速度环采样周期固定。
+ * @note 仅由 `control_output_update_20ms()` 调用，保持速度环采样周期固定。
  */
 uint8 drive_test_try_update_speed_loop_20ms(control_status_struct *status);
 

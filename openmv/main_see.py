@@ -10,7 +10,7 @@ UART_MAP_SEND_PERIOD_MS = 200  # 发送周期，单位 ms
 UART_MAP_DRAIN_RX = True     # True=清空 MCU 回包，避免 ACK 堆满 OpenART UART 接收缓冲
 
 # ==================== USER_SWITCHES：现场最常改 ===================
-# 调试开关：正式跑帧率时建议 DEBUG_ENABLE=False。
+# 调试开关：正式跑帧率时建议 DEBUG_ENABLE=False
 DEBUG_ENABLE = True          # True=打印地图并绘制调试图形；False=正式高速运行
 DEBUG_DRAW_ROI = True        # True=画绿色地图边界/拉正边框
 DEBUG_DRAW_GRID_LINES = True # True=画 16x12 网格线，用于检查格子是否对齐
@@ -53,10 +53,10 @@ GRID_ROWS = 12
 # MAP_CORNERS 表示屏幕地图外边界，用于四角透视标定。
 # 四点按 左上、右上、右下、左下 填写，指向完整 16x12 地图外边界。
 MAP_CORNERS = (
-    (10, 17),
-    (306, 23),
-    (299, 226),
-    (14, 231),
+    (4, 6),
+    (304, 9),
+    (303, 216),
+    (9, 228),
 )
 
 # 拉正图上的有效采样区域边距。四角已对齐但整张网格略偏时，只调这里。

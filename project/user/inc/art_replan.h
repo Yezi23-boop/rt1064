@@ -52,6 +52,17 @@ typedef struct
     const char *run_state;                /**< 可显示的运行状态文本；NULL 表示不更新。 */
 } art_replan_update_struct;
 
+typedef struct
+{
+    uint8 phase;                          /**< ART 重解算阶段，取内部 art_replan_phase_enum 数值。 */
+    uint8 stable_count;                   /**< 当前连续稳定帧计数。 */
+    uint8 candidate_valid;                /**< 1 表示已有候选稳定帧。 */
+    uint8 confirmed_box_count;            /**< 上一次确认同步后的箱子数量。 */
+    uint8 confirmed_target_count;         /**< 上一次确认同步后的目标数量。 */
+    uint8 confirmed_counts_valid;         /**< 1 表示 B/T 基线有效。 */
+    uint8 launch_pending;                 /**< 1 表示等待 K3 确认启动。 */
+} art_replan_debug_status_struct;
+
 /**
  * @brief 取消当前 ART 等待、稳定帧统计和 K3 待确认启动状态。
  *
@@ -102,5 +113,11 @@ void art_replan_confirm_launch(const art_replan_context_struct *context,
  * @return 1 表示已有求解结果并等待人工确认启动；0 表示无需确认。
  */
 uint8 art_replan_launch_pending(void);
+
+/**
+ * @brief 获取 VOFA/屏幕调试用 ART 重解算状态快照。
+ * @param[out] status 调试状态输出，不能为空。
+ */
+void art_replan_get_debug_status(art_replan_debug_status_struct *status);
 
 #endif

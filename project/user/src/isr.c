@@ -19,8 +19,11 @@ void PIT_IRQHandler(void)
     if(pit_flag_get(PIT_CH1))
     {
         pit_flag_clear(PIT_CH1);
-        executor_update_20ms();
-        update_control_20ms();
+        if(0 != control_feedback_update_20ms())
+        {
+            executor_update_20ms();
+            control_output_update_20ms();
+        }
     }
 
     // 菜单按键用 5ms 节拍做消抖，主循环只消费状态，避免屏幕刷新频率影响按键手感。

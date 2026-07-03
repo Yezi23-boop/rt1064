@@ -31,10 +31,17 @@ typedef struct
 uint8 control_init(void);
 
 /**
- * @brief 执行 20ms 姿态环、麦轮混控和四轮速度闭环。
- * @note 仅由 PIT_CH1 ISR 调用；处于单轮点动模式时不接管 PWM。
+ * @brief 执行 20ms 反馈相位，更新编码器、IMU 和本地 pose。
+ * @return 1 表示本周期允许继续 executor 和输出相位；0 表示启动保护或点动占用。
+ * @note 仅由 PIT_CH1 ISR 调用；返回 0 时 executor 不推进，闭环不接管 PWM。
  */
-void update_control_20ms(void);
+uint8 control_feedback_update_20ms(void);
+
+/**
+ * @brief 执行 20ms 输出相位，完成 yaw 姿态环、麦轮混控和四轮速度闭环。
+ * @note 仅在 `control_feedback_update_20ms()` 返回 1 后由 PIT_CH1 ISR 调用。
+ */
+void control_output_update_20ms(void);
 
 /**
  * @brief 设置平移分量，同时保持当前目标航向角。

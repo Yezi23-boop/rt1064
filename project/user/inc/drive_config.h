@@ -15,9 +15,9 @@
 /** 第一版上板使用的保守目标轮速上限，单位为 encoder count/20ms。 */
 #define MAX_WHEEL_TARGET_COUNT (100.0f)
 /** 前后方向编码器增量到地面位移的标定系数，单位 cm/count；上下准时保持该值不动。 */
-#define POSE_Y_CM_PER_COUNT (0.0085f)//86
+#define POSE_Y_CM_PER_COUNT (0.0083f) // 86
 /** 左右横移编码器增量到地面位移的标定系数，单位 cm/count；麦轮横移滑移通常需要单独标定。 */
-#define POSE_X_CM_PER_COUNT (0.0085f)
+#define POSE_X_CM_PER_COUNT (0.0083f)
 /** 位姿 X 轴方向校正；当前取 +1，表示麦轮反解的正 X 直接对应右移为正。 */
 #define POSE_X_DIR_SIGN (1.0f)
 /** 位姿 Y 轴方向校正；当前取 +1，表示麦轮反解的正 Y 直接对应前进为正。 */
@@ -26,8 +26,8 @@
 #define MAX_PWM_DUTY (8000)
 /** 电机 PWM 频率，单位为 Hz。 */
 #define PWM_FREQ_HZ (17000)
-/** 电机最小有效 PWM 补偿开关；置 1 后非零小 PWM 会抬到死区以上。 */
-#define MOTOR_PWM_DEADBAND_ENABLE (1)
+/** 电机最小有效 PWM 补偿开关；置 0 时交给轮速 PID 自行克服低速死区。 */
+#define MOTOR_PWM_DEADBAND_ENABLE (0)
 /** 左前轮最小有效 PWM，占空比量程同 MAX_PWM_DUTY/PWM_DUTY_MAX。 */
 #define MOTOR_PWM_DEADBAND_LF (500)
 /** 左后轮最小有效 PWM，占空比量程同 MAX_PWM_DUTY/PWM_DUTY_MAX。 */
@@ -42,7 +42,7 @@
 /** yaw 姿态 PD 微分系数；不加入积分项，避免静态角度误差累积导致过冲。 */
 #define YAW_KD (0.0001f)
 /** yaw 姿态环硬死区，单位 degree；死区内不输出姿态修正，避免零点附近 IMU 小抖动带动车轮。 */
-#define YAW_DEADBAND_DEG (0.15f)
+#define YAW_DEADBAND_DEG (0.10f)
 /** 姿态环允许输出的最大归一化旋转分量。 */
 #define MAX_VZ (1.0f)
 /** 平移/路径执行时姿态保持允许叠加的最大旋转修正，避免横移被 yaw 环抢占。 */
@@ -66,7 +66,7 @@
 /** 四轮增量式速度 PID 微分初值；第一版关闭微分。 */
 #define WHEEL_PID_KD (0.0f)
 /** 目标轮速小于该阈值时认为该轮应停转，不让编码器微小抖动触发速度环补偿。 */
-#define WHEEL_TARGET_STOP_EPS_COUNT (0.5f)
+#define WHEEL_TARGET_STOP_EPS_COUNT (0.3f)
 /** 目标轮速达到该阈值才允许电机死区补偿，避免段末 yaw 小修正被放大成抖动。 */
 #define MOTOR_PWM_DEADBAND_TARGET_THRESHOLD_COUNT (25.0f)
 
@@ -78,9 +78,9 @@
 #define DRIVE_START_PWM_RAMP_STEP (100)
 
 /** 路径跟踪 PID 比例系数；误差单位为 cm，输出为归一化速度。 */
-#define PATH_KP (0.1f)
+#define PATH_KP (0.07f)
 /** 路径跟踪 PID 积分系数；当前默认 0，避免里程计漂移时累积横向误差。 */
-#define PATH_KI (0.01f)
+#define PATH_KI (0.001f)
 /** 路径跟踪 PID 微分系数；当前默认 0，避免 20ms 位姿增量噪声放大。 */
 #define PATH_KD (0.0f)
 /** 路径跟踪 PID 最大输出速度，归一化到 MAX_WHEEL_TARGET_COUNT。 */
@@ -88,11 +88,11 @@
 /** 路径跟踪 PID 积分限幅，单位 cm*s；只有 PATH_KI 非 0 时才影响输出。 */
 #define PATH_MAX_INTEGRAL (5.0f)
 /** 路径跟踪 PID 到点阈值，单位 cm。 */
-#define PATH_ARRIVAL_THRESHOLD_CM (1.0f)
+#define PATH_ARRIVAL_THRESHOLD_CM (0.5f)
 /** 执行器到点需要连续满足阈值的 20ms 周期数，用于过滤瞬时越界和惯性抖动。 */
 #define EXEC_ARRIVAL_STABLE_TICKS (3u)
 /** waypoint 切换前的停稳时间，单位 ms；只在拐点/路径点边界停，不拆连续直线段。 */
-#define EXEC_SEGMENT_SETTLE_MS (600u)
+#define EXEC_SEGMENT_SETTLE_MS (100u)
 /** 推箱动作目标点越界补偿开关；只作用于 U/D/L/R，不改变普通移动。 */
 #define EXEC_PUSH_OVERSHOOT_ENABLE (0)
 /** 推箱动作额外前压比例，单位为格；0.20 表示每格 20cm 时多走 4cm。 */
@@ -101,6 +101,22 @@
 #define EXEC_ART_SYNC_TIMEOUT_MS (3000u)
 /** ART 来源执行时，完整地图需要连续一致的新帧数量。 */
 #define EXEC_ART_STABLE_FRAMES (2u)
+/** 普通小写 waypoint 是否也等待 ART 同步；0=普通移动不停等 ART，1=每个普通移动也等 ART。 */
+#define EXEC_ART_NORMAL_WAYPOINT_SYNC_ENABLE (0)
+/** ART 中心点校正开关；只在 waypoint 停稳后使用，不参与 20ms 实时闭环。 */
+#define EXEC_ART_CENTER_CORRECT_ENABLE (0)
+/** ART 中心点需要收集的有效样本数；当前中值实现使用 3 帧。 */
+#define EXEC_ART_CENTER_SAMPLE_COUNT (3u)
+/** ART 中心点小于该偏差不修正，单位 cm，避免原地小抖动反复写 pose。 */
+#define EXEC_ART_CENTER_IGNORE_CM (1.0f)
+/** ART 中心点允许直接融合的最大偏差，单位 cm；超过后不立刻相信。 */
+#define EXEC_ART_CENTER_FUSE_MAX_CM (5.0f)
+/** ART 中心点超过该偏差认为异常，触发地图确认/重算，单位 cm。 */
+#define EXEC_ART_CENTER_ABNORMAL_CM (10.0f)
+/** ART 中心点融合比例；0.30 表示本地 pose 保留 70%，ART 观测占 30%。 */
+#define EXEC_ART_CENTER_FUSE_ALPHA (0.30f)
+/** ART 中心点所在格允许与当前 C 格一致；0 表示不接受相邻格中心直接校正。 */
+#define EXEC_ART_CENTER_ALLOW_NEIGHBOR_CELL (0)
 
 /** 底盘统一轮序，混控、硬件映射和调试输出均不得更换该顺序。 */
 typedef enum

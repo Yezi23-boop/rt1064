@@ -1,10 +1,11 @@
 #include "executor.h"
+#include "drive_config.h"
 #include "drive_control.h"
 #include "drive_pose.h"
 #include "motion_math.h"
 #include <math.h>
 
-#define ART_PLAYER_CENTER_FILTER_WINDOW (3u)
+#define ART_PLAYER_CENTER_FILTER_WINDOW (EXEC_ART_CENTER_SAMPLE_COUNT)
 
 /* 执行器状态由主循环启动/停止、PIT_CH1 20ms 推进共同访问；
  * 这里不做阻塞等待，ART 同步等待交给主循环处理。 */
@@ -38,6 +39,10 @@ static uint32 art_player_center_history_frame[ART_PLAYER_CENTER_FILTER_WINDOW];
 static uint16 art_player_center_median_col_q = 0;
 static uint16 art_player_center_median_row_q = 0;
 static uint8 art_player_center_median_valid = 0;
+static executor_art_center_result_enum last_art_center_result = EXEC_ART_CENTER_NONE;
+static float last_art_center_dx_cm = 0.0f;
+static float last_art_center_dy_cm = 0.0f;
+static float last_art_center_diff_cm = 0.0f;
 
 /* 地图 row 向下增大，而本地物理 Y 约定前进为正，因此 row 差值需要取反。 */
 static void grid_to_physical(uint8 row, uint8 col, float *x_cm, float *y_cm)
@@ -71,21 +76,30 @@ static void executor_reset_segment_state(void)
     path_pid_reset(&y_pid);
 }
 
-static uint16 median_u16_3(uint16 a, uint16 b, uint16 c)
+static uint16 median_u16_values(const uint16 *values, uint8 count)
 {
-    if(a > b)
+    uint16 sorted[ART_PLAYER_CENTER_FILTER_WINDOW];
+    uint8 i;
+    uint8 j;
+
+    for(i = 0; i < count; i++)
     {
-        uint16 t = a; a = b; b = t;
+        sorted[i] = values[i];
     }
-    if(b > c)
+
+    for(i = 1; i < count; i++)
     {
-        uint16 t = b; b = c; c = t;
+        uint16 key = sorted[i];
+        j = i;
+        while((j > 0) && (sorted[j - 1] > key))
+        {
+            sorted[j] = sorted[j - 1];
+            j--;
+        }
+        sorted[j] = key;
     }
-    if(a > b)
-    {
-        uint16 t = a; a = b; b = t;
-    }
-    return b;
+
+    return sorted[count / 2u];
 }
 
 static uint8 center_q_matches_current_cell(uint16 row_q, uint16 col_q)
@@ -114,6 +128,22 @@ static uint8 action_is_push(char action)
 static float abs_float(float value)
 {
     return (value < 0.0f) ? -value : value;
+}
+
+static float sqrt_distance_cm(float x_cm, float y_cm)
+{
+    return sqrtf((x_cm * x_cm) + (y_cm * y_cm));
+}
+
+static void set_art_center_debug(executor_art_center_result_enum result,
+                                 float dx_cm,
+                                 float dy_cm,
+                                 float diff_cm)
+{
+    last_art_center_result = result;
+    last_art_center_dx_cm = dx_cm;
+    last_art_center_dy_cm = dy_cm;
+    last_art_center_diff_cm = diff_cm;
 }
 
 /* 到点判定同时约束主轴和副轴，避免只穿过目标线但横向偏差仍很大时提前切段。 */
@@ -341,32 +371,33 @@ uint8 executor_apply_art_player_center(uint16 center_col_q, uint16 center_row_q,
         return 0;
     }
 
-    art_player_center_median_col_q = median_u16_3(art_player_center_x_history[0],
-                                                  art_player_center_x_history[1],
-                                                  art_player_center_x_history[2]);
-    art_player_center_median_row_q = median_u16_3(art_player_center_y_history[0],
-                                                  art_player_center_y_history[1],
-                                                  art_player_center_y_history[2]);
+    art_player_center_median_col_q = median_u16_values(art_player_center_x_history,
+                                                       ART_PLAYER_CENTER_FILTER_WINDOW);
+    art_player_center_median_row_q = median_u16_values(art_player_center_y_history,
+                                                       ART_PLAYER_CENTER_FILTER_WINDOW);
     art_player_center_median_valid = 1;
     return 1;
 }
 
-uint8 executor_commit_art_player_center(void)
+executor_art_center_result_enum executor_commit_art_player_center(void)
 {
     const drive_pose_struct *pose;
     float corrected_x_cm;
     float corrected_y_cm;
     float pose_yaw;
 
+#if EXEC_ART_CENTER_CORRECT_ENABLE
     if(0 == art_player_center_median_valid)
     {
-        return 0;
+        set_art_center_debug(EXEC_ART_CENTER_NONE, 0.0f, 0.0f, 0.0f);
+        return EXEC_ART_CENTER_NONE;
     }
     if(0 == center_q_matches_current_cell(art_player_center_median_row_q,
                                           art_player_center_median_col_q))
     {
         art_player_center_median_valid = 0;
-        return 0;
+        set_art_center_debug(EXEC_ART_CENTER_REJECTED, 0.0f, 0.0f, 0.0f);
+        return EXEC_ART_CENTER_REJECTED;
     }
 
     grid_q_to_physical(art_player_center_median_row_q,
@@ -375,9 +406,43 @@ uint8 executor_commit_art_player_center(void)
                        &corrected_y_cm);
     pose = drive_pose_get();
     pose_yaw = pose->yaw_deg;
-    drive_pose_reset(corrected_x_cm, corrected_y_cm, pose_yaw);
+
+    {
+        float dx = corrected_x_cm - pose->x_cm;
+        float dy = corrected_y_cm - pose->y_cm;
+        float diff_cm = sqrt_distance_cm(dx, dy);
+
+        art_player_center_median_valid = 0;
+
+        if(diff_cm < EXEC_ART_CENTER_IGNORE_CM)
+        {
+            set_art_center_debug(EXEC_ART_CENTER_IGNORED, dx, dy, diff_cm);
+            return EXEC_ART_CENTER_IGNORED;
+        }
+
+        if(diff_cm > EXEC_ART_CENTER_ABNORMAL_CM)
+        {
+            set_art_center_debug(EXEC_ART_CENTER_ABNORMAL, dx, dy, diff_cm);
+            return EXEC_ART_CENTER_ABNORMAL;
+        }
+
+        if(diff_cm > EXEC_ART_CENTER_FUSE_MAX_CM)
+        {
+            set_art_center_debug(EXEC_ART_CENTER_REJECTED, dx, dy, diff_cm);
+            return EXEC_ART_CENTER_REJECTED;
+        }
+
+        corrected_x_cm = pose->x_cm + (dx * EXEC_ART_CENTER_FUSE_ALPHA);
+        corrected_y_cm = pose->y_cm + (dy * EXEC_ART_CENTER_FUSE_ALPHA);
+        drive_pose_reset(corrected_x_cm, corrected_y_cm, pose_yaw);
+        set_art_center_debug(EXEC_ART_CENTER_APPLIED, dx, dy, diff_cm);
+    }
+    return EXEC_ART_CENTER_APPLIED;
+#else
     art_player_center_median_valid = 0;
-    return 1;
+    set_art_center_debug(EXEC_ART_CENTER_NONE, 0.0f, 0.0f, 0.0f);
+    return EXEC_ART_CENTER_NONE;
+#endif
 }
 
 static void executor_enter_segment_settle(void)
@@ -406,6 +471,17 @@ static void executor_advance_after_segment(void)
     }
 }
 
+uint8 executor_continue_after_art_sync(void)
+{
+    if(0 == executor_art_sync_pending())
+    {
+        return 0;
+    }
+
+    executor_advance_after_segment();
+    return 1;
+}
+
 static void executor_enter_art_wait(char action)
 {
     /* ART 识别和重解算可能耗时，不能放在 PIT ISR；这里只停车并暴露 pending 状态给主循环。 */
@@ -430,7 +506,8 @@ static void executor_finish_segment_settle(void)
         action = exec_waypoints[current_step].action;
     }
 
-    if (0 != art_sync_enabled)
+    if((0 != art_sync_enabled) &&
+       ((0 != action_is_push(action)) || (0 != EXEC_ART_NORMAL_WAYPOINT_SYNC_ENABLE)))
     {
         executor_enter_art_wait(action);
         return;
@@ -540,4 +617,40 @@ uint16 executor_get_current_step(void)
 uint16 executor_get_total_steps(void)
 {
     return exec_waypoint_count;
+}
+
+void executor_get_debug_status(executor_debug_status_struct *status)
+{
+    const drive_pose_struct *pose;
+    float target_x = 0.0f;
+    float target_y = 0.0f;
+    char action = last_completed_action;
+
+    if(0 == status)
+    {
+        return;
+    }
+
+    if((0 != exec_waypoints) && (current_step < exec_waypoint_count))
+    {
+        const waypoint_struct *wp = &exec_waypoints[current_step];
+        grid_to_physical(wp->row, wp->col, &target_x, &target_y);
+        apply_push_overshoot(&target_x, &target_y, wp->action);
+        action = wp->action;
+    }
+
+    pose = drive_pose_get();
+    status->target_x_cm = target_x;
+    status->target_y_cm = target_y;
+    status->error_x_cm = target_x - pose->x_cm;
+    status->error_y_cm = target_y - pose->y_cm;
+    status->art_center_dx_cm = last_art_center_dx_cm;
+    status->art_center_dy_cm = last_art_center_dy_cm;
+    status->art_center_diff_cm = last_art_center_diff_cm;
+    status->current_step = current_step;
+    status->total_steps = exec_waypoint_count;
+    status->action = action;
+    status->state = (uint8)exec_state;
+    status->art_sync_pending = executor_art_sync_pending();
+    status->art_center_result = (uint8)last_art_center_result;
 }
