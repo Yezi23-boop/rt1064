@@ -125,6 +125,19 @@ static uint8 action_is_push(char action)
     return ((action >= 'A') && (action <= 'Z')) ? 1u : 0u;
 }
 
+static uint8 waypoint_needs_art_sync(const waypoint_struct *wp)
+{
+    if(0 == wp)
+    {
+        return 0;
+    }
+    if(0 == action_is_push(wp->action))
+    {
+        return 0;
+    }
+    return (0 != wp->task_end) ? 1u : 0u;
+}
+
 static float abs_float(float value)
 {
     return (value < 0.0f) ? -value : value;
@@ -496,20 +509,19 @@ static void executor_enter_art_wait(char action)
 
 static void executor_finish_segment_settle(void)
 {
-    char action = '\0';
+    const waypoint_struct *wp = NULL;
 
     segment_settling = 0;
     segment_settle_elapsed_ms = 0;
 
     if((0 != exec_waypoints) && (current_step < exec_waypoint_count))
     {
-        action = exec_waypoints[current_step].action;
+        wp = &exec_waypoints[current_step];
     }
 
-    if((0 != art_sync_enabled) &&
-       ((0 != action_is_push(action)) || (0 != EXEC_ART_NORMAL_WAYPOINT_SYNC_ENABLE)))
+    if((0 != art_sync_enabled) && (0 != waypoint_needs_art_sync(wp)))
     {
-        executor_enter_art_wait(action);
+        executor_enter_art_wait(wp->action);
         return;
     }
 

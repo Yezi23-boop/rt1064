@@ -101,8 +101,6 @@
 #define EXEC_ART_SYNC_TIMEOUT_MS (3000u)
 /** ART 来源执行时，完整地图需要连续一致的新帧数量。 */
 #define EXEC_ART_STABLE_FRAMES (2u)
-/** 普通小写 waypoint 是否也等待 ART 同步；0=普通移动不停等 ART，1=每个普通移动也等 ART。 */
-#define EXEC_ART_NORMAL_WAYPOINT_SYNC_ENABLE (0)
 /** ART 中心点校正开关；只在 waypoint 停稳后使用，不参与 20ms 实时闭环。 */
 #define EXEC_ART_CENTER_CORRECT_ENABLE (0)
 /** ART 中心点需要收集的有效样本数；当前中值实现使用 3 帧。 */

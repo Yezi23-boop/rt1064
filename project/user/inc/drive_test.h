@@ -15,13 +15,13 @@
 #define DRIVE_ATTITUDE_LOOP_TEST_TARGET_OFFSET_DEG (0.0f)
 
 /** 平移保持姿态测试开关；置 1 后主循环会在启动安全窗口后自动发一次平移命令。 */
-#define DRIVE_TRANSLATE_TEST_ENABLE (0)
+#define DRIVE_TRANSLATE_TEST_ENABLE (1)
 /** 平移测试启动时间，单位 ms；默认等同上电 yaw 稳定/电机输出安全窗口。 */
 #define DRIVE_TRANSLATE_TEST_START_MS (IMU_YAW_STARTUP_STABLE_DELAY_MS)
 /** 平移测试目标距离，单位 cm；到位后自动 stop_motion()。 */
 #define DRIVE_TRANSLATE_TEST_DISTANCE_CM (100.0f)
 /** 平移测试方向；可改为 MOTION_BACKWARD/MOTION_LEFT/MOTION_RIGHT/MOTION_FORWARD 分别测试四个基本方向。 */
-#define DRIVE_TRANSLATE_TEST_COMMAND (MOTION_FORWARD)
+#define DRIVE_TRANSLATE_TEST_COMMAND (MOTION_RIGHT)
 /** 平移测试位置环最大速度，范围 [0, 1]；越小越容易停准。 */
 #define DRIVE_TRANSLATE_TEST_SPEED (1.0f)
 /** 平移测试到点阈值，单位 cm；只影响代码层平移测试。 */

@@ -321,7 +321,7 @@ static void art_handle_stable_map(const art_replan_context_struct *context,
         }
         else if(0 != art_stats_count_decreased(&stats))
         {
-            // 推箱 waypoint：必须看到 B/T 真的减少，才算上位机已确认这次箱子消除。
+            // 单箱任务结束点：必须看到 B/T 真的减少，才算上位机已确认这次箱子消除。
             art_update_confirmed_counts(&stats);
             if(0 != update)
             {
@@ -330,7 +330,7 @@ static void art_handle_stable_map(const art_replan_context_struct *context,
         }
         else
         {
-            // 推箱动作后 B/T 没变，说明这次箱子任务还没被 ART 接受，后续应重算/重试。
+            // 单箱任务结束后 B/T 没变，说明这次箱子任务还没被 ART 接受，后续应重算/重试。
             if(0 != update)
             {
                 update->run_state = "Push Retry";

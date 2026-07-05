@@ -376,7 +376,20 @@ static uint8 result_append_waypoint(solve_result_struct *result, uint16 player_c
     result->waypoints[result->waypoint_count].action = action;
     result->waypoints[result->waypoint_count].action_start = action_index;
     result->waypoints[result->waypoint_count].action_end = result->action_count;
+    result->waypoints[result->waypoint_count].task_end = 0;
     result->waypoint_count++;
+    return 1;
+}
+
+static uint8 result_mark_last_waypoint_task_end(solve_result_struct *result)
+{
+    if(0 == result->waypoint_count)
+    {
+        set_message(result, "Task waypoint missing");
+        return 0;
+    }
+
+    result->waypoints[result->waypoint_count - 1u].task_end = 1;
     return 1;
 }
 
@@ -458,6 +471,11 @@ static uint8 apply_path_to_runtime(map_state_struct *map, uint8 box_index, uint8
     {
         // 理论上只有路径缓冲被截断或状态重放逻辑出错才会触发，保留检查便于定位容量问题。
         set_message(result, "Target not reached");
+        return 0;
+    }
+
+    if(0 == result_mark_last_waypoint_task_end(result))
+    {
         return 0;
     }
 
