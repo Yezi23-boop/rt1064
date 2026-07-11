@@ -313,8 +313,8 @@ static uint8 action_is_push(char action)
 
 static uint8 same_waypoint_run(char previous_action, char action)
 {
-    // 小车移动和推箱动作即使方向相同也不能合并，否则执行层会丢失“何时开始推”的语义。
-    if(action_is_push(previous_action) != action_is_push(action))
+    // 大写动作保持独立 waypoint，保留虚拟推箱动作和单箱任务结束点语义。
+    if((0 != action_is_push(previous_action)) || (0 != action_is_push(action)))
     {
         return 0u;
     }
@@ -337,7 +337,10 @@ static uint8 action_range_has_separator(const solve_result_struct *result, uint1
     return 0u;
 }
 
-static uint8 result_append_waypoint(solve_result_struct *result, uint16 player_cell, char action)
+static uint8 result_append_waypoint(solve_result_struct *result,
+                                    uint16 player_cell,
+                                    char action,
+                                    uint8 center_correct_before)
 {
     uint16 last_index;
     uint16 action_index;
@@ -354,7 +357,8 @@ static uint8 result_append_waypoint(solve_result_struct *result, uint16 player_c
         last_index = (uint16)(result->waypoint_count - 1u);
         // 连续同方向、同类型动作合并为一个 waypoint，减少屏幕回放点数和后续底盘路径点压力。
         // 合并前检查 action 区间，保证 `|` 分隔的任务边界不会被吞掉。
-        if((0 == action_range_has_separator(result, result->waypoints[last_index].action_end, action_index)) &&
+        if((0 == center_correct_before) &&
+           (0 == action_range_has_separator(result, result->waypoints[last_index].action_end, action_index)) &&
            (0 != same_waypoint_run(result->waypoints[last_index].action, action)))
         {
             result->waypoints[last_index].row = map_cell_row(player_cell);
@@ -377,6 +381,7 @@ static uint8 result_append_waypoint(solve_result_struct *result, uint16 player_c
     result->waypoints[result->waypoint_count].action_start = action_index;
     result->waypoints[result->waypoint_count].action_end = result->action_count;
     result->waypoints[result->waypoint_count].task_end = 0;
+    result->waypoints[result->waypoint_count].center_correct_before = center_correct_before;
     result->waypoint_count++;
     return 1;
 }
@@ -414,6 +419,7 @@ static uint8 apply_path_to_runtime(map_state_struct *map, uint8 box_index, uint8
     int8 row_delta;
     int8 col_delta;
     char action;
+    uint8 center_correct_before;
 
     // BFS 只返回动作串；这里把动作重放到运行态地图，作为多箱拆解后下一轮 BFS 的新起点。
     for(i = 0; i < path_len; i++)
@@ -456,12 +462,15 @@ static uint8 apply_path_to_runtime(map_state_struct *map, uint8 box_index, uint8
             box = next_box;
         }
 
+        center_correct_before = ((0 != action_is_push(action)) &&
+                                 ((0u == i) ||
+                                  (0 == action_is_push(path[i - 1u])))) ? 1u : 0u;
         player = next_player;
         if(0 == result_append_action(result, action))
         {
             return 0;
         }
-        if(0 == result_append_waypoint(result, player, action))
+        if(0 == result_append_waypoint(result, player, action, center_correct_before))
         {
             return 0;
         }
@@ -555,5 +564,153 @@ uint8 solve_map(const map_source_struct *source, solve_result_struct *result)
 
     result->solved = 1;
     set_message(result, "Solved");
+    return 1;
+}
+
+uint8 solve_navigation_path(const map_source_struct *source,
+                            uint8 target_row,
+                            uint8 target_col,
+                            solve_result_struct *result)
+{
+    static const int8 dr[4] = {-1, 1, 0, 0};
+    static const int8 dc[4] = {0, 0, -1, 1};
+    static const char move_action[4] = {'u', 'd', 'l', 'r'};
+    char reverse_path[MAP_CELLS];
+    uint16 start_cell = INVALID_STATE;
+    uint16 target_cell;
+    uint16 current_cell;
+    uint16 next_cell;
+    uint16 read_index = 0;
+    uint16 write_index = 0;
+    uint16 reverse_len = 0;
+    uint16 path_index;
+    uint8 car_count = 0;
+    uint8 row;
+    uint8 col;
+    uint8 dir;
+    char value;
+    char action;
+
+    if((0 == source) || (0 == result))
+    {
+        return 0;
+    }
+    clear_result(result);
+    if((target_row >= MAP_ROWS) || (target_col >= MAP_COLS))
+    {
+        set_message(result, "Bad navigation target");
+        return 0;
+    }
+
+    for(row = 0; row < MAP_ROWS; row++)
+    {
+        if(MAP_COLS != strlen(source->rows[row]))
+        {
+            set_message(result, "Bad map width");
+            return 0;
+        }
+        for(col = 0; col < MAP_COLS; col++)
+        {
+            value = source->rows[row][col];
+            if('C' == value)
+            {
+                start_cell = map_cell_index(row, col);
+                car_count++;
+            }
+            else if(('#' != value) && ('.' != value) && ('B' != value) &&
+                    ('T' != value) && ('X' != value))
+            {
+                set_message(result, "Bad map char");
+                return 0;
+            }
+        }
+    }
+    if((1u != car_count) || (INVALID_STATE == start_cell))
+    {
+        set_message(result, "Bad car count");
+        return 0;
+    }
+
+    value = source->rows[target_row][target_col];
+    if(('#' == value) || ('X' == value) || ('B' == value))
+    {
+        set_message(result, "Navigation target blocked");
+        return 0;
+    }
+    target_cell = map_cell_index(target_row, target_col);
+    if(start_cell == target_cell)
+    {
+        result->solved = 1;
+        set_message(result, "Navigation ready");
+        return 1;
+    }
+
+    memset(bfs_visited, 0, MAP_CELLS * sizeof(bfs_visited[0]));
+    bfs_visited[start_cell] = 1;
+    bfs_parent[start_cell] = INVALID_STATE;
+    bfs_queue[write_index++] = start_cell;
+
+    while(read_index < write_index)
+    {
+        current_cell = bfs_queue[read_index++];
+        if(current_cell == target_cell)
+        {
+            break;
+        }
+        for(dir = 0; dir < 4; dir++)
+        {
+            if(0 == step_cell(current_cell, dr[dir], dc[dir], &next_cell))
+            {
+                continue;
+            }
+            value = source->rows[map_cell_row(next_cell)][map_cell_col(next_cell)];
+            if(('#' == value) || ('X' == value) || ('B' == value) ||
+               (0 != bfs_visited[next_cell]))
+            {
+                continue;
+            }
+            bfs_visited[next_cell] = 1;
+            bfs_parent[next_cell] = current_cell;
+            bfs_action[next_cell] = move_action[dir];
+            bfs_queue[write_index++] = next_cell;
+        }
+    }
+    if(0 == bfs_visited[target_cell])
+    {
+        set_message(result, "No navigation path");
+        return 0;
+    }
+
+    current_cell = target_cell;
+    while(INVALID_STATE != bfs_parent[current_cell])
+    {
+        reverse_path[reverse_len++] = bfs_action[current_cell];
+        current_cell = bfs_parent[current_cell];
+    }
+
+    current_cell = start_cell;
+    for(path_index = 0; path_index < reverse_len; path_index++)
+    {
+        action = reverse_path[reverse_len - 1u - path_index];
+        for(dir = 0; dir < 4; dir++)
+        {
+            if(action == move_action[dir])
+            {
+                break;
+            }
+        }
+        if((dir >= 4u) ||
+           (0 == step_cell(current_cell, dr[dir], dc[dir], &next_cell)) ||
+           (0 == result_append_action(result, action)) ||
+           (0 == result_append_waypoint(result, next_cell, action, 0u)))
+        {
+            set_message(result, "Navigation output failed");
+            return 0;
+        }
+        current_cell = next_cell;
+    }
+
+    result->solved = 1;
+    set_message(result, "Navigation solved");
     return 1;
 }

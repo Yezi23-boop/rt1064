@@ -93,29 +93,44 @@ Important files:
 Push Box user modules:
 
 - `project/user/inc/map_types.h`  
-  Shared Push Box grid, cell, position, and command types.
+  Shared 16x12 map, solver result, action, and waypoint types.
+
+- `project/user/inc/map_utils.h` / `project/user/src/map_utils.c`
+  Map snapshot, comparison, player lookup, and object-count helpers shared by the UART, menu, solver, and replanning flow.
 
 - `project/user/inc/maps.h` / `project/user/src/maps.c`  
   Test maps or map fixtures used by the Push Box workflow.
 
 - `project/user/inc/solver.h` / `project/user/src/solver.c`  
-  Push Box solver / BFS logic.
+  Greedy multi-box decomposition, single-box Push Box BFS, and player-only navigation BFS used for return-to-launch routing.
 
-- `project/user/inc/plan_output.h` / `project/user/src/plan_output.c`  
-  Conversion from solver results to motion-oriented commands.
+- `project/user/inc/executor.h` / `project/user/src/executor.c`
+  Converts solver waypoints into 20 cm physical targets and advances the motion state machine from the 20ms control tick.
+
+- `project/user/inc/art_replan.h` / `project/user/src/art_replan.c`
+  ART-source runtime flow: launch delay and center collection, launch movement, stable-map solving, task-end synchronization, replanning, and automatic return to the left launch area.
+
+- `project/user/inc/openart_uart.h` / `project/user/src/openart_uart.c`
+  LPUART1 byte buffering and parsing for complete `MAP_BEGIN` / `MAP_END` frames plus `PLAYER_CENTER_GRID` samples.
 
 - `project/user/inc/app.h` / `project/user/src/app.c`  
-  Application-level Push Box integration.
+  Non-blocking application initialization and polling for the menu, VOFA service, OpenART parser, and drive tests.
+
+- `project/user/inc/menu.h` / `project/user/src/menu.c`
+  User workflow, map/source/mode selection, solving, execution-page state, and ART replanning coordination.
+
+- `project/user/inc/screen.h` / `project/user/src/screen.c`
+  IPS200 rendering only; business state is assembled by `menu.c` before drawing.
 
 Control-framework planning:
 
 - `docs/competition/姿态闭环框架.md`  
-  Source-of-truth for the planned mecanum attitude-control structure before C implementation. Check this before adding motor, encoder, IMU, PIT, or wheel PID modules.
+  Design and tuning context for the implemented mecanum attitude-control structure. Check it before changing motor, encoder, IMU, PIT, or wheel PID behavior, then verify details against the current C implementation.
 
 Current drive-control modules:
 
-- `project/user/inc/drive_config.h` / `project/user/src/drive_config.c`  
-  Wheel order, control limits, yaw PD defaults, wheel PID defaults, and the single definitions of `motor_dir_sign[4]` / `encoder_dir_sign[4]`.
+- `project/user/inc/drive_config.h`
+  Wheel order, 20ms control constants, 20 cm grid size, pose calibration, yaw/path PID defaults, ART synchronization settings, and launch/return configuration. This module has no `.c` file.
 
 - `project/user/inc/motion_math.h` / `project/user/src/motion_math.c`  
   Pure control math: shortest yaw error, attitude PD, discrete command to `vx/vy/vz`, mecanum mix, wheel normalization, and wheel target count mapping.
@@ -124,24 +139,36 @@ Current drive-control modules:
   Four-wheel incremental PID helper.
 
 - `project/user/inc/base_io.h` / `project/user/src/base_io.c`  
-  Hardware access boundary for IMU660RC yaw, encoder counts, wheel direction GPIO, and PWM output.
+  Hardware access boundary for encoders, motor direction GPIO, PWM output, and the definitions of `motor_dir_sign[4]` / `encoder_dir_sign[4]`.
+
+- `project/user/inc/drive_imu.h` / `project/user/src/drive_imu.c`
+  IMU initialization, yaw normalization/locking, and attitude-loop status updates.
+
+- `project/user/inc/drive_output.h` / `project/user/src/drive_output.c`
+  Mecanum mixing, wheel target generation, wheel-speed PID updates, startup PWM ramping, and final motor output.
+
+- `project/user/inc/drive_pose.h` / `project/user/src/drive_pose.c`
+  Short-distance odometry from four encoder increments and relative IMU yaw, expressed in the executor's local world coordinates.
 
 - `project/user/inc/drive_control.h` / `project/user/src/drive_control.c`  
-  Drive scheduling and public command API. `PIT_CH0` calls the 5ms IMU update, `PIT_CH1` calls the 20ms attitude / wheel-speed loop.
+  Drive scheduling and public motion API. `PIT_CH1` runs the 20ms feedback, executor, attitude, and wheel-speed chain; IMU samples arrive through the IMU INT2 callback, with no PIT-based 5ms IMU loop.
 
-Relevant driver / device APIs for the planned control framework:
+- `project/user/inc/drive_test.h` / `project/user/src/drive_test.c`
+  Bench-test and VOFA-driven manual motion/PWM diagnostics that temporarily take ownership of normal control output.
+
+Relevant driver / device APIs for the current control framework:
 
 - `libraries/zf_device/zf_device_imu660rc.h` / `libraries/zf_device/zf_device_imu660rc.c`  
   IMU660RC driver. Use `imu660rc_yaw` as the planned yaw source and `imu660rc_gyro_transition()` for gyro debug units.
 
 - `libraries/zf_driver/zf_driver_encoder.h` / `libraries/zf_driver/zf_driver_encoder.c`  
-  Quadrature encoder API. Planned wheel feedback unit is `encoder_get_count()` per 20ms cycle.
+  Quadrature encoder API. Wheel feedback uses `encoder_get_count()` increments per 20ms cycle.
 
 - `libraries/zf_driver/zf_driver_pwm.h` / `libraries/zf_driver/zf_driver_pwm.c`  
-  PWM output API. Planned motor duty range uses `PWM_DUTY_MAX = 10000`.
+  PWM output API. Motor duty uses the `PWM_DUTY_MAX = 10000` range before project-level limiting.
 
 - `libraries/zf_driver/zf_driver_pit.h` / `libraries/zf_driver/zf_driver_pit.c` and `project/user/src/isr.c`  
-  Periodic interrupt path. Planned control cadence is 5ms IMU update and 20ms attitude / wheel-speed control.
+  Periodic interrupt path. `PIT_CH1` is the 20ms motion-control boundary and `PIT_CH2` is the 5ms menu-key scan; IMU660RC updates are triggered by the GPIO INT2 interrupt path.
 
 Build outputs and local files under `project/mdk/Objects/`, `project/mdk/Listings/`, `project/mdk/.vscode/`, `*.log`, `*.uvoptx`, and `*.uvguix.*` are not source-of-truth.
 
@@ -155,17 +182,11 @@ openmv/
 
 Important files:
 
-- `openmv/openart_plus_uart_smoke.py`  
-  Minimal OpenART / OpenMV UART smoke test script.
+- `openmv/main_see.py`
+  Current OpenART Plus map-recognition entrypoint. It recognizes the 16x12 virtual grid, filters the virtual-player center, and sends map frames plus `PLAYER_CENTER_GRID` over UART12 at 115200 baud.
 
-- `openmv/openart_plus_grid_recognizer.py`  
-  OpenART / OpenMV grid recognition script.
-
-- `openmv/openart_plus_grid_recognizer_pure.py`  
-  Pure Python or host-checkable variant of the grid recognizer. Use this when logic can be checked without hardware.
-
-- `openmv/fe48eb2150ae5a6eea643c6615610fcf.png`  
-  Local visual reference / evidence image. Do not treat screenshots as algorithm source-of-truth.
+- `openmv/main_model.py`
+  Standalone EIQ/TFLite image-classification experiment for the later classification task. It currently prints classification results and is not connected to the RT1064 task-mapping flow.
 
 When writing OpenMV / ART code, consult the official OpenMV library index first:
 
@@ -321,9 +342,10 @@ Recommended search order:
 ### Find RT1064 firmware entrypoints
 
 1. Read `project/user/src/main.c`.
-2. Follow calls into `app.c`, `solver.c`, and `plan_output.c`.
-3. Check headers in `project/user/inc/` for public contracts.
-4. Only then inspect `libraries/` if a driver or device API is involved.
+2. Follow the main-loop path through `app.c` and `menu.c`.
+3. For ART execution, continue through `openart_uart.c`, `art_replan.c`, `solver.c`, and `executor.c`.
+4. For physical motion, follow `isr.c` into `drive_control.c`, `drive_pose.c`, `drive_imu.c`, and `drive_output.c`.
+5. Check headers in `project/user/inc/` for public contracts, then inspect `libraries/` only if a driver or device API is involved.
 
 ### Add a new RT1064 C source file
 
@@ -332,7 +354,7 @@ Recommended search order:
 3. Build with Keil command-line build:
 
 ```powershell
-D:\Keil_v5\UV4\UV4.exe -b D:\rt1064\RT1064_Library\SeekFree_RT1064_Opensource_Library\project\mdk\rt1064.uvprojx
+D:\Keil_v5\UV4\UV4.exe -b "C:\Users\ye\Desktop\rt1064\project\mdk\rt1064.uvprojx"
 ```
 
 ### Work on OpenART / OpenMV scripts

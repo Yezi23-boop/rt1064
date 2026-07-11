@@ -355,21 +355,12 @@ static void solve_current_map(void)
         last_elapsed_ms = time_ms() - start_ms;
         playback_state = PLAYBACK_STATE_PAUSED;
         run_state = "OK";
-        printf("SOLVE_OK map=%d tasks=%d actions=%d time=%lu\r\n",
-            current_map + 1,
-            last_result.task_count,
-            last_result.action_count,
-            (unsigned long)last_elapsed_ms);
     }
     else
     {
         last_elapsed_ms = time_ms() - start_ms;
         playback_state = PLAYBACK_STATE_FAIL;
         run_state = "Fail";
-        printf("SOLVE_FAIL map=%d %s time=%lu\r\n",
-            current_map + 1,
-            last_result.message,
-            (unsigned long)last_elapsed_ms);
     }
 
     playback_step = 0;
@@ -738,7 +729,8 @@ static void execute_current_selection(void)
             }
 
             executor_start(last_result.waypoints, last_result.waypoint_count,
-                           exec_start_row, exec_start_col, single_step,
+                           exec_start_row, exec_start_col,
+                           0.0f, 0.0f, single_step,
                            0u);
             enter_page(MENU_PAGE_RUN_EXECUTE);
         }
@@ -821,6 +813,7 @@ static void build_execute_view(screen_execute_view_struct *view)
     view->current_map = current_map;
     view->source = last_or_selected_map_source();
     view->result = &last_result;
+    view->state_text = run_state;
     view->current_step = executor_get_current_step();
     view->state = executor_get_state();
     view->error = executor_get_error();

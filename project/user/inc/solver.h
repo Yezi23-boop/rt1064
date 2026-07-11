@@ -27,4 +27,17 @@ void clear_result(solve_result_struct *result);
  */
 uint8 solve_map(const map_source_struct *source, solve_result_struct *result);
 
+/**
+ * @brief 在当前字符地图上规划小车到指定格的最短移动路径。
+ * @param[in] source 地图源；`#`、`X`、`B` 不可通行，其余合法格可通行。
+ * @param[in] target_row 目标行，范围 0..MAP_ROWS-1。
+ * @param[in] target_col 目标列，范围 0..MAP_COLS-1。
+ * @param[out] result 输出小写移动动作和合并 waypoint；起终点相同时 waypoint_count 为 0。
+ * @return 1 表示目标可达，0 表示地图无效、目标被占用或无路径。
+ */
+uint8 solve_navigation_path(const map_source_struct *source,
+                            uint8 target_row,
+                            uint8 target_col,
+                            solve_result_struct *result);
+
 #endif

@@ -6,8 +6,9 @@
  *   MAP_BEGIN
  *   12 行 RT 地图，每行 16 字符：
  *   # 墙，. 空地，B 箱子，T 目标点，C 小车，X 炸弹/障碍
+ *   PLAYER_CENTER_GRID 0,0 0（普通帧协议占位）
  *   MAP_END
- *   PLAYER_CENTER_GRID col_q,row_q valid
+ * 精确中心由 MCU 发送 CENTER_REQ 后，通过独立的 CENTER_SAMPLE 1..3 返回。
  *
  * UART1 底层初始化由 debug_init() 完成；运行期 LPUART1_IRQHandler()
  * 只投递字节到本模块，协议解析在主循环 openart_uart_poll() 中完成。
@@ -22,6 +23,7 @@
 #define OPENART_HW_RX_BUFFER_SIZE   (384u)
 #define OPENART_LINE_SIZE           (40u)
 #define OPENART_RX_TIMEOUT_MS       (1000u)
+#define OPENART_REQUESTED_CENTER_SAMPLE_COUNT (3u)
 
 typedef enum
 {
@@ -49,10 +51,19 @@ static uint32 error_count;                                       // 协议错误
 static uint8 player_row;                                         // 最近完整帧中第一个 `C` 的行号。
 static uint8 player_col;                                         // 最近完整帧中第一个 `C` 的列号。
 static uint8 player_count;                                       // 最近完整帧中 `C` 的数量，非 1 时位置只作诊断。
+static uint16 staging_player_center_col_q;                        // 普通帧兼容中心列；请求式模式下应为0。
+static uint16 staging_player_center_row_q;                        // 普通帧兼容中心行；请求式模式下应为0。
+static uint8 staging_player_center_valid;                         // 普通帧兼容 valid；请求式模式下应为0。
+static uint8 staging_player_center_received;                      // 1 表示当前半帧已收到 PLAYER_CENTER_GRID 行。
 static uint16 player_center_col_q;                               // 最近视觉中心列坐标，单位 1/100 格。
 static uint16 player_center_row_q;                               // 最近视觉中心行坐标，单位 1/100 格。
 static uint8 player_center_valid;                                // 1 表示最近一次样本有效。
 static uint32 player_center_count;                               // 视觉中心点样本累计计数。
+static uint8 requested_center_active;                            // 1 表示 MCU 已发送 CENTER_REQ，正在接收 1..3 号样本。
+static uint8 requested_center_count;                             // 当前请求已按顺序接收并入队的样本数，范围 0..3。
+static uint8 requested_center_read_index;                        // 主循环下一条待取样本下标，范围 0..3。
+static uint16 requested_center_col_q[OPENART_REQUESTED_CENTER_SAMPLE_COUNT]; // 请求样本列队列，单位 1/100 格。
+static uint16 requested_center_row_q[OPENART_REQUESTED_CENTER_SAMPLE_COUNT]; // 请求样本行队列，单位 1/100 格。
 
 static void update_map_object_cache(void)
 {
@@ -117,12 +128,21 @@ static uint8 is_valid_map_line(const char *line)
     return ('\0' == line[MAP_COLS]) ? 1u : 0u;
 }
 
+static void reset_staging_player_center(void)
+{
+    staging_player_center_col_q = 0;
+    staging_player_center_row_q = 0;
+    staging_player_center_valid = 0;
+    staging_player_center_received = 0;
+}
+
 static void reset_frame_parser(void)
 {
     // 只重置半帧解析器，不清除最近一次成功地图；屏幕和重解算仍可使用旧完整快照。
     parse_state = PARSE_WAIT_BEGIN;
     line_length = 0;
     recv_row = 0;
+    reset_staging_player_center();
 }
 
 static void accept_map(void)
@@ -138,9 +158,22 @@ static void accept_map(void)
     }
 
     openart_map_source.name = "OpenART";
+    if(0 != staging_player_center_received)
+    {
+        player_center_col_q = staging_player_center_col_q;
+        player_center_row_q = staging_player_center_row_q;
+        player_center_valid = staging_player_center_valid;
+    }
+    else
+    {
+        player_center_col_q = 0;
+        player_center_row_q = 0;
+        player_center_valid = 0;
+    }
     map_valid = 1;
     update_map_object_cache();
     frame_count++;
+    player_center_count = frame_count;
     uart_write_string(OPENART_UART_INDEX, "MAP_OK rows=12 cols=16\r\n");
 }
 
@@ -247,10 +280,79 @@ static void parse_player_center_line(void)
                                       &second_value,
                                       &valid_value))
     {
-        player_center_col_q = first_value;
-        player_center_row_q = second_value;
-        player_center_valid = valid_value;
-        player_center_count++;
+        staging_player_center_col_q = first_value;
+        staging_player_center_row_q = second_value;
+        staging_player_center_valid = valid_value;
+        staging_player_center_received = 1;
+    }
+}
+
+static uint8 parse_center_sample_line(uint16 *sample_index,
+                                     uint16 *center_col_q,
+                                     uint16 *center_row_q)
+{
+    const char *prefix = "CENTER_SAMPLE ";
+    char *text = line_buffer + strlen(prefix);
+    char *index_text;
+    char *col_text;
+    char *row_text;
+
+    if(0 != strncmp(line_buffer, prefix, strlen(prefix)))
+    {
+        return 0;
+    }
+
+    index_text = text;
+    while(('\0' != *text) && (',' != *text))
+    {
+        text++;
+    }
+    if(',' != *text)
+    {
+        return 0;
+    }
+    *text++ = '\0';
+
+    col_text = text;
+    while(('\0' != *text) && (',' != *text))
+    {
+        text++;
+    }
+    if(',' != *text)
+    {
+        return 0;
+    }
+    *text++ = '\0';
+    row_text = text;
+
+    return ((0 != parse_uint16_text(index_text, sample_index)) &&
+            (0 != parse_uint16_text(col_text, center_col_q)) &&
+            (0 != parse_uint16_text(row_text, center_row_q))) ? 1u : 0u;
+}
+
+static void parse_requested_center_line(void)
+{
+    uint16 sample_index;
+    uint16 center_col_q;
+    uint16 center_row_q;
+
+    if((0 == requested_center_active) ||
+       (0 == parse_center_sample_line(&sample_index, &center_col_q, &center_row_q)))
+    {
+        return;
+    }
+    if((sample_index != (uint16)(requested_center_count + 1u)) ||
+       (sample_index > OPENART_REQUESTED_CENTER_SAMPLE_COUNT))
+    {
+        return;
+    }
+
+    requested_center_col_q[requested_center_count] = center_col_q;
+    requested_center_row_q[requested_center_count] = center_row_q;
+    requested_center_count++;
+    if(requested_center_count >= OPENART_REQUESTED_CENTER_SAMPLE_COUNT)
+    {
+        requested_center_active = 0;
     }
 }
 
@@ -264,12 +366,22 @@ static void parse_line(void)
         // 新 MAP_BEGIN 直接开始新帧；若上一帧残缺，后续 MAP_END 行数校验会让它失效。
         parse_state = PARSE_READ_MAP;
         recv_row = 0;
+        reset_staging_player_center();
+        return;
+    }
+
+    if(0 == strncmp(line_buffer, "CENTER_SAMPLE ", 14))
+    {
+        parse_requested_center_line();
         return;
     }
 
     if(0 == strncmp(line_buffer, "PLAYER_CENTER_GRID ", 19))
     {
-        parse_player_center_line();
+        if(PARSE_READ_MAP == parse_state)
+        {
+            parse_player_center_line();
+        }
         return;
     }
 
@@ -349,6 +461,11 @@ void openart_uart_init(void)
     player_center_row_q = 0;
     player_center_valid = 0;
     player_center_count = 0;
+    requested_center_active = 0;
+    requested_center_count = 0;
+    requested_center_read_index = 0;
+    memset(requested_center_col_q, 0, sizeof(requested_center_col_q));
+    memset(requested_center_row_q, 0, sizeof(requested_center_row_q));
     reset_frame_parser();
 
     for(row = 0; row < MAP_ROWS; row++)
@@ -448,6 +565,46 @@ uint32 openart_get_player_center(uint16 *col_q, uint16 *row_q, uint8 *valid)
         *valid = player_center_valid;
     }
     return player_center_count;
+}
+
+void openart_request_player_center(void)
+{
+    requested_center_active = 1;
+    requested_center_count = 0;
+    requested_center_read_index = 0;
+    memset(requested_center_col_q, 0, sizeof(requested_center_col_q));
+    memset(requested_center_row_q, 0, sizeof(requested_center_row_q));
+    uart_write_string(OPENART_UART_INDEX, "CENTER_REQ\n");
+}
+
+uint8 openart_get_requested_center_sample(uint16 *col_q, uint16 *row_q)
+{
+    uint8 sample_index;
+
+    if(requested_center_read_index >= requested_center_count)
+    {
+        if(0 != col_q)
+        {
+            *col_q = 0;
+        }
+        if(0 != row_q)
+        {
+            *row_q = 0;
+        }
+        return 0;
+    }
+
+    sample_index = (uint8)(requested_center_read_index + 1u);
+    if(0 != col_q)
+    {
+        *col_q = requested_center_col_q[requested_center_read_index];
+    }
+    if(0 != row_q)
+    {
+        *row_q = requested_center_row_q[requested_center_read_index];
+    }
+    requested_center_read_index++;
+    return sample_index;
 }
 
 void openart_uart_push_byte(uint8 data)

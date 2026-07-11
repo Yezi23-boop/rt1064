@@ -15,9 +15,9 @@
 /** 第一版上板使用的保守目标轮速上限，单位为 encoder count/20ms。 */
 #define MAX_WHEEL_TARGET_COUNT (100.0f)
 /** 前后方向编码器增量到地面位移的标定系数，单位 cm/count；上下准时保持该值不动。 */
-#define POSE_Y_CM_PER_COUNT (0.0083f) // 86
+#define POSE_Y_CM_PER_COUNT (0.0078f) // 86
 /** 左右横移编码器增量到地面位移的标定系数，单位 cm/count；麦轮横移滑移通常需要单独标定。 */
-#define POSE_X_CM_PER_COUNT (0.0083f)
+#define POSE_X_CM_PER_COUNT (0.0078f)
 /** 位姿 X 轴方向校正；当前取 +1，表示麦轮反解的正 X 直接对应右移为正。 */
 #define POSE_X_DIR_SIGN (1.0f)
 /** 位姿 Y 轴方向校正；当前取 +1，表示麦轮反解的正 Y 直接对应前进为正。 */
@@ -71,7 +71,7 @@
 #define MOTOR_PWM_DEADBAND_TARGET_THRESHOLD_COUNT (25.0f)
 
 /** 起步 PWM 阶梯限幅开关；置 1 后速度环输出会先从较低 PWM 窗口逐步放开。 */
-#define DRIVE_START_PWM_RAMP_ENABLE (1)
+#define DRIVE_START_PWM_RAMP_ENABLE (0)
 /** 起步首个非零输出周期允许的最大 signed PWM 绝对值。 */
 #define DRIVE_START_PWM_RAMP_INITIAL_LIMIT (1000)
 /** 每个 20ms 控制周期放开的 signed PWM 窗口增量。 */
@@ -79,7 +79,7 @@
 
 /** 路径跟踪 PID 比例系数；误差单位为 cm，输出为归一化速度。 */
 #define PATH_KP (0.07f)
-/** 路径跟踪 PID 积分系数；当前默认 0，避免里程计漂移时累积横向误差。 */
+/** 路径跟踪 PID 积分系数；当前使用很小的 0.001，补偿稳定的小范围残余误差。 */
 #define PATH_KI (0.001f)
 /** 路径跟踪 PID 微分系数；当前默认 0，避免 20ms 位姿增量噪声放大。 */
 #define PATH_KD (0.0f)
@@ -87,34 +87,52 @@
 #define PATH_MAX_SPEED (1.0f)
 /** 路径跟踪 PID 积分限幅，单位 cm*s；只有 PATH_KI 非 0 时才影响输出。 */
 #define PATH_MAX_INTEGRAL (5.0f)
-/** 路径跟踪 PID 到点阈值，单位 cm。 */
+/** 路径/发车移动到点阈值，单位 cm。 */
 #define PATH_ARRIVAL_THRESHOLD_CM (0.5f)
-/** 执行器到点需要连续满足阈值的 20ms 周期数，用于过滤瞬时越界和惯性抖动。 */
+/** waypoint/发车移动到点需要连续满足阈值的 20ms 周期数，用于过滤瞬时越界和惯性抖动。 */
 #define EXEC_ARRIVAL_STABLE_TICKS (3u)
 /** waypoint 切换前的停稳时间，单位 ms；只在拐点/路径点边界停，不拆连续直线段。 */
-#define EXEC_SEGMENT_SETTLE_MS (100u)
+#define EXEC_SEGMENT_SETTLE_MS (500u)
 /** 推箱动作目标点越界补偿开关；只作用于 U/D/L/R，不改变普通移动。 */
 #define EXEC_PUSH_OVERSHOOT_ENABLE (0)
 /** 推箱动作额外前压比例，单位为格；0.20 表示每格 20cm 时多走 4cm。 */
 #define EXEC_PUSH_OVERSHOOT_RATIO (0.20f)
-/** ART 来源执行时，初始/段末等待稳定完整地图的最长时间，单位 ms。 */
-#define EXEC_ART_SYNC_TIMEOUT_MS (3000u)
+/** ART 等稳定地图和执行发车/返航单轴移动的最长时间；中心请求等待不使用超时。 */
+#define EXEC_ART_SYNC_TIMEOUT_MS (10000u)
 /** ART 来源执行时，完整地图需要连续一致的新帧数量。 */
-#define EXEC_ART_STABLE_FRAMES (2u)
-/** ART 中心点校正开关；只在 waypoint 停稳后使用，不参与 20ms 实时闭环。 */
+#define EXEC_ART_STABLE_FRAMES (1u)
+/** ART 左发车区目标：第二个可走格中心 X，单位 cm；col=2.5, grid=20cm -> 50cm。 */
+#define ART_LAUNCH_TARGET_X_CM (50.0f)
+/** 每次 CENTER_REQ 需要的有效精确中心样本数；所有关键节点共用中值滤波。 */
+#define ART_CENTER_SAMPLE_COUNT (3u)
+/** ART 发车移动最大归一化速度。 */
+#define ART_LAUNCH_MOVE_MAX_SPEED (1.0f)
+/** 推箱完成后自动返回左侧发车中心。 */
+#define ART_RETURN_HOME_ENABLE (1)
+/** 左侧发车通道在推箱地图内的入口列。 */
+#define ART_RETURN_GATE_COL (2u)
+/** 左侧发车通道允许的第一行。 */
+#define ART_RETURN_GATE_ROW_MIN (5u)
+/** 左侧发车通道允许的最后一行。 */
+#define ART_RETURN_GATE_ROW_MAX (6u)
+/** 最终中心与发车中心允许的行列误差，单位 1/100 格；5 对应约 1cm。 */
+#define ART_RETURN_HOME_TOLERANCE_Q (5u)
+/** 最终视觉复核未通过时允许的再次校正次数。 */
+#define ART_RETURN_MAX_CORRECTIONS (2u)
+/** ART 推箱前中心矫正开关；每段连续推箱只在第一个大写动作前采样一次。 */
+#define EXEC_ART_PRE_PUSH_CENTER_CORRECT_ENABLE (1)
+/** 旧普通 waypoint 段末中心校正开关；请求式中心模式下保持关闭。 */
 #define EXEC_ART_CENTER_CORRECT_ENABLE (0)
-/** ART 中心点需要收集的有效样本数；当前中值实现使用 3 帧。 */
-#define EXEC_ART_CENTER_SAMPLE_COUNT (3u)
 /** ART 中心点小于该偏差不修正，单位 cm，避免原地小抖动反复写 pose。 */
-#define EXEC_ART_CENTER_IGNORE_CM (1.0f)
-/** ART 中心点允许直接融合的最大偏差，单位 cm；超过后不立刻相信。 */
-#define EXEC_ART_CENTER_FUSE_MAX_CM (5.0f)
-/** ART 中心点超过该偏差认为异常，触发地图确认/重算，单位 cm。 */
-#define EXEC_ART_CENTER_ABNORMAL_CM (10.0f)
-/** ART 中心点融合比例；0.30 表示本地 pose 保留 70%，ART 观测占 30%。 */
-#define EXEC_ART_CENTER_FUSE_ALPHA (0.30f)
-/** ART 中心点所在格允许与当前 C 格一致；0 表示不接受相邻格中心直接校正。 */
-#define EXEC_ART_CENTER_ALLOW_NEIGHBOR_CELL (0)
+#define EXEC_ART_CENTER_IGNORE_CM (0.5f)
+/** ART 中心点允许直接融合的最大偏差，单位 cm；当前允许最多一个 20cm 格子。 */
+#define EXEC_ART_CENTER_FUSE_MAX_CM (20.0f)
+/** ART 中心点超过一个 20cm 格子认为异常。 */
+#define EXEC_ART_CENTER_ABNORMAL_CM (20.0f)
+/** ART 中心点融合比例；0.90 表示本地 pose 保留 10%，ART 观测占 90%。 */
+#define EXEC_ART_CENTER_FUSE_ALPHA (0.90f)
+/** ART 中心格匹配范围；1=接受当前 C 格及八邻域，0=只接受当前 C 格。 */
+#define EXEC_ART_CENTER_ALLOW_NEIGHBOR_CELL (1)
 
 /** 底盘统一轮序，混控、硬件映射和调试输出均不得更换该顺序。 */
 typedef enum

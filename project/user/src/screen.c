@@ -722,6 +722,7 @@ static const char *executor_error_text(executor_error_enum error)
         case EXEC_ERROR_ART_TIMEOUT:return "E:ATO";
         case EXEC_ERROR_ART_SYNC:   return "E:SYN";
         case EXEC_ERROR_ART_PLAN:   return "E:PLN";
+        case EXEC_ERROR_ART_CENTER: return "E:Ctr";
         case EXEC_ERROR_NONE:       return "E:OK";
         default:                    return "E:?";
     }
@@ -913,10 +914,14 @@ void screen_draw_execute(const screen_execute_view_struct *view)
     ips200_show_string(0, 0, "Execute");
     ips200_show_string(0, LINE_H, "Map:");
     ips200_show_uint(32, LINE_H, view->current_map + 1, 2);
+    ips200_show_string(0, LINE_H * 2, "S:");
+    show_text_value(16, LINE_H * 2,
+                    (0 != view->state_text) ? view->state_text : executor_state_text(view->state),
+                    8);
 
     if(0 == view->source)
     {
-        ips200_show_string(0, LINE_H * 2, "No Map");
+        ips200_show_string(0, LINE_H * 3, "No Map");
         show_hint("", "K4 Stop");
         return;
     }
@@ -934,7 +939,7 @@ void screen_draw_execute(const screen_execute_view_struct *view)
 
     ips200_show_string(0, LINE_H * 2, "S:");
     show_text_value(16, LINE_H * 2,
-                    (0 != view->art_launch_pending) ? "Ready K3" : executor_state_text(view->state),
+                    (0 != view->state_text) ? view->state_text : executor_state_text(view->state),
                     8);
     ips200_show_string(80, LINE_H * 2, "St:");
     ips200_show_uint(104, LINE_H * 2, view->current_step, 3);

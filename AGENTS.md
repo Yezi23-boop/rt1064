@@ -101,6 +101,13 @@ docs/agents/      ← Agent 工作流文档
 
 ## OpenART UART 协议
 
+### OpenART 显示与识别开关约定
+
+- `SHOW_RECTIFIED_VIEW` 只控制 IDE 显示拉正图还是原图，不得影响地图或 `PLAYER_CENTER_GRID` 的识别和 UART 下发。
+- `USE_RECTIFIED_RECOGNITION=False` 表示使用原图投影采样点识别，是正式高速模式的合法路径，不代表中心无效。
+- 正式高速组合保持 `SHOW_RECTIFIED_VIEW=False, USE_RECTIFIED_RECOGNITION=False`。
+- 不得用 `rectified_recognition_active` 作为是否下发小车中心的门控；原图路径应使用与四角标定一致的坐标换算后正常下发中心。
+
 ```
 MAP_BEGIN\n
 ################\n    ← 12行，每行16字符

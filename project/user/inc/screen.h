@@ -73,6 +73,7 @@ typedef struct
     uint8 current_map;                  /**< 当前内置地图索引，从 0 开始，仅用于标题显示。 */
     const map_source_struct *source;    /**< 执行时使用的地图快照，可为 NULL。 */
     const solve_result_struct *result;  /**< 执行路径对应的求解结果。 */
+    const char *state_text;             /**< 菜单层运行状态，发车/等图阶段优先显示。 */
     uint16 current_step;                /**< 当前 waypoint 步号。 */
     executor_state_enum state;          /**< 执行器状态。 */
     executor_error_enum error;          /**< 执行器错误码。 */

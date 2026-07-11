@@ -25,7 +25,8 @@ typedef enum {
     EXEC_ERROR_MAP,       /**< 输入 waypoint 为空或数量非法。 */
     EXEC_ERROR_ART_TIMEOUT, /**< ART 低频重定位等待超时 */
     EXEC_ERROR_ART_SYNC,  /**< ART 稳定地图无效。 */
-    EXEC_ERROR_ART_PLAN   /**< ART 稳定地图重解算失败。 */
+    EXEC_ERROR_ART_PLAN,  /**< ART 稳定地图重解算失败。 */
+    EXEC_ERROR_ART_CENTER /**< 推箱前 ART 中心采样或校正失败。 */
 } executor_error_enum;
 
 typedef enum {
@@ -64,13 +65,17 @@ void executor_init(void);
  * @param[in] count 路径点数量，必须大于 0。
  * @param[in] start_row 起始格子行号，用作局部坐标原点。
  * @param[in] start_col 起始格子列号，用作局部坐标原点。
+ * @param[in] initial_pose_x_cm 小车中心相对起始格中心的 X 偏移，离线地图传 0。
+ * @param[in] initial_pose_y_cm 小车中心相对起始格中心的 Y 偏移，离线地图传 0。
  * @param[in] single_step 非 0 表示段间暂停等待人工继续。
  * @param[in] art_sync 非 0 表示单箱任务结束点停稳后等待 ART 稳定地图确认。
  *                    普通移动和任务中途推箱 waypoint 不等待 ART。
- * @note 会把当前位姿重置为以起始 C 格为原点；yaw 保留当前 IMU 相对航向。
+ * @note 会在进入 RUNNING/PAUSED 前写入初始偏移；yaw 保留当前 IMU 相对航向。
  */
 void executor_start(const waypoint_struct *waypoints, uint16 count,
-                    uint8 start_row, uint8 start_col, uint8 single_step,
+                    uint8 start_row, uint8 start_col,
+                    float initial_pose_x_cm, float initial_pose_y_cm,
+                    uint8 single_step,
                     uint8 art_sync);
 
 /**
@@ -99,8 +104,21 @@ void executor_resume(void);
 uint8 executor_art_sync_pending(void);
 
 /**
- * @brief ART 段末视觉中心采样窗口是否打开。
- * @return 1 表示当前 waypoint 已到点，正在停稳或等待 ART，同步层可以收集中心样本。
+ * @brief 是否正在等待连续推箱段第一个大写动作前的中心矫正。
+ * @return 1 表示底盘已在推箱起点停车，主循环必须完成中心矫正后才能放行。
+ */
+uint8 executor_art_pre_push_pending(void);
+
+/**
+ * @brief 贴箱中心矫正成功后放行当前第一个推箱 waypoint。
+ * @return 1 表示已放行同一个 waypoint；0 表示当前没有中心等待。
+ * @note 本函数不推进 waypoint 下标，只允许 20ms executor 开始执行当前推箱动作。
+ */
+uint8 executor_continue_after_pre_push_center(void);
+
+/**
+ * @brief ART 视觉中心采样窗口是否打开。
+ * @return 1 表示正在段末停稳/同步，或正在等待推箱前中心矫正。
  */
 uint8 executor_art_center_sampling_active(void);
 
@@ -130,20 +148,23 @@ void executor_finish_done(void);
 void executor_set_error(executor_error_enum error);
 
 /**
- * @brief 在 ART 同步段末缓存一个视觉中心点样本。
+ * @brief 缓存一个 ART 视觉中心点样本。
  * @param[in] center_col_q OpenART 视觉中心列坐标，单位 1/100 格。
  * @param[in] center_row_q OpenART 视觉中心行坐标，单位 1/100 格。
  * @param[in] sample_count OpenART 中心点样本序号，用于过滤重复读取。
  * @return 1 表示已经收满 3 个有效样本并得到中值；0 表示样本不足或重复。
- * @note 这里只缓存中值，不立刻重置 pose；pose 会在 ART 稳定地图重启 executor 后应用。
+ * @note 这里只缓存中值，不立刻重置 pose；段末或推箱前流程随后决定是否提交。
  */
 uint8 executor_apply_art_player_center(uint16 center_col_q, uint16 center_row_q, uint32 sample_count);
 
 /**
  * @brief 把已缓存的 ART 视觉中心中值应用到当前 executor 局部位姿。
- * @return 视觉中心校正结果；只有 APPLIED 会修改 pose。
+ * @param[in] current_car_row 最新 ART 地图中 `C` 所在行。
+ * @param[in] current_car_col 最新 ART 地图中 `C` 所在列。
+ * @return 视觉中心校正结果；只有 APPLIED 会修改 pose，是否启用由调用流程控制。
  */
-executor_art_center_result_enum executor_commit_art_player_center(void);
+executor_art_center_result_enum executor_commit_art_player_center(uint8 current_car_row,
+                                                                  uint8 current_car_col);
 
 /**
  * @brief 获取当前状态。

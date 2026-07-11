@@ -7,7 +7,9 @@ UART_MAP_SEND_ENABLE = True  # True=开启 UART 地图发送；False=关闭
 UART_MAP_SEND_INDEX = 12     # UART 编号，OpenART Plus 用户串口使用 UART(12)
 UART_MAP_SEND_BAUD = 115200  # 波特率，与 RT1064 接收端一致
 UART_MAP_SEND_PERIOD_MS = 200  # 发送周期，单位 ms
-UART_MAP_DRAIN_RX = True     # True=清空 MCU 回包，避免 ACK 堆满 OpenART UART 接收缓冲
+UART_MAP_RX_ENABLE = True    # True=解析 MCU 命令，同时丢弃无需处理的 MAP_OK 回包
+CENTER_SAMPLE_COUNT = 3
+UART_RX_LINE_MAX = 48
 
 # ==================== USER_SWITCHES：现场最常改 ===================
 # 调试开关：正式跑帧率时建议 DEBUG_ENABLE=False
@@ -15,6 +17,7 @@ DEBUG_ENABLE = True          # True=打印地图并绘制调试图形；False=�
 DEBUG_DRAW_ROI = True        # True=画绿色地图边界/拉正边框
 DEBUG_DRAW_GRID_LINES = True # True=画 16x12 网格线，用于检查格子是否对齐
 DEBUG_DRAW_POINTS = True     # True=画识别结果圆点；False=画面更干净、显示更快
+DEBUG_PLAYER_CENTER_ENABLE = True # True=普通帧额外识别并显示精确小车中心；不下发给MCU
 DEBUG_PRINT_PERIOD_MS = 1000
 
 # 显示/识别路径：
@@ -53,10 +56,10 @@ GRID_ROWS = 12
 # MAP_CORNERS 表示屏幕地图外边界，用于四角透视标定。
 # 四点按 左上、右上、右下、左下 填写，指向完整 16x12 地图外边界。
 MAP_CORNERS = (
-    (1, 5),
-    (306, 9),
-    (306, 214),
-    (9, 230),
+    (9, 3),
+    (310,11),
+    (310,217),
+    (11, 233),
 )
 
 # 拉正图上的有效采样区域边距。四角已对齐但整张网格略偏时，只调这里。
@@ -86,16 +89,22 @@ PLAYER_SAMPLE_OFFSETS = (
 )
 
 PLAYER_CENTER_SEARCH_RADIUS = 14 * FRAME_SCALE
-PLAYER_CENTER_FILTER_WINDOW = 3
-PLAYER_CENTER_JITTER_THRESHOLD = 2 * FRAME_SCALE
 PLAYER_BLOB_PIXELS_THRESHOLD = 6
 PLAYER_BLOB_AREA_THRESHOLD = 6
 PLAYER_BLOB_MARGIN = 2
+PLAYER_PRECISE_MIN_COLOR_PIXELS = 12  # 绿色、青色各自至少命中的像素数
+PLAYER_PRECISE_TRIM_PERCENT = 10      # 外框两侧各忽略10%离群颜色像素
 
 # OpenMV find_blobs() 使用 LAB 阈值。这里先给一组偏宽的初值，
 # 再用 blob 中心的 RGB 归一化颜色做二次确认，现场还可以继续微调。
 PLAYER_GREEN_BLOB_THRESHOLD = (20, 100, -70, -6, -5, 90)
 PLAYER_CYAN_BLOB_THRESHOLD = (20, 100, -70, -6, -128, 15)
+
+LAUNCH_PLAYER_WINDOW_ENABLE = True
+LAUNCH_PLAYER_ROW_MIN = 5
+LAUNCH_PLAYER_ROW_MAX = 6
+LAUNCH_PLAYER_COL_MIN = 0
+LAUNCH_PLAYER_COL_MAX = 1
 
 SPACE_CONFIRM_OFFSETS = (
     (0, 0),
@@ -535,15 +544,23 @@ def blob_center_is_player(blob, img, predicate):
     return predicate(rn, gn, bn, color_sum)
 
 
-def detect_player_center(img, recognition_points, preferred_matrix, fallback_matrix):
+def detect_player_center(img, recognition_points, preferred_matrix, fallback_matrix,
+                         previous_center=None):
+    using_previous_center = False
     coarse_center = find_player_coarse_center(
         recognition_points, preferred_matrix, fallback_matrix)
+    if coarse_center is None:
+        coarse_center = previous_center
+        using_previous_center = True
     if coarse_center is None:
         return None
 
     coarse_x, coarse_y = coarse_center
     cell_half_w = max(PLAYER_CENTER_SEARCH_RADIUS, img.width() // GRID_COLS)
     cell_half_h = max(PLAYER_CENTER_SEARCH_RADIUS, img.height() // GRID_ROWS)
+    if using_previous_center:
+        cell_half_w = max(cell_half_w, (img.width() * 3) // (GRID_COLS * 2))
+        cell_half_h = max(cell_half_h, (img.height() * 3) // (GRID_ROWS * 2))
     left = coarse_x - cell_half_w
     top = coarse_y - cell_half_h
     right = coarse_x + cell_half_w
@@ -605,37 +622,102 @@ def detect_player_center(img, recognition_points, preferred_matrix, fallback_mat
             (green_center_y + cyan_center_y) // 2)
 
 
-def update_player_center_filter(player_center_history, detected_player_center):
-    if detected_player_center is None:
+def trimmed_histogram_bounds(histogram, total_count, trim_percent):
+    trim_count = total_count * trim_percent // 100
+    accumulated = 0
+    left_index = 0
+    right_index = len(histogram) - 1
+
+    for index, count in enumerate(histogram):
+        accumulated += count
+        if accumulated > trim_count:
+            left_index = index
+            break
+
+    accumulated = 0
+    for index in range(len(histogram) - 1, -1, -1):
+        accumulated += histogram[index]
+        if accumulated > trim_count:
+            right_index = index
+            break
+    return (left_index, right_index)
+
+
+def detect_player_center_precise(img, anchor_center):
+    if anchor_center is None:
         return None
 
-    player_center_history.append(detected_player_center)
-    while len(player_center_history) > PLAYER_CENTER_FILTER_WINDOW:
-        player_center_history.pop(0)
+    half_w = max(PLAYER_CENTER_SEARCH_RADIUS,
+                 (img.width() * 9) // (GRID_COLS * 10))
+    half_h = max(PLAYER_CENTER_SEARCH_RADIUS,
+                 (img.height() * 9) // (GRID_ROWS * 10))
+    left = max(0, anchor_center[0] - half_w)
+    top = max(0, anchor_center[1] - half_h)
+    right = min(img.width(), anchor_center[0] + half_w + 1)
+    bottom = min(img.height(), anchor_center[1] + half_h + 1)
+    if right <= left or bottom <= top:
+        return None
 
-    xs = []
-    ys = []
-    for center in player_center_history:
-        xs.append(center[0])
-        ys.append(center[1])
-    xs.sort()
-    ys.sort()
-    mid = len(xs) // 2
-    filtered_center = (xs[mid], ys[mid])
+    x_histogram = [0 for _ in range(right - left)]
+    y_histogram = [0 for _ in range(bottom - top)]
+    green_count = 0
+    cyan_count = 0
+    total_count = 0
 
-    if len(player_center_history) > 1:
-        last_center = player_center_history[-2]
-        dx = filtered_center[0] - last_center[0]
-        dy = filtered_center[1] - last_center[1]
-        if (dx * dx + dy * dy) <= (PLAYER_CENTER_JITTER_THRESHOLD * PLAYER_CENTER_JITTER_THRESHOLD):
-            return last_center
+    for y in range(top, bottom):
+        for x in range(left, right):
+            pixel = img.get_pixel(x, y)
+            rn, gn, bn, color_sum = normalize_color(pixel[0], pixel[1], pixel[2])
+            is_green = is_player_green_half(rn, gn, bn, color_sum)
+            is_cyan = is_player_cyan_half(rn, gn, bn, color_sum)
+            if is_green:
+                green_count += 1
+            if is_cyan:
+                cyan_count += 1
+            if is_green or is_cyan:
+                x_histogram[x - left] += 1
+                y_histogram[y - top] += 1
+                total_count += 1
 
-    return filtered_center
+    if (green_count < PLAYER_PRECISE_MIN_COLOR_PIXELS or
+            cyan_count < PLAYER_PRECISE_MIN_COLOR_PIXELS):
+        return None
+
+    x_min, x_max = trimmed_histogram_bounds(
+        x_histogram, total_count, PLAYER_PRECISE_TRIM_PERCENT)
+    y_min, y_max = trimmed_histogram_bounds(
+        y_histogram, total_count, PLAYER_PRECISE_TRIM_PERCENT)
+    return ((left + x_min + left + x_max) // 2,
+            (top + y_min + top + y_max) // 2)
 
 
-def player_center_to_grid_q(player_center):
+def player_center_to_grid_q(player_center, rectified=True, raw_transform=None):
     if player_center is None:
         return None
+
+    if not rectified:
+        if raw_transform is None:
+            return None
+        x, y = player_center
+        a, b, c, d, e, f, g, h = raw_transform
+        m00 = a - x * g
+        m01 = b - x * h
+        m10 = d - y * g
+        m11 = e - y * h
+        rhs0 = x - c
+        rhs1 = y - f
+        determinant = m00 * m11 - m01 * m10
+        if -0.000001 < determinant < 0.000001:
+            return None
+        u = (rhs0 * m11 - m01 * rhs1) / determinant
+        v = (m00 * rhs1 - rhs0 * m10) / determinant
+        col_q = int(u * GRID_COLS * 100 + 0.5)
+        row_q = int(v * GRID_ROWS * 100 + 0.5)
+        if col_q < 0 or col_q >= GRID_COLS * 100:
+            return None
+        if row_q < 0 or row_q >= GRID_ROWS * 100:
+            return None
+        return (col_q, row_q)
 
     left = GRID_LEFT_MARGIN
     top = GRID_TOP_MARGIN
@@ -688,11 +770,6 @@ def confirm_space_color(img, x, y, center_r, center_g, center_b):
 
 
 def classify_element(img, row_idx, col_idx, x, y):
-    # 逐飞地图外圈固定为墙，强制处理可减少外圈纹理和边缘透视带来的误判。
-    if (row_idx == 0 or row_idx == GRID_ROWS - 1 or
-            col_idx == 0 or col_idx == GRID_COLS - 1):
-        return "wall"
-
     r, g, b = get_average_pixel(img, x, y)
 
     # 若中心位置被黑色调试点或阴影覆盖，只尝试偏移重采样，不在这里定类。
@@ -701,6 +778,18 @@ def classify_element(img, row_idx, col_idx, x, y):
         rr, gg, bb = get_average_pixel(img, x + 3, y + 3)
         if rr + gg + bb > r + g + b:
             r, g, b = rr, gg, bb
+
+    if (LAUNCH_PLAYER_WINDOW_ENABLE and
+            LAUNCH_PLAYER_ROW_MIN <= row_idx <= LAUNCH_PLAYER_ROW_MAX and
+            LAUNCH_PLAYER_COL_MIN <= col_idx <= LAUNCH_PLAYER_COL_MAX):
+        if sample_player_color(img, x, y, r, g, b):
+            return "player"
+        return "wall"
+
+    # 逐飞地图外圈固定为墙；左发车窗口只允许小车色块打破这条规则。
+    if (row_idx == 0 or row_idx == GRID_ROWS - 1 or
+            col_idx == 0 or col_idx == GRID_COLS - 1):
+        return "wall"
 
     if sample_player_color(img, x, y, r, g, b):
         return "player"
@@ -803,36 +892,92 @@ def init_uart_map():
         return None
 
 
+center_request_active = False
+center_request_sample_count = 0
+center_request_generation = 0
+map_uart_rx_line = ""
+
+
+def parse_map_uart_line(line):
+    global center_request_active
+    global center_request_sample_count
+    global center_request_generation
+
+    if line == "CENTER_REQ":
+        center_request_active = True
+        center_request_sample_count = 0
+        center_request_generation += 1
+
+
+def poll_map_uart_rx(uart):
+    global map_uart_rx_line
+
+    if not UART_MAP_RX_ENABLE or uart is None:
+        return
+    try:
+        count = uart.any()
+        if not count:
+            return
+        data = uart.read(count)
+        if data is None:
+            return
+        for value in data:
+            if value == 10:
+                parse_map_uart_line(map_uart_rx_line)
+                map_uart_rx_line = ""
+            elif value == 13:
+                continue
+            elif 32 <= value <= 126:
+                if len(map_uart_rx_line) < UART_RX_LINE_MAX:
+                    map_uart_rx_line += chr(value)
+                else:
+                    map_uart_rx_line = ""
+    except Exception:
+        map_uart_rx_line = ""
+
+
+def process_center_request(uart, detected_player_center,
+                           rectified_recognition, raw_transform):
+    global center_request_active
+    global center_request_sample_count
+
+    if not center_request_active or uart is None or detected_player_center is None:
+        return
+    center_grid = player_center_to_grid_q(
+        detected_player_center, rectified_recognition, raw_transform)
+    if center_grid is None:
+        return
+
+    sample_index = center_request_sample_count + 1
+    try:
+        uart.write("CENTER_SAMPLE %d,%d,%d\n" %
+                   (sample_index, center_grid[0], center_grid[1]))
+    except Exception:
+        return
+
+    center_request_sample_count = sample_index
+    if center_request_sample_count >= CENTER_SAMPLE_COUNT:
+        center_request_active = False
+
+
 def send_map_uart(uart, char_matrix, player_center_grid=None):
     if uart is None:
         return
     try:
-        drain_map_uart_rx(uart)
+        poll_map_uart_rx(uart)
         uart.write("MAP_BEGIN\n")
         for row in char_matrix:
             line = "".join(row) + "\n"
             uart.write(line)
-        uart.write("MAP_END\n")
         if player_center_grid is not None:
             uart.write("PLAYER_CENTER_GRID %d,%d 1\n" %
                        (player_center_grid[0], player_center_grid[1]))
         else:
             uart.write("PLAYER_CENTER_GRID 0,0 0\n")
-        drain_map_uart_rx(uart)
+        uart.write("MAP_END\n")
+        poll_map_uart_rx(uart)
     except Exception as exc:
         print("UART_MAP_SEND_ERROR:", repr(exc))
-
-
-def drain_map_uart_rx(uart):
-    if not UART_MAP_DRAIN_RX or uart is None:
-        return
-    try:
-        count = uart.any()
-        while count:
-            uart.read(count)
-            count = uart.any()
-    except Exception:
-        pass
 
 
 def init_camera():
@@ -871,6 +1016,9 @@ def main():
         return
     rectified_grid_points = build_rectified_grid_points(IMG_WIDTH, IMG_HEIGHT)
     quad_corners = build_quad_corner_list()
+    raw_grid_transform = build_quad_transform(MAP_CORNERS)
+    if raw_grid_transform is None:
+        return
     raw_element_matrix = [["" for _ in range(GRID_COLS)] for _ in range(GRID_ROWS)]
     element_matrix = [["" for _ in range(GRID_COLS)] for _ in range(GRID_ROWS)]
     pending_element_matrix = [["" for _ in range(GRID_COLS)] for _ in range(GRID_ROWS)]
@@ -901,12 +1049,13 @@ def main():
     rectified_recognition_active = USE_RECTIFIED_RECOGNITION
     rectified_view_failed = False
     rectified_recognition_failed = False
-    player_center_history = []
-    last_player_center = None
+    player_center_anchor = None
+    handled_center_request_generation = -1
 
     while True:
         loop_start_us = time.ticks_us()
         clock.tick()
+        poll_map_uart_rx(map_uart)
         img = sensor.snapshot()
         snapshot_done_us = time.ticks_us()
         now_ms = time.ticks_ms()
@@ -930,19 +1079,32 @@ def main():
                 rectified_recognition_active = False
                 recognition_img = img
                 recognition_points = grid_points
+                player_center_anchor = None
 
         rectify_done_us = time.ticks_us()
         recognize_map(recognition_img, recognition_points, raw_element_matrix)
         update_stable_map(
             raw_element_matrix, element_matrix,
             pending_element_matrix, pending_count_matrix, char_matrix)
-        detected_player_center = detect_player_center(
-            recognition_img, recognition_points, element_matrix, raw_element_matrix)
-        filtered_player_center = update_player_center_filter(
-            player_center_history, detected_player_center)
-        if filtered_player_center is not None:
-            last_player_center = filtered_player_center
-        player_center = last_player_center
+        precise_player_center = None
+        if center_request_active or DEBUG_PLAYER_CENTER_ENABLE:
+            if handled_center_request_generation != center_request_generation:
+                player_center_anchor = None
+                handled_center_request_generation = center_request_generation
+
+            blob_player_center = detect_player_center(
+                recognition_img, recognition_points,
+                element_matrix, raw_element_matrix,
+                player_center_anchor)
+            precise_anchor = (blob_player_center if blob_player_center is not None
+                              else player_center_anchor)
+            precise_player_center = detect_player_center_precise(
+                recognition_img, precise_anchor)
+            if precise_player_center is not None:
+                player_center_anchor = precise_player_center
+
+        process_center_request(map_uart, precise_player_center,
+                               rectified_recognition_active, raw_grid_transform)
         recognize_done_us = time.ticks_us()
 
         # 识别仍走原图、但 IDE 要看拉正图时，在识别完成后才改变 framebuffer。
@@ -966,14 +1128,20 @@ def main():
 
         if DEBUG_ENABLE and DEBUG_DRAW_POINTS:
             draw_recognition_points(img, element_matrix, display_points)
-        if (DEBUG_ENABLE and DEBUG_DRAW_POINTS and player_center is not None and
+        if (DEBUG_PLAYER_CENTER_ENABLE and precise_player_center is not None and
                 (rectified_recognition_active == display_rectified)):
-            img.draw_cross(player_center[0], player_center[1], color=(255, 255, 0), thickness=2)
+            img.draw_cross(precise_player_center[0], precise_player_center[1],
+                           color=(255, 255, 0), thickness=2)
         display_done_us = time.ticks_us()
 
-        if DEBUG_ENABLE and time.ticks_diff(now_ms, last_print_ms) >= DEBUG_PRINT_PERIOD_MS:
+        if ((DEBUG_ENABLE or DEBUG_PLAYER_CENTER_ENABLE) and
+                time.ticks_diff(now_ms, last_print_ms) >= DEBUG_PRINT_PERIOD_MS):
             loop_us = time.ticks_diff(time.ticks_us(), loop_start_us)
             loop_fps = 1000000.0 / loop_us if loop_us > 0 else 0.0
+            debug_player_center_grid = player_center_to_grid_q(
+                precise_player_center,
+                rectified_recognition_active,
+                raw_grid_transform)
             print_map(
                 char_matrix,
                 clock.fps(),
@@ -984,14 +1152,16 @@ def main():
                 time.ticks_diff(recognize_done_us, rectify_done_us),
                 time.ticks_diff(display_done_us, recognize_done_us),
                 sensor.get_exposure_us(),
-                player_center)
+                precise_player_center)
+            if debug_player_center_grid is not None:
+                print("PLAYER_CENTER_GRID %d,%d 1" %
+                      (debug_player_center_grid[0], debug_player_center_grid[1]))
+            else:
+                print("PLAYER_CENTER_GRID 0,0 0")
             last_print_ms = now_ms
 
         if UART_MAP_SEND_ENABLE and map_uart is not None and time.ticks_diff(now_ms, last_uart_send_ms) >= UART_MAP_SEND_PERIOD_MS:
-            player_center_grid = None
-            if rectified_recognition_active:
-                player_center_grid = player_center_to_grid_q(player_center)
-            send_map_uart(map_uart, char_matrix, player_center_grid)
+            send_map_uart(map_uart, char_matrix, None)
             last_uart_send_ms = now_ms
 
 

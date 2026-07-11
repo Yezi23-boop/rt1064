@@ -16,8 +16,8 @@ void openart_uart_init(void);
 /**
  * @brief 在主循环中解析 OpenART 地图帧。
  *
- * 从 ISR 投递的环形缓冲中取出字节，按 `MAP_BEGIN`/12 行地图/`MAP_END` 协议更新
- * 最近完整地图快照。
+ * 从 ISR 投递的环形缓冲中取出字节，按 `MAP_BEGIN`/12 行地图/
+ * `PLAYER_CENTER_GRID 0,0 0`/`MAP_END` 协议原子更新最近完整地图。
  *
  * @note 必须在主循环中高频调用，避免环形缓冲被 UART ISR 写满；不要在 ISR 中调用。
  */
@@ -74,17 +74,32 @@ void openart_uart_discard_pending(void);
 uint8 openart_find_player_cell(uint8 *row, uint8 *col, uint8 *count);
 
 /**
- * @brief 获取最近一次 OpenART 视觉中心点样本。
+ * @brief 获取地图帧中的兼容中心字段。
  *
- * OpenART 发送 `PLAYER_CENTER_GRID col_q,row_q valid`，其中 q 单位为 1/100 格，
- * 例如 `750,650` 表示列 7.50、行 6.50。
+ * 请求式中心模式下，普通地图固定发送 `PLAYER_CENTER_GRID 0,0 0`。
+ * 该接口只保留协议兼容和诊断，不得用于发车、求解、重规划或返航 pose。
+ * 精确中心必须通过 `openart_request_player_center()` 主动请求。
  *
  * @param[out] col_q 列坐标，单位为 1/100 格，可传 NULL。
  * @param[out] row_q 行坐标，单位为 1/100 格，可传 NULL。
  * @param[out] valid 1 表示当前样本有效；0 表示无有效中心点。
- * @return 自 `openart_uart_init()` 后累计接收的中心点样本序号。
+ * @return 配套地图帧号；当前正常运行时 valid 应为 0。
  */
 uint32 openart_get_player_center(uint16 *col_q, uint16 *row_q, uint8 *valid);
+
+/**
+ * @brief 请求 OpenART 临时开启中心识别并逐帧返回3个有效精确中心。
+ * @note 会清除上一轮请求样本并通过 UART1 发送一次 `CENTER_REQ`；调用方负责停车等待。
+ */
+void openart_request_player_center(void);
+
+/**
+ * @brief 按接收顺序弹出当前请求的一条中心样本。
+ * @param[out] col_q 中心列坐标，单位 1/100 格，可传 NULL。
+ * @param[out] row_q 中心行坐标，单位 1/100 格，可传 NULL。
+ * @return 样本序号 1..3；0 表示当前没有待取样本。
+ */
+uint8 openart_get_requested_center_sample(uint16 *col_q, uint16 *row_q);
 
 /**
  * @brief 从 UART1 ISR 投递一个接收字节。
