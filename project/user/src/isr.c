@@ -4,6 +4,7 @@
 #include "executor.h"
 #include "menu_key.h"
 #include "openart_uart.h"
+#include "vision_uart.h"
 #include "isr.h"
 
 void CSI_IRQHandler(void)
@@ -76,8 +77,8 @@ void LPUART4_IRQHandler(void)
 {
     if(kLPUART_RxDataRegFullFlag & LPUART_GetStatusFlags(LPUART4))
     {
-        flexio_camera_uart_handler();
-        gnss_uart_callback();
+        uint8 data = LPUART_ReadByte(LPUART4);
+        vision_uart_push_byte(data);
     }
 
     LPUART_ClearStatusFlags(LPUART4, kLPUART_RxOverrunFlag);

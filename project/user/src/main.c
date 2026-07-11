@@ -2,6 +2,7 @@
 #include "zf_device_wireless_uart.h"
 #include "drive_control.h"
 #include "openart_uart.h"
+#include "vision_uart.h"
 #include "app.h"
 #include "executor.h"
 
@@ -16,6 +17,8 @@ int main(void)
     wireless_uart_init();
     // UART1 运行期专用于 OpenART 地图帧；openart_uart_init 只清协议状态和接收缓冲，不改串口分工。
     openart_uart_init();
+    // UART4 专用于第二块 OpenART 的图片/数字分类请求与结果。
+    vision_uart_init();
     control_init_state = control_init();
     executor_init();
 
