@@ -48,6 +48,10 @@ typedef struct
     uint8 redraw;                         /**< 非 0 表示当前页面需要重绘。 */
     uint8 enter_execute;                  /**< 非 0 表示初次 ART 求解成功后应进入执行页。 */
     uint8 reset_playback_step;            /**< 非 0 表示新路径产生，回放步号应归零。 */
+    uint8 subject2_map_ready;             /**< 非 0 表示科目二发车后地图和初始 offset 已准备好。 */
+    uint8 return_complete;                /**< 非 0 表示本轮任务已完成精确返航。 */
+    float initial_pose_x_cm;              /**< 科目二初始 C 格内 X offset。 */
+    float initial_pose_y_cm;              /**< 科目二初始 C 格内 Y offset。 */
     art_replan_playback_enum playback;    /**< 回放状态建议。 */
     const char *run_state;                /**< 可显示的运行状态文本；NULL 表示不更新。 */
 } art_replan_update_struct;
@@ -80,6 +84,15 @@ void art_replan_cancel(void);
  * 只接受调用之后到达的新帧，降低使用过期画面的风险。
  */
 void art_replan_begin_initial(art_replan_update_struct *update);
+
+/** 使用现有发车流程获取科目二地图，但不调用科目一 solve_map。 */
+void art_replan_begin_subject2(art_replan_update_struct *update);
+
+/** 使用现有 home 中心和网格返航算法开始返航。 */
+uint8 art_replan_begin_return_home(const art_replan_context_struct *context,
+                                   float initial_pose_x_cm,
+                                   float initial_pose_y_cm,
+                                   art_replan_update_struct *update);
 
 /**
  * @brief 推进 ART 重解算状态机。

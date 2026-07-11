@@ -37,6 +37,7 @@ static uint8 art_stable_count = 0;                               // 连续一致
 static uint32 art_last_seen_frame = 0;                            // 已处理到的 OpenART 帧号；用于丢弃等待前的旧帧。
 static uint32 art_wait_start_ms = 0;                              // 本轮 ART 等待起点，单位 ms；用于统一初始/段末超时。
 static uint8 art_launch_pending = 0;                              // 兼容旧界面字段；当前发车流程不再置 1。
+static uint8 art_launch_subject2 = 0;                             // 1 表示发车后把地图交给科目二，不运行任意配对求解。
 static uint32 art_launch_delay_start_ms = 0;                      // 5 秒延迟起点。
 static uint8 confirmed_box_count = 0;                             // 上一次被 ART 认定为“同步完成”的箱子数基线。
 static uint8 confirmed_target_count = 0;                          // 上一次被 ART 认定为“同步完成”的目标数基线。
@@ -148,11 +149,8 @@ static void art_replan_update_reset(art_replan_update_struct *update)
     {
         return;
     }
-    update->redraw = 0;
-    update->enter_execute = 0;
-    update->reset_playback_step = 0;
+    memset(update, 0, sizeof(*update));
     update->playback = ART_REPLAN_PLAYBACK_KEEP;
-    update->run_state = 0;
 }
 
 static void art_replan_wait_fresh_frame(void)
@@ -629,6 +627,7 @@ static void art_replan_finish_return(art_replan_update_struct *update)
     if(0 != update)
     {
         update->playback = ART_REPLAN_PLAYBACK_DONE;
+        update->return_complete = 1u;
         update->run_state = "Done";
         update->redraw = 1;
     }
@@ -984,6 +983,25 @@ static void art_replan_solve_snapshot_after_center(
         return;
     }
 
+    if((ART_REPLAN_INITIAL == map_phase) && (0u != art_launch_subject2))
+    {
+        *context->start_row = stats.car_row;
+        *context->start_col = stats.car_col;
+        memset(context->result, 0, sizeof(*context->result));
+        *context->elapsed_ms = 0u;
+        art_replan_cancel();
+        if(0 != update)
+        {
+            update->subject2_map_ready = 1u;
+            update->initial_pose_x_cm = initial_pose_x_cm;
+            update->initial_pose_y_cm = initial_pose_y_cm;
+            update->run_state = "BScan";
+            update->enter_execute = 1u;
+            update->redraw = 1u;
+        }
+        return;
+    }
+
     if((ART_REPLAN_SEGMENT == map_phase) && (0 != art_stats_done(&stats)))
     {
         if(0 != ART_RETURN_HOME_ENABLE)
@@ -1074,6 +1092,7 @@ void art_replan_cancel(void)
     art_last_seen_frame = 0;
     art_wait_start_ms = 0;
     art_launch_pending = 0;
+    art_launch_subject2 = 0u;
     art_launch_delay_start_ms = 0;
     art_launch_target_x_cm = 0.0f;
     art_launch_arrival_ticks = 0;
@@ -1090,6 +1109,7 @@ void art_replan_begin_initial(art_replan_update_struct *update)
 {
     art_replan_update_reset(update);
     art_replan_phase = ART_REPLAN_WAIT_LAUNCH;
+    art_launch_subject2 = 0u;
     art_launch_delay_start_ms = time_ms();
     confirmed_box_count = 0;
     confirmed_target_count = 0;
@@ -1106,6 +1126,36 @@ void art_replan_begin_initial(art_replan_update_struct *update)
         update->run_state = "W5S";
         update->redraw = 1;
     }
+}
+
+void art_replan_begin_subject2(art_replan_update_struct *update)
+{
+    art_replan_begin_initial(update);
+    art_launch_subject2 = 1u;
+}
+
+uint8 art_replan_begin_return_home(const art_replan_context_struct *context,
+                                   float initial_pose_x_cm,
+                                   float initial_pose_y_cm,
+                                   art_replan_update_struct *update)
+{
+    map_scan_stats_struct stats;
+
+    art_replan_update_reset(update);
+    if((0 == context) || (0 == context->snapshot) ||
+       (0 == context->snapshot_valid) || (0u == *context->snapshot_valid))
+    {
+        return 0u;
+    }
+    map_scan_stats(context->snapshot, &stats);
+    if((1u != stats.car_count) || (0u != stats.box_count) ||
+       (0u != stats.target_count))
+    {
+        return 0u;
+    }
+    art_replan_start_return(context, &stats,
+                            initial_pose_x_cm, initial_pose_y_cm, update);
+    return (ART_REPLAN_IDLE != art_replan_phase) ? 1u : 0u;
 }
 
 void art_replan_tick(const art_replan_context_struct *context,

@@ -101,6 +101,11 @@
 #define EXEC_ART_SYNC_TIMEOUT_MS (10000u)
 /** ART 来源执行时，完整地图需要连续一致的新帧数量。 */
 #define EXEC_ART_STABLE_FRAMES (1u)
+/** 比赛运行范围：只跑科目一、只跑科目二或一次 K3 完整连续运行。 */
+#define COMPETITION_MODE_SUBJECT1_DEBUG (1u)
+#define COMPETITION_MODE_SUBJECT2_DEBUG (2u)
+#define COMPETITION_MODE_FULL (3u)
+#define COMPETITION_MODE (COMPETITION_MODE_SUBJECT2_DEBUG)
 /** 科目二分类结果最低置信度，单位千分值。 */
 #define SUBJECT2_CLASS_CONFIDENCE_Q (750u)
 /** 科目二分类需要连续一致的有效样本数。 */

@@ -510,6 +510,11 @@
               <FilePath>..\user\src\subject2.c</FilePath>
             </File>
             <File>
+              <FileName>competition_flow.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>..\user\src\competition_flow.c</FilePath>
+            </File>
+            <File>
               <FileName>executor.c</FileName>
               <FileType>1</FileType>
               <FilePath>..\user\src\executor.c</FilePath>

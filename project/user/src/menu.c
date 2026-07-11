@@ -12,6 +12,10 @@
 #include "openart_uart.h"
 #include "executor.h"
 #include "art_replan.h"
+#include "competition_flow.h"
+#include "drive_config.h"
+#include "subject2.h"
+#include "vision_uart.h"
 
 #define MENU_KEY_SCAN_PERIOD_MS (5)
 #define PLAYBACK_STEP_MS        (300u)
@@ -99,6 +103,7 @@ static map_source_struct last_solve_source =
     },
 };
 static uint8 last_solve_source_valid = 0;                    // 1 表示 `last_solve_source` 可用于 Run/Execute/Playback 显示。
+static uint8 subject2_active = 0;                            // 1 表示科目二接管 executor 和 ART 段末事件。
 
 static void draw_current_page(void);
 static void enter_run_mode_page(void);
@@ -263,6 +268,10 @@ static void safe_go_home(void)
     // K4 长按是全局安全出口：无论当前页面在哪，都取消 ART 等待并停止底盘执行。
     // 这条路径不能写 Flash，避免紧急退出时被慢速擦写拖住。
     art_replan_cancel();
+    subject2_cancel();
+    vision_uart_cancel();
+    competition_flow_cancel();
+    subject2_active = 0u;
     if(EXEC_STATE_IDLE != executor_get_state())
     {
         executor_stop();
@@ -285,6 +294,10 @@ static void go_parent(void)
 static void clear_result_state(void)
 {
     art_replan_cancel();
+    subject2_cancel();
+    vision_uart_cancel();
+    competition_flow_cancel();
+    subject2_active = 0u;
     if(EXEC_STATE_IDLE != executor_get_state())
     {
         executor_stop();
@@ -377,6 +390,62 @@ static void build_art_replan_context(art_replan_context_struct *context)
     context->start_row = &exec_start_row;
     context->start_col = &exec_start_col;
     context->run_mode = run_mode;
+}
+
+static void build_subject2_context(subject2_context_struct *context)
+{
+    context->result = &last_result;
+    context->snapshot = &last_solve_source;
+    context->snapshot_rows = last_solve_rows;
+    context->snapshot_valid = &last_solve_source_valid;
+    context->elapsed_ms = &last_elapsed_ms;
+    context->start_row = &exec_start_row;
+    context->start_col = &exec_start_col;
+    context->run_mode = run_mode;
+}
+
+static void apply_subject2_update(const subject2_update_struct *update)
+{
+    if(0 == update)
+    {
+        return;
+    }
+    if(0 != update->run_state)
+    {
+        run_state = update->run_state;
+    }
+    if(0 != update->enter_execute)
+    {
+        enter_page(MENU_PAGE_RUN_EXECUTE);
+    }
+    else if(0 != update->redraw)
+    {
+        mark_redraw();
+    }
+}
+
+static void start_competition_action(competition_action_enum action,
+                                     art_replan_update_struct *update)
+{
+    subject2_active = 0u;
+    if(COMPETITION_ACTION_START_SUBJECT1 == action)
+    {
+        art_replan_begin_initial(update);
+    }
+    else if(COMPETITION_ACTION_START_SUBJECT2 == action)
+    {
+        art_replan_begin_subject2(update);
+    }
+    else
+    {
+        memset(update, 0, sizeof(*update));
+        if(COMPETITION_ACTION_FINISH == action)
+        {
+            update->playback = ART_REPLAN_PLAYBACK_DONE;
+            update->run_state = "Done";
+            update->redraw = 1u;
+        }
+    }
 }
 
 static void apply_art_replan_update(const art_replan_update_struct *update)
@@ -693,9 +762,14 @@ static void playback_tick(void)
 static void execute_current_selection(void)
 {
     art_replan_update_struct update;
+    competition_action_enum action;
 
     candidate_mode = run_mode;
     art_replan_cancel();
+    subject2_cancel();
+    vision_uart_cancel();
+    competition_flow_cancel();
+    subject2_active = 0u;
 
     if((MAP_SOURCE_ART == settings_get_source()) && (RUN_MODE_SOLVE != run_mode))
     {
@@ -705,7 +779,9 @@ static void execute_current_selection(void)
         playback_state = PLAYBACK_STATE_PAUSED;
         last_solve_source_valid = 0;
         executor_stop();
-        art_replan_begin_initial(&update);
+        competition_flow_start(COMPETITION_MODE);
+        action = competition_flow_take_action();
+        start_competition_action(action, &update);
         apply_art_replan_update(&update);
         enter_page(MENU_PAGE_RUN_EXECUTE);
         return;
@@ -968,6 +1044,10 @@ static void handle_execute_event(menu_key_event_enum event)
         case MENU_KEY_EVENT_K4_SHORT:
             // 执行页 K4 是人工停止路径：同时取消 ART 等待和 executor，防止返回后后台继续跑。
             art_replan_cancel();
+            subject2_cancel();
+            vision_uart_cancel();
+            competition_flow_cancel();
+            subject2_active = 0u;
             executor_stop();
             go_parent();
             break;
@@ -1028,6 +1108,9 @@ void menu_poll(void)
     menu_key_event_enum event = menu_key_read_event();
     art_replan_context_struct art_context;
     art_replan_update_struct art_update;
+    subject2_context_struct subject2_context;
+    subject2_update_struct subject2_update;
+    competition_action_enum action;
 
     if(MENU_KEY_EVENT_NONE != event)
     {
@@ -1036,8 +1119,56 @@ void menu_poll(void)
 
     playback_tick();
     build_art_replan_context(&art_context);
-    art_replan_tick(&art_context, (MAP_SOURCE_ART == settings_get_source()) ? 1u : 0u, &art_update);
-    apply_art_replan_update(&art_update);
+    if(0u != subject2_active)
+    {
+        build_subject2_context(&subject2_context);
+        subject2_tick(&subject2_context, &subject2_update);
+        apply_subject2_update(&subject2_update);
+        if(0u != subject2_update.return_requested)
+        {
+            if(0 != art_replan_begin_return_home(&art_context,
+                                                  subject2_update.return_pose_x_cm,
+                                                  subject2_update.return_pose_y_cm,
+                                                  &art_update))
+            {
+                subject2_cancel();
+                subject2_active = 0u;
+                apply_art_replan_update(&art_update);
+            }
+            else
+            {
+                subject2_cancel();
+                subject2_active = 0u;
+                executor_set_error(EXEC_ERROR_ART_SYNC);
+                run_state = "RetErr";
+                mark_redraw();
+            }
+        }
+    }
+    else
+    {
+        art_replan_tick(&art_context,
+                        (MAP_SOURCE_ART == settings_get_source()) ? 1u : 0u,
+                        &art_update);
+        apply_art_replan_update(&art_update);
+        if(0u != art_update.subject2_map_ready)
+        {
+            build_subject2_context(&subject2_context);
+            subject2_begin(&subject2_context,
+                           art_update.initial_pose_x_cm,
+                           art_update.initial_pose_y_cm,
+                           &subject2_update);
+            subject2_active = (SUBJECT2_ERROR != subject2_get_state()) ? 1u : 0u;
+            apply_subject2_update(&subject2_update);
+        }
+        if(0u != art_update.return_complete)
+        {
+            competition_flow_on_return_complete();
+            action = competition_flow_take_action();
+            start_competition_action(action, &art_update);
+            apply_art_replan_update(&art_update);
+        }
+    }
 
     if(0 != need_redraw)
     {

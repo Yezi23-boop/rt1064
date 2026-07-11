@@ -196,7 +196,10 @@ static uint8 run_test(void)
     context.start_col = &start_col;
     context.run_mode = RUN_MODE_RUN;
 
+    memset(&update, 0xA5, sizeof(update));
     art_replan_begin_initial(&update);
+    if((0u != update.subject2_map_ready) || (0u != update.return_complete) ||
+       (0.0f != update.initial_pose_x_cm) || (0.0f != update.initial_pose_y_cm)) return 0;
     fake_time_ms = 5000u;
     art_replan_tick(&context, 1u, &update);
     if((1u != center_request_count) || (0 != strcmp(update.run_state, "WCTR"))) return 0;
@@ -266,7 +269,34 @@ static uint8 run_test(void)
 
     feed_center(250u, 550u, 249u, 550u, 251u, 550u);
     art_replan_tick(&context, 1u, &update);
-    return (EXEC_STATE_DONE == fake_executor_state) ? 1u : 0u;
+    if((EXEC_STATE_DONE != fake_executor_state) || (0u == update.return_complete)) return 0u;
+
+    live_rows[5][5] = 'B';
+    live_rows[5][6] = 'T';
+    fake_executor_state = EXEC_STATE_IDLE;
+    solve_before = solve_count;
+    {
+        uint16 starts_before = executor_start_count;
+
+        art_replan_begin_subject2(&update);
+        fake_time_ms += 5000u;
+        art_replan_tick(&context, 1u, &update);
+        if(0 != strcmp(update.run_state, "WCTR")) return 0u;
+
+        feed_center(250u, 550u, 251u, 550u, 249u, 550u);
+        art_replan_tick(&context, 1u, &update);
+        publish_stable_map(&context, &update);
+        if(0 != strcmp(update.run_state, "ICtr")) return 0u;
+
+        feed_center(260u, 550u, 259u, 550u, 261u, 550u);
+        art_replan_tick(&context, 1u, &update);
+        if((0u == update.subject2_map_ready) ||
+           (solve_before != solve_count) ||
+           (starts_before != executor_start_count) ||
+           (fabsf(update.initial_pose_x_cm - 2.0f) > 0.01f) ||
+           (fabsf(update.initial_pose_y_cm) > 0.01f)) return 0u;
+    }
+    return 1u;
 }
 
 int main(void)
