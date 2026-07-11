@@ -28,6 +28,19 @@ void clear_result(solve_result_struct *result);
 uint8 solve_map(const map_source_struct *source, solve_result_struct *result);
 
 /**
+ * @brief 求解指定箱子到指定目标的单箱任务。
+ * @param[in] source 当前完整字符地图。
+ * @param[in] box_cell 必须与地图中某个 `B` 坐标一致。
+ * @param[in] target_cell 必须与地图中某个 `T` 坐标一致。
+ * @param[out] result 单任务动作和 waypoint；最后一个 waypoint 标记 task_end。
+ * @return 1 表示指定配对可解，0 表示地图无效、坐标不存在或无路径。
+ */
+uint8 solve_bound_box_path(const map_source_struct *source,
+                           uint16 box_cell,
+                           uint16 target_cell,
+                           solve_result_struct *result);
+
+/**
  * @brief 在当前字符地图上规划小车到指定格的最短移动路径。
  * @param[in] source 地图源；`#`、`X`、`B` 不可通行，其余合法格可通行。
  * @param[in] target_row 目标行，范围 0..MAP_ROWS-1。

@@ -1,5 +1,6 @@
 #include <stdio.h>
 #include <string.h>
+#include "map_utils.h"
 #include "solver.h"
 
 typedef struct
@@ -148,6 +149,54 @@ static uint8 diagonal_approach_marks_first_push(void)
             (1u == result.waypoints[1].center_correct_before)) ? 1u : 0u;
 }
 
+static uint8 bound_box_uses_requested_target(void)
+{
+    navigation_test_map_struct map;
+    solve_result_struct result;
+
+    init_map(&map, 1u, 1u);
+    map.storage[1][3] = 'B';
+    map.storage[1][4] = 'T';
+    map.storage[1][6] = 'T';
+    map.storage[3][3] = 'B';
+
+    if(0 == solve_bound_box_path(&map.source,
+                                 map_cell_index(1u, 3u),
+                                 map_cell_index(1u, 6u),
+                                 &result))
+    {
+        return 0u;
+    }
+
+    return ((0 == strcmp(result.actions, "rRRR")) &&
+            (1u == result.task_count) &&
+            (1u == result.waypoints[result.waypoint_count - 1u].task_end) &&
+            (1u == result.waypoints[result.waypoint_count - 1u].row) &&
+            (5u == result.waypoints[result.waypoint_count - 1u].col)) ? 1u : 0u;
+}
+
+static uint8 bound_box_rejects_missing_cells(void)
+{
+    navigation_test_map_struct map;
+    solve_result_struct result;
+
+    init_map(&map, 1u, 1u);
+    map.storage[1][3] = 'B';
+    map.storage[1][6] = 'T';
+
+    if(0 != solve_bound_box_path(&map.source,
+                                 map_cell_index(2u, 3u),
+                                 map_cell_index(1u, 6u),
+                                 &result))
+    {
+        return 0u;
+    }
+    return (0 == solve_bound_box_path(&map.source,
+                                      map_cell_index(1u, 3u),
+                                      map_cell_index(2u, 6u),
+                                      &result)) ? 1u : 0u;
+}
+
 int main(void)
 {
     navigation_test_map_struct map;
@@ -179,6 +228,8 @@ int main(void)
     passed &= run_case("each-push-is-waypoint", each_push_action_is_a_waypoint());
     passed &= run_case("mark-first-push", first_push_is_marked_after_merged_approach());
     passed &= run_case("diagonal-first-push", diagonal_approach_marks_first_push());
+    passed &= run_case("bound-requested-target", bound_box_uses_requested_target());
+    passed &= run_case("bound-missing-cells", bound_box_rejects_missing_cells());
 
     return (0 != passed) ? 0 : 1;
 }

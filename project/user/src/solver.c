@@ -567,6 +567,68 @@ uint8 solve_map(const map_source_struct *source, solve_result_struct *result)
     return 1;
 }
 
+uint8 solve_bound_box_path(const map_source_struct *source,
+                           uint16 box_cell,
+                           uint16 target_cell,
+                           solve_result_struct *result)
+{
+    map_state_struct map;
+    uint16 path_len;
+    uint8 box_index = 0u;
+    uint8 target_index = 0u;
+    uint8 box_found = 0u;
+    uint8 target_found = 0u;
+    uint8 index;
+
+    if((0 == source) || (0 == result))
+    {
+        return 0u;
+    }
+    clear_result(result);
+    if(0 == map_load(source, &map, result))
+    {
+        return 0u;
+    }
+
+    for(index = 0u; index < map.box_count; index++)
+    {
+        if(box_cell == map.boxes[index])
+        {
+            box_index = index;
+            box_found = 1u;
+            break;
+        }
+    }
+    for(index = 0u; index < map.target_count; index++)
+    {
+        if(target_cell == map.targets[index])
+        {
+            target_index = index;
+            target_found = 1u;
+            break;
+        }
+    }
+    if((0u == box_found) || (0u == target_found))
+    {
+        set_message(result, "Bound cell missing");
+        return 0u;
+    }
+    if(0 == solve_single_box(&map, box_index, target_index, single_path, &path_len))
+    {
+        set_message(result, "No bound BFS path");
+        return 0u;
+    }
+    if(0 == apply_path_to_runtime(&map, box_index, target_index,
+                                  single_path, path_len, result))
+    {
+        return 0u;
+    }
+
+    result->solved = 1u;
+    set_message(result, "Solved bound task");
+    return 1u;
+}
+
 uint8 solve_navigation_path(const map_source_struct *source,
                             uint8 target_row,
                             uint8 target_col,
