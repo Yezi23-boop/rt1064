@@ -101,6 +101,12 @@
 #define EXEC_ART_SYNC_TIMEOUT_MS (10000u)
 /** ART 来源执行时，完整地图需要连续一致的新帧数量。 */
 #define EXEC_ART_STABLE_FRAMES (1u)
+/** 科目二分类结果最低置信度，单位千分值。 */
+#define SUBJECT2_CLASS_CONFIDENCE_Q (750u)
+/** 科目二分类需要连续一致的有效样本数。 */
+#define SUBJECT2_CLASS_STABLE_SAMPLES (3u)
+/** 科目二单个观察格等待分类结果的最长时间。 */
+#define SUBJECT2_VIEW_TIMEOUT_MS (20000u)
 /** ART 左发车区目标：第二个可走格中心 X，单位 cm；col=2.5, grid=20cm -> 50cm。 */
 #define ART_LAUNCH_TARGET_X_CM (50.0f)
 /** 每次 CENTER_REQ 需要的有效精确中心样本数；所有关键节点共用中值滤波。 */

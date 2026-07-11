@@ -505,6 +505,11 @@
               <FilePath>..\user\src\subject2_logic.c</FilePath>
             </File>
             <File>
+              <FileName>subject2.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>..\user\src\subject2.c</FilePath>
+            </File>
+            <File>
               <FileName>executor.c</FileName>
               <FileType>1</FileType>
               <FilePath>..\user\src\executor.c</FilePath>
