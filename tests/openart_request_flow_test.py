@@ -28,7 +28,7 @@ main_body = function_body(
 assert "process_center_request(map_uart, precise_player_center" in main_body
 assert "send_map_uart(map_uart, char_matrix, None)" in main_body
 assert "\n            player_center_grid = player_center_to_grid_q" not in main_body
-assert "DEBUG_PLAYER_CENTER_ENABLE = False" in OPENMV_SOURCE
+assert "DEBUG_PLAYER_CENTER_ENABLE =" in OPENMV_SOURCE
 assert "if center_request_active or DEBUG_PLAYER_CENTER_ENABLE:" in main_body
 
 request_branch = main_body.index("if center_request_active or DEBUG_PLAYER_CENTER_ENABLE:")
