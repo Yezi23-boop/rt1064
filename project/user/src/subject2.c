@@ -28,6 +28,16 @@ static uint8 navigation_start_row;
 static uint8 navigation_start_col;
 static uint8 validation_retry_count;
 static uint8 active_class = SUBJECT2_INVALID_CLASS;
+static solve_result_struct push_candidate_result;
+static uint16 task_start_boxes[MAX_BOXES];
+static uint8 task_start_box_count;
+static uint8 task_start_target_count;
+static uint8 retry_active_only;
+static uint8 replan_center_for_return;
+static uint32 confirm_last_frame;
+static char confirm_candidate_rows[MAP_ROWS][MAP_COLS + 1];
+static uint8 confirm_candidate_valid;
+static uint8 confirm_stable_count;
 
 static void subject2_update_reset(subject2_update_struct *update)
 {
@@ -201,7 +211,8 @@ static uint8 subject2_collect_center(void)
     return (center_sample_count >= ART_CENTER_SAMPLE_COUNT) ? 1u : 0u;
 }
 
-static uint8 subject2_apply_observation_center(const subject2_context_struct *context)
+static uint8 subject2_apply_center(const subject2_context_struct *context,
+                                   uint8 require_observation_match)
 {
     const map_source_struct *source = openart_map_get();
     const drive_pose_struct *pose;
@@ -212,10 +223,14 @@ static uint8 subject2_apply_observation_center(const subject2_context_struct *co
     float offset_x_cm;
     float offset_y_cm;
 
-    if((0 == source) || (0 == subject2_map_objects_unchanged(source)) ||
-       (0 == map_find_car(source, &car_row, &car_col, 0)) ||
-       (car_row != current_observation.row) ||
-       (car_col != current_observation.col))
+    if((0 == source) || (0 == map_find_car(source, &car_row, &car_col, 0)))
+    {
+        return 0u;
+    }
+    if((0u != require_observation_match) &&
+       ((0 == subject2_map_objects_unchanged(source)) ||
+        (car_row != current_observation.row) ||
+        (car_col != current_observation.col)))
     {
         return 0u;
     }
@@ -278,7 +293,7 @@ static void subject2_tick_center(const subject2_context_struct *context,
         }
         return;
     }
-    if(0 == subject2_apply_observation_center(context))
+    if(0 == subject2_apply_center(context, 1u))
     {
         subject2_mark_observation_failed(update);
         return;
@@ -531,6 +546,299 @@ static void subject2_tick_validate(subject2_update_struct *update)
     }
 }
 
+static void subject2_tick_select_push(const subject2_context_struct *context,
+                                      subject2_update_struct *update)
+{
+    map_scan_stats_struct stats;
+    uint16 best_actions = 0xFFFFu;
+    uint8 class_id;
+    uint8 selected = SUBJECT2_INVALID_CLASS;
+
+    for(class_id = 0u; class_id < SUBJECT2_CLASS_COUNT; class_id++)
+    {
+        if((0u == bindings[class_id].box_valid) ||
+           (0u == bindings[class_id].target_valid) ||
+           (0u != bindings[class_id].completed) ||
+           ((0u != retry_active_only) && (class_id != active_class)))
+        {
+            continue;
+        }
+        if(0 != solve_bound_box_path(context->snapshot,
+                                     bindings[class_id].box_cell,
+                                     bindings[class_id].target_cell,
+                                     &push_candidate_result))
+        {
+            if((SUBJECT2_INVALID_CLASS == selected) ||
+               (push_candidate_result.action_count < best_actions))
+            {
+                selected = class_id;
+                best_actions = push_candidate_result.action_count;
+                memcpy(context->result, &push_candidate_result,
+                       sizeof(*context->result));
+            }
+        }
+    }
+    if(SUBJECT2_INVALID_CLASS == selected)
+    {
+        subject2_fail(EXEC_ERROR_SUBJECT2_PLAN, "E:Plan", update);
+        return;
+    }
+
+    active_class = selected;
+    retry_active_only = 0u;
+    if(0 == subject2_collect_cells(context->snapshot, 'B',
+                                   task_start_boxes, &task_start_box_count))
+    {
+        subject2_fail(EXEC_ERROR_SUBJECT2_TRACK, "E:Track", update);
+        return;
+    }
+    task_start_target_count = task_start_box_count;
+    map_scan_stats(context->snapshot, &stats);
+    *context->start_row = stats.car_row;
+    *context->start_col = stats.car_col;
+    executor_start(context->result->waypoints,
+                   context->result->waypoint_count,
+                   stats.car_row,
+                   stats.car_col,
+                   current_pose_offset_x_cm,
+                   current_pose_offset_y_cm,
+                   (RUN_MODE_STEP == context->run_mode) ? 1u : 0u,
+                   1u);
+    subject2_state = SUBJECT2_EXECUTE_PUSH;
+    if(0 != update)
+    {
+        update->run_state = "S2Push";
+        update->redraw = 1u;
+    }
+}
+
+static void subject2_begin_pre_push_center(subject2_update_struct *update)
+{
+    executor_reset_art_player_center_samples();
+    openart_request_player_center();
+    subject2_state = SUBJECT2_PRE_PUSH_CENTER;
+    if(0 != update)
+    {
+        update->run_state = "PCtr";
+        update->redraw = 1u;
+    }
+}
+
+static void subject2_tick_pre_push_center(subject2_update_struct *update)
+{
+    const map_source_struct *source;
+    executor_art_center_result_enum result;
+    uint16 col_q;
+    uint16 row_q;
+    uint8 sample_index;
+    uint8 ready = 0u;
+    uint8 car_row;
+    uint8 car_col;
+
+    while(0u != (sample_index = openart_get_requested_center_sample(&col_q, &row_q)))
+    {
+        if(0 != executor_apply_art_player_center(col_q, row_q, sample_index))
+        {
+            ready = 1u;
+        }
+    }
+    if(0u == ready)
+    {
+        if(0 != update) update->run_state = "PCtr";
+        return;
+    }
+    source = openart_map_get();
+    if((0 == source) || (0 == map_find_car(source, &car_row, &car_col, 0)))
+    {
+        subject2_fail(EXEC_ERROR_ART_CENTER, "E:Ctr", update);
+        return;
+    }
+    result = executor_commit_art_player_center(car_row, car_col);
+    if((EXEC_ART_CENTER_APPLIED != result) &&
+       (EXEC_ART_CENTER_IGNORED != result))
+    {
+        subject2_fail(EXEC_ERROR_ART_CENTER, "E:Ctr", update);
+        return;
+    }
+    if(0 == executor_continue_after_pre_push_center())
+    {
+        subject2_fail(EXEC_ERROR_ART_CENTER, "E:Ctr", update);
+        return;
+    }
+    subject2_state = SUBJECT2_EXECUTE_PUSH;
+    if(0 != update)
+    {
+        update->run_state = "S2Push";
+        update->redraw = 1u;
+    }
+}
+
+static void subject2_begin_confirm_map(subject2_update_struct *update)
+{
+    confirm_last_frame = openart_uart_get_frame_count();
+    confirm_candidate_valid = 0u;
+    confirm_stable_count = 0u;
+    subject2_state = SUBJECT2_CONFIRM_MAP;
+    if(0 != update)
+    {
+        update->run_state = "ART Wait";
+        update->redraw = 1u;
+    }
+}
+
+static void subject2_begin_replan_center(uint8 for_return,
+                                         subject2_update_struct *update)
+{
+    replan_center_for_return = for_return;
+    center_sample_count = 0u;
+    openart_request_player_center();
+    subject2_state = SUBJECT2_REPLAN_CENTER;
+    if(0 != update)
+    {
+        update->run_state = for_return ? "S2Ret" : "RCtr";
+        update->redraw = 1u;
+    }
+}
+
+static void subject2_accept_confirmed_map(const subject2_context_struct *context,
+                                          const map_source_struct *source,
+                                          subject2_update_struct *update)
+{
+    map_scan_stats_struct stats;
+    uint16 new_boxes[MAX_BOXES];
+    uint8 new_box_count = 0u;
+    subject2_track_result_enum track_result;
+
+    map_scan_stats(source, &stats);
+    if(1u != stats.car_count)
+    {
+        subject2_fail(EXEC_ERROR_SUBJECT2_TRACK, "E:Track", update);
+        return;
+    }
+    if((stats.box_count + 1u == task_start_box_count) &&
+       (stats.target_count + 1u == task_start_target_count))
+    {
+        bindings[active_class].completed = 1u;
+        map_source_snapshot(context->snapshot, context->snapshot_rows, source);
+        *context->snapshot_valid = 1u;
+        executor_stop();
+        subject2_begin_replan_center((0u == stats.box_count) ? 1u : 0u, update);
+        return;
+    }
+    if((stats.box_count == task_start_box_count) &&
+       (stats.target_count == task_start_target_count) &&
+       (0 != subject2_collect_cells(source, 'B', new_boxes, &new_box_count)))
+    {
+        track_result = subject2_track_active_box(bindings, active_class,
+                                                 task_start_boxes,
+                                                 task_start_box_count,
+                                                 new_boxes,
+                                                 new_box_count);
+        if(SUBJECT2_TRACK_AMBIGUOUS == track_result)
+        {
+            subject2_fail(EXEC_ERROR_SUBJECT2_TRACK, "E:Track", update);
+            return;
+        }
+        retry_active_only = 1u;
+        map_source_snapshot(context->snapshot, context->snapshot_rows, source);
+        *context->snapshot_valid = 1u;
+        executor_stop();
+        subject2_begin_replan_center(0u, update);
+        return;
+    }
+    subject2_fail(EXEC_ERROR_SUBJECT2_TRACK, "E:Track", update);
+}
+
+static void subject2_tick_confirm_map(const subject2_context_struct *context,
+                                      subject2_update_struct *update)
+{
+    const map_source_struct *source;
+    uint32 frame_count = openart_uart_get_frame_count();
+
+    if(frame_count == confirm_last_frame)
+    {
+        if(0 != update) update->run_state = "ART Wait";
+        return;
+    }
+    confirm_last_frame = frame_count;
+    source = openart_map_get();
+    if(0 == source)
+    {
+        return;
+    }
+    if((0u == confirm_candidate_valid) ||
+       (0u == map_rows_equal(confirm_candidate_rows, source)))
+    {
+        map_copy_rows(confirm_candidate_rows, source);
+        confirm_candidate_valid = 1u;
+        confirm_stable_count = 1u;
+    }
+    else if(confirm_stable_count < EXEC_ART_STABLE_FRAMES)
+    {
+        confirm_stable_count++;
+    }
+    if(confirm_stable_count >= EXEC_ART_STABLE_FRAMES)
+    {
+        subject2_accept_confirmed_map(context, source, update);
+    }
+}
+
+static void subject2_tick_replan_center(const subject2_context_struct *context,
+                                        subject2_update_struct *update)
+{
+    if(0 == subject2_collect_center())
+    {
+        if(0 != update) update->run_state = replan_center_for_return ? "S2Ret" : "RCtr";
+        return;
+    }
+    if(0 == subject2_apply_center(context, 0u))
+    {
+        subject2_fail(EXEC_ERROR_ART_CENTER, "E:Ctr", update);
+        return;
+    }
+    if(0u != replan_center_for_return)
+    {
+        subject2_state = SUBJECT2_RETURN_REQUESTED;
+        if(0 != update)
+        {
+            update->return_requested = 1u;
+            update->return_pose_x_cm = current_pose_offset_x_cm;
+            update->return_pose_y_cm = current_pose_offset_y_cm;
+            update->run_state = "S2Ret";
+            update->redraw = 1u;
+        }
+    }
+    else
+    {
+        subject2_state = SUBJECT2_SELECT_PUSH;
+        if(0 != update)
+        {
+            update->run_state = "Bind";
+            update->redraw = 1u;
+        }
+    }
+}
+
+static void subject2_tick_execute_push(subject2_update_struct *update)
+{
+    if(0 != executor_art_pre_push_pending())
+    {
+        subject2_begin_pre_push_center(update);
+    }
+    else if(0 != executor_art_sync_pending())
+    {
+        subject2_begin_confirm_map(update);
+    }
+    else if(EXEC_STATE_ERROR == executor_get_state())
+    {
+        subject2_fail(EXEC_ERROR_SUBJECT2_PLAN, "E:Plan", update);
+    }
+    else if(0 != update)
+    {
+        update->run_state = "S2Push";
+    }
+}
+
 void subject2_begin(const subject2_context_struct *context,
                     float initial_pose_x_cm,
                     float initial_pose_y_cm,
@@ -560,6 +868,10 @@ void subject2_begin(const subject2_context_struct *context,
     current_pose_offset_y_cm = initial_pose_y_cm;
     validation_retry_count = 0u;
     active_class = SUBJECT2_INVALID_CLASS;
+    retry_active_only = 0u;
+    replan_center_for_return = 0u;
+    confirm_candidate_valid = 0u;
+    confirm_stable_count = 0u;
     map_scan_stats(context->snapshot, &stats);
     navigation_start_row = stats.car_row;
     navigation_start_col = stats.car_col;
@@ -619,7 +931,28 @@ void subject2_tick(const subject2_context_struct *context,
             subject2_tick_validate(update);
             break;
         case SUBJECT2_SELECT_PUSH:
-            if(0 != update) update->run_state = "Bind";
+            subject2_tick_select_push(context, update);
+            break;
+        case SUBJECT2_EXECUTE_PUSH:
+            subject2_tick_execute_push(update);
+            break;
+        case SUBJECT2_PRE_PUSH_CENTER:
+            subject2_tick_pre_push_center(update);
+            break;
+        case SUBJECT2_CONFIRM_MAP:
+            subject2_tick_confirm_map(context, update);
+            break;
+        case SUBJECT2_REPLAN_CENTER:
+            subject2_tick_replan_center(context, update);
+            break;
+        case SUBJECT2_RETURN_REQUESTED:
+            if(0 != update)
+            {
+                update->return_requested = 1u;
+                update->return_pose_x_cm = current_pose_offset_x_cm;
+                update->return_pose_y_cm = current_pose_offset_y_cm;
+                update->run_state = "S2Ret";
+            }
             break;
         default:
             break;
@@ -636,6 +969,10 @@ void subject2_cancel(void)
     center_sample_count = 0u;
     validation_retry_count = 0u;
     active_class = SUBJECT2_INVALID_CLASS;
+    retry_active_only = 0u;
+    replan_center_for_return = 0u;
+    confirm_candidate_valid = 0u;
+    confirm_stable_count = 0u;
 }
 
 subject2_state_enum subject2_get_state(void)

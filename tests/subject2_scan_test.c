@@ -26,6 +26,10 @@ static uint16 center_request_count;
 static uint16 pose_reset_count;
 static uint16 executor_start_count;
 static uint8 executor_start_art_sync;
+static uint8 fake_pre_push_pending;
+static uint8 fake_sync_pending;
+static uint16 continue_pre_push_count;
+static uint32 fake_frame_count;
 static uint8 executor_target_row;
 static uint8 executor_target_col;
 static char live_rows[MAP_ROWS][MAP_COLS + 1];
@@ -63,7 +67,12 @@ void executor_start(const waypoint_struct *waypoints, uint16 count,
         executor_target_col = waypoints[count - 1u].col;
     }
 }
-void executor_stop(void) { fake_executor_state = EXEC_STATE_IDLE; }
+void executor_stop(void)
+{
+    fake_executor_state = EXEC_STATE_IDLE;
+    fake_pre_push_pending = 0u;
+    fake_sync_pending = 0u;
+}
 executor_state_enum executor_get_state(void) { return fake_executor_state; }
 void executor_set_error(executor_error_enum error)
 {
@@ -81,9 +90,15 @@ executor_art_center_result_enum executor_commit_art_player_center(uint8 row, uin
     (void)row; (void)col;
     return EXEC_ART_CENTER_APPLIED;
 }
-uint8 executor_art_pre_push_pending(void) { return 0u; }
-uint8 executor_art_sync_pending(void) { return 0u; }
-uint8 executor_continue_after_pre_push_center(void) { return 0u; }
+uint8 executor_art_pre_push_pending(void) { return fake_pre_push_pending; }
+uint8 executor_art_sync_pending(void) { return fake_sync_pending; }
+uint8 executor_continue_after_pre_push_center(void)
+{
+    if(0u == fake_pre_push_pending) return 0u;
+    fake_pre_push_pending = 0u;
+    continue_pre_push_count++;
+    return 1u;
+}
 
 void openart_request_player_center(void)
 {
@@ -103,7 +118,7 @@ uint8 openart_get_requested_center_sample(uint16 *col_q, uint16 *row_q)
     return center_read;
 }
 const map_source_struct *openart_map_get(void) { return &live_source; }
-uint32 openart_uart_get_frame_count(void) { return 0u; }
+uint32 openart_uart_get_frame_count(void) { return fake_frame_count; }
 
 void vision_uart_set_mode(vision_mode_enum mode) { last_mode = mode; }
 uint8 vision_uart_mode_ready(vision_mode_enum mode)
@@ -161,6 +176,10 @@ static void build_map(void)
     pose_reset_count = 0u;
     executor_start_count = 0u;
     executor_start_art_sync = 0u;
+    fake_pre_push_pending = 0u;
+    fake_sync_pending = 0u;
+    continue_pre_push_count = 0u;
+    fake_frame_count = 0u;
     for(row = 0u; row < MAP_ROWS; row++)
     {
         for(col = 0u; col < MAP_COLS; col++)
@@ -176,7 +195,7 @@ static void build_map(void)
     snapshot.name = "subject2-snapshot";
     live_rows[5][5] = 'C';
     live_rows[5][6] = 'B';
-    live_rows[7][9] = 'T';
+    live_rows[5][9] = 'T';
     map_source_snapshot(&snapshot, snapshot_rows, &live_source);
     snapshot_valid = 1u;
     start_row = 5u;
@@ -234,58 +253,135 @@ static void move_live_car(uint8 row, uint8 col)
     live_rows[row][col] = 'C';
 }
 
+static uint8 scan_to_select_push(subject2_context_struct *context,
+                                 subject2_update_struct *update)
+{
+    subject2_begin(context, 0.0f, 0.0f, update);
+    if((SUBJECT2_SCAN_BOX_MODE != subject2_get_state()) ||
+       (VISION_MODE_BOX != last_mode)) return 0u;
+
+    fake_ready_box = 1u;
+    subject2_tick(context, update);
+    subject2_tick(context, update);
+    if((SUBJECT2_SCAN_BOX_CENTER != subject2_get_state()) ||
+       (1u != center_request_count)) return 0u;
+
+    feed_center(550u, 550u);
+    subject2_tick(context, update);
+    if((SUBJECT2_SCAN_BOX_CLASSIFY != subject2_get_state()) ||
+       (1u != pose_reset_count) || (1u != vision_request_id)) return 0u;
+
+    feed_class(4u);
+    subject2_tick(context, update);
+    if((SUBJECT2_SCAN_TARGET_MODE != subject2_get_state()) ||
+       (VISION_MODE_TARGET != last_mode) || (1u != vision_ack_count)) return 0u;
+
+    fake_ready_target = 1u;
+    subject2_tick(context, update);
+    subject2_tick(context, update);
+    if((SUBJECT2_SCAN_TARGET_MOVE != subject2_get_state()) ||
+       (1u != executor_start_count) || (0u != executor_start_art_sync)) return 0u;
+
+    move_live_car(executor_target_row, executor_target_col);
+    fake_executor_state = EXEC_STATE_DONE;
+    subject2_tick(context, update);
+    if((SUBJECT2_SCAN_TARGET_CENTER != subject2_get_state()) ||
+       (2u != center_request_count)) return 0u;
+
+    feed_center((uint16)(executor_target_col * 100u + 50u),
+                (uint16)(executor_target_row * 100u + 50u));
+    subject2_tick(context, update);
+    if((SUBJECT2_SCAN_TARGET_CLASSIFY != subject2_get_state()) ||
+       (2u != pose_reset_count) || (2u != vision_request_id)) return 0u;
+
+    feed_class(4u);
+    subject2_tick(context, update);
+    if(SUBJECT2_VALIDATE_BINDINGS != subject2_get_state()) return 0u;
+    subject2_tick(context, update);
+
+    return ((SUBJECT2_SELECT_PUSH == subject2_get_state()) &&
+            (2u == vision_ack_count)) ? 1u : 0u;
+}
+
 static uint8 run_scan(void)
 {
     subject2_context_struct context;
     subject2_update_struct update;
 
     init_context(&context);
+    if(0 == scan_to_select_push(&context, &update)) return 0u;
 
-    subject2_begin(&context, 0.0f, 0.0f, &update);
-    if((SUBJECT2_SCAN_BOX_MODE != subject2_get_state()) ||
-       (VISION_MODE_BOX != last_mode)) return 0u;
+    subject2_tick(&context, &update);
+    if((SUBJECT2_EXECUTE_PUSH != subject2_get_state()) ||
+       (2u != executor_start_count) ||
+       (1u != executor_start_art_sync) ||
+       (4u != subject2_get_active_class())) return 0u;
 
-    fake_ready_box = 1u;
+    fake_pre_push_pending = 1u;
     subject2_tick(&context, &update);
-    subject2_tick(&context, &update);
-    if((SUBJECT2_SCAN_BOX_CENTER != subject2_get_state()) ||
-       (1u != center_request_count)) return 0u;
-
-    feed_center(550u, 550u);
-    subject2_tick(&context, &update);
-    if((SUBJECT2_SCAN_BOX_CLASSIFY != subject2_get_state()) ||
-       (1u != pose_reset_count) || (1u != vision_request_id)) return 0u;
-
-    feed_class(4u);
-    subject2_tick(&context, &update);
-    if((SUBJECT2_SCAN_TARGET_MODE != subject2_get_state()) ||
-       (VISION_MODE_TARGET != last_mode) || (1u != vision_ack_count)) return 0u;
-
-    fake_ready_target = 1u;
-    subject2_tick(&context, &update);
-    subject2_tick(&context, &update);
-    if((SUBJECT2_SCAN_TARGET_MOVE != subject2_get_state()) ||
-       (1u != executor_start_count) || (0u != executor_start_art_sync)) return 0u;
-
-    move_live_car(executor_target_row, executor_target_col);
-    fake_executor_state = EXEC_STATE_DONE;
-    subject2_tick(&context, &update);
-    if((SUBJECT2_SCAN_TARGET_CENTER != subject2_get_state()) ||
-       (2u != center_request_count)) return 0u;
+    if((SUBJECT2_PRE_PUSH_CENTER != subject2_get_state()) ||
+       (3u != center_request_count)) return 0u;
 
     feed_center((uint16)(executor_target_col * 100u + 50u),
                 (uint16)(executor_target_row * 100u + 50u));
     subject2_tick(&context, &update);
-    if((SUBJECT2_SCAN_TARGET_CLASSIFY != subject2_get_state()) ||
-       (2u != pose_reset_count) || (2u != vision_request_id)) return 0u;
+    if((SUBJECT2_EXECUTE_PUSH != subject2_get_state()) ||
+       (1u != continue_pre_push_count)) return 0u;
 
-    feed_class(4u);
+    fake_sync_pending = 1u;
     subject2_tick(&context, &update);
-    if(SUBJECT2_VALIDATE_BINDINGS != subject2_get_state()) return 0u;
+    if(SUBJECT2_CONFIRM_MAP != subject2_get_state()) return 0u;
+
+    live_rows[5][6] = '.';
+    live_rows[5][9] = '.';
+    move_live_car(executor_target_row, executor_target_col);
+    fake_frame_count++;
+    subject2_tick(&context, &update);
+    if((SUBJECT2_REPLAN_CENTER != subject2_get_state()) ||
+       (4u != center_request_count)) return 0u;
+
+    feed_center((uint16)(executor_target_col * 100u + 50u),
+                (uint16)(executor_target_row * 100u + 50u));
+    subject2_tick(&context, &update);
+    return ((SUBJECT2_RETURN_REQUESTED == subject2_get_state()) &&
+            (0u != update.return_requested)) ? 1u : 0u;
+}
+
+static uint8 push_retry_tracks_active_box(void)
+{
+    subject2_context_struct context;
+    subject2_update_struct update;
+    uint8 car_row;
+    uint8 car_col;
+    uint16 starts_before;
+
+    build_map();
+    init_context(&context);
+    if(0 == scan_to_select_push(&context, &update)) return 0u;
+    subject2_tick(&context, &update);
+    if(SUBJECT2_EXECUTE_PUSH != subject2_get_state()) return 0u;
+    starts_before = executor_start_count;
+
+    fake_sync_pending = 1u;
+    subject2_tick(&context, &update);
+    if(SUBJECT2_CONFIRM_MAP != subject2_get_state()) return 0u;
+    live_rows[5][6] = '.';
+    live_rows[5][7] = 'B';
+    fake_frame_count++;
+    subject2_tick(&context, &update);
+    if(SUBJECT2_REPLAN_CENTER != subject2_get_state()) return 0u;
+
+    if(0 == map_find_car(&live_source, &car_row, &car_col, 0)) return 0u;
+    feed_center((uint16)(car_col * 100u + 50u),
+                (uint16)(car_row * 100u + 50u));
+    subject2_tick(&context, &update);
+    if(SUBJECT2_SELECT_PUSH != subject2_get_state()) return 0u;
+    fake_sync_pending = 0u;
     subject2_tick(&context, &update);
 
-    return ((SUBJECT2_SELECT_PUSH == subject2_get_state()) &&
-            (2u == vision_ack_count)) ? 1u : 0u;
+    return ((SUBJECT2_EXECUTE_PUSH == subject2_get_state()) &&
+            (4u == subject2_get_active_class()) &&
+            (executor_start_count == (uint16)(starts_before + 1u))) ? 1u : 0u;
 }
 
 static uint8 classification_timeout_retries(void)
@@ -339,5 +435,7 @@ int main(void)
     printf("subject2-scan-timeout       %s\n", (0u != passed) ? "PASS" : "FAIL");
     passed &= map_change_stops_scan();
     printf("subject2-scan-map-change    %s\n", (0u != passed) ? "PASS" : "FAIL");
+    passed &= push_retry_tracks_active_box();
+    printf("subject2-push-retry         %s\n", (0u != passed) ? "PASS" : "FAIL");
     return (0u != passed) ? 0 : 1;
 }
