@@ -217,6 +217,19 @@ static uint8 art_center_uses_ninety_percent_fusion(void)
             (fabsf(test_pose.y_cm) < 0.01f)) ? 1u : 0u;
 }
 
+static uint8 art_center_samples_can_be_reset(void)
+{
+    waypoint_struct waypoint = {5u, 6u, 'r', 0u, 1u, 0u, 0u};
+
+    reset_fixture();
+    executor_start(&waypoint, 1u, 5u, 5u, 0.0f, 0.0f, 0u, 1u);
+    (void)executor_apply_art_player_center(568u, 550u, 1u);
+    (void)executor_apply_art_player_center(570u, 550u, 2u);
+    executor_reset_art_player_center_samples();
+
+    return (0u == executor_apply_art_player_center(572u, 550u, 3u)) ? 1u : 0u;
+}
+
 static uint8 run_push_chain_switches_without_stop(void)
 {
     waypoint_struct waypoints[2] = {
@@ -328,6 +341,7 @@ int main(void)
     passed &= run_case("lowercase-offline-skip", lowercase_and_offline_push_do_not_wait());
     passed &= run_case("center-error-stops", center_error_stops_on_same_waypoint());
     passed &= run_case("art-fusion-90-percent", art_center_uses_ninety_percent_fusion());
+    passed &= run_case("art-samples-reset", art_center_samples_can_be_reset());
     passed &= run_case("run-push-chain-continuous", run_push_chain_switches_without_stop());
     passed &= run_case("step-still-pauses", step_mode_still_pauses_after_first_push());
     passed &= run_case("final-push-art-sync", final_push_still_waits_for_art());

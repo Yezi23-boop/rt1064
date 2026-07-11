@@ -26,7 +26,10 @@ typedef enum {
     EXEC_ERROR_ART_TIMEOUT, /**< ART 低频重定位等待超时 */
     EXEC_ERROR_ART_SYNC,  /**< ART 稳定地图无效。 */
     EXEC_ERROR_ART_PLAN,  /**< ART 稳定地图重解算失败。 */
-    EXEC_ERROR_ART_CENTER /**< 推箱前 ART 中心采样或校正失败。 */
+    EXEC_ERROR_ART_CENTER, /**< 推箱前 ART 中心采样或校正失败。 */
+    EXEC_ERROR_SUBJECT2_CLASS, /**< 科目二分类或绑定失败。 */
+    EXEC_ERROR_SUBJECT2_TRACK, /**< 科目二箱子身份无法恢复。 */
+    EXEC_ERROR_SUBJECT2_PLAN   /**< 科目二剩余绑定均不可解。 */
 } executor_error_enum;
 
 typedef enum {
@@ -156,6 +159,9 @@ void executor_set_error(executor_error_enum error);
  * @note 这里只缓存中值，不立刻重置 pose；段末或推箱前流程随后决定是否提交。
  */
 uint8 executor_apply_art_player_center(uint16 center_col_q, uint16 center_row_q, uint32 sample_count);
+
+/** 清空尚未提交的 ART 中心样本，开始一次独立的三帧请求。 */
+void executor_reset_art_player_center_samples(void);
 
 /**
  * @brief 把已缓存的 ART 视觉中心中值应用到当前 executor 局部位姿。

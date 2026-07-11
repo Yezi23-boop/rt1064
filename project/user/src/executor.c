@@ -466,6 +466,13 @@ done:
     return ready;
 }
 
+void executor_reset_art_player_center_samples(void)
+{
+    uint32 primask = interrupt_global_disable();
+    executor_clear_art_center_history();
+    interrupt_global_enable(primask);
+}
+
 executor_art_center_result_enum executor_commit_art_player_center(uint8 current_car_row,
                                                                   uint8 current_car_col)
 {
