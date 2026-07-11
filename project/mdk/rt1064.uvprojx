@@ -500,6 +500,11 @@
               <FilePath>..\user\src\vision_uart.c</FilePath>
             </File>
             <File>
+              <FileName>subject2_logic.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>..\user\src\subject2_logic.c</FilePath>
+            </File>
+            <File>
               <FileName>executor.c</FileName>
               <FileType>1</FileType>
               <FilePath>..\user\src\executor.c</FilePath>
