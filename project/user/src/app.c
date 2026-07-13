@@ -17,6 +17,7 @@ void app_init(void)
     screen_init();
     vofa_init();
     drive_test_init();
+    vision_uart_board_test_init();
     menu_init();
 }
 
@@ -28,5 +29,6 @@ void app_poll(void)
     vofa_service();
     openart_uart_poll();
     vision_uart_poll();
+    vision_uart_board_test_poll();
     drive_test_poll();
 }

@@ -38,6 +38,11 @@ typedef struct
     float pose_x_cm;            /**< 全局定位 X，单位 cm，右移为正。 */
     float pose_y_cm;            /**< 全局定位 Y，单位 cm，前进为正。 */
     uint32 openart_frame_count; /**< OpenART 成功接收的完整地图帧数。 */
+    uint8 vision_test_enabled;  /**< 1 表示首页最后一行显示 UART4 板级自检。 */
+    uint8 vision_test_state;    /**< vision_uart_board_test_state_enum 数值。 */
+    uint8 vision_test_samples;  /**< 已收到的 VISION_SAMPLE 数量。 */
+    uint8 vision_test_class;    /**< 最近分类类别。 */
+    uint16 vision_test_confidence_q; /**< 最近分类置信度千分值。 */
 } screen_home_view_struct;
 
 /**

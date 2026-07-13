@@ -7,18 +7,21 @@ sensor.reset()
 sensor.set_pixformat(sensor.RGB565)   # 彩色图
 sensor.set_framesize(sensor.QVGA)     # 320x240（
 sensor.set_brightness(0)              # 亮度默认
-sensor.skip_frames(time = 1000)       # 稳定1秒
 sensor.set_auto_gain(False)           # 必须关！AI 必加
 sensor.set_auto_whitebal(True)        # 自动白平衡
 sensor.set_auto_exposure(False, exposure_us=200)
+sensor.set_vflip(True)                # 必须在其他 sensor 参数配置完成后设置
+sensor.skip_frames(time=200)
+sensor.set_hmirror(True)              # 与垂直翻转组合为旋转 180 度
+sensor.skip_frames(time=1000)         # 等待配置和画面稳定
 clock = time.clock()
 
 # ====================== 加载模型 ======================
-# 你的模型文件（放在 SD 卡根目录）
-net = tf.load("a.tflite", load_to_fb=True)
+# 当前测试数字模型，文件放在 SD 卡根目录。
+net = tf.load("/sd/number_V1.tflite", load_to_fb=True)
 
-# 你的标签文件（和 EIQ 训练时一样）
-labels = [line.rstrip() for line in open("/sd/labels.txt")]
+# 标签顺序必须与模型输出索引一致。
+labels = [line.rstrip() for line in open("/sd/number_labels.txt")]
 
 print("✅ 分类模型加载成功！")
 print("标签：", labels)

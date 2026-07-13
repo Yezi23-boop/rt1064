@@ -2,6 +2,7 @@
 #include "screen.h"
 #include "drive_config.h"
 #include "map_utils.h"
+#include "vision_uart.h"
 
 #define IPS200_TYPE             (IPS200_TYPE_SPI)
 #define LINE_H                  (16)    // IPS200 8x16 字体的行高，单位 pixel。
@@ -620,30 +621,58 @@ static void draw_home_status_labels(void)
     ips200_show_string(0, LINE_H * 13, "X:");
     ips200_show_string(96, LINE_H * 13, " Y:");
 
-    ips200_show_string(0, LINE_H * 14, "ART:");
 }
 
-static void draw_home_status_values(const float encoder_count[WHEEL_COUNT], float imu_yaw, float target_yaw, float yaw_error, float vz, float vzt, float pose_x_cm, float pose_y_cm, uint32 openart_frame_count)
+static const char *vision_board_test_state_text(uint8 state)
 {
-    ips200_show_int(56, LINE_H * 8, (int16)encoder_count[WHEEL_LF], 5);
-    ips200_show_int(136, LINE_H * 8, (int16)encoder_count[WHEEL_RF], 5);
+    switch(state)
+    {
+        case VISION_UART_BOARD_TEST_WAIT_READY:  return "MODE";
+        case VISION_UART_BOARD_TEST_WAIT_SAMPLE: return "REQ";
+        case VISION_UART_BOARD_TEST_PASS:        return "PASS";
+        case VISION_UART_BOARD_TEST_FAIL:        return "FAIL";
+        default:                                 return "OFF";
+    }
+}
 
-    ips200_show_int(56, LINE_H * 9, (int16)encoder_count[WHEEL_LB], 5);
-    ips200_show_int(136, LINE_H * 9, (int16)encoder_count[WHEEL_RB], 5);
+static void draw_home_status_values(const screen_home_view_struct *view)
+{
+    ips200_show_int(56, LINE_H * 8, (int16)view->encoder_count[WHEEL_LF], 5);
+    ips200_show_int(136, LINE_H * 8, (int16)view->encoder_count[WHEEL_RF], 5);
 
-    ips200_show_int(48, LINE_H * 10, (int16)imu_yaw, 4);
+    ips200_show_int(56, LINE_H * 9, (int16)view->encoder_count[WHEEL_LB], 5);
+    ips200_show_int(136, LINE_H * 9, (int16)view->encoder_count[WHEEL_RB], 5);
 
-    show_float_value(48, LINE_H * 11, target_yaw, 3, 1);
-    show_float_value(120, LINE_H * 11, imu_yaw, 3, 1);
+    ips200_show_int(48, LINE_H * 10, (int16)view->imu_yaw, 4);
 
-    show_float_value(16, LINE_H * 12, yaw_error, 3, 2);
-    show_float_value(96, LINE_H * 12, vz, 1, 2);
-    show_float_value(160, LINE_H * 12, vzt, 1, 2);
+    show_float_value(48, LINE_H * 11, view->target_yaw, 3, 1);
+    show_float_value(120, LINE_H * 11, view->imu_yaw, 3, 1);
 
-    show_float_value(16, LINE_H * 13, pose_x_cm, 4, 1);
-    show_float_value(120, LINE_H * 13, pose_y_cm, 4, 1);
+    show_float_value(16, LINE_H * 12, view->yaw_error, 3, 2);
+    show_float_value(96, LINE_H * 12, view->vz, 1, 2);
+    show_float_value(160, LINE_H * 12, view->vzt, 1, 2);
 
-    ips200_show_uint(32, LINE_H * 14, openart_frame_count, 5);
+    show_float_value(16, LINE_H * 13, view->pose_x_cm, 4, 1);
+    show_float_value(120, LINE_H * 13, view->pose_y_cm, 4, 1);
+
+    clear_text_area(0, LINE_H * 14, 30);
+    if(0 != view->vision_test_enabled)
+    {
+        ips200_show_string(0, LINE_H * 14, "V4:");
+        ips200_show_string(24, LINE_H * 14,
+                           vision_board_test_state_text(view->vision_test_state));
+        ips200_show_string(64, LINE_H * 14, "N:");
+        ips200_show_uint(80, LINE_H * 14, view->vision_test_samples, 1);
+        ips200_show_string(96, LINE_H * 14, "C:");
+        ips200_show_uint(112, LINE_H * 14, view->vision_test_class, 1);
+        ips200_show_string(128, LINE_H * 14, "Q:");
+        ips200_show_uint(144, LINE_H * 14, view->vision_test_confidence_q, 4);
+    }
+    else
+    {
+        ips200_show_string(0, LINE_H * 14, "ART:");
+        ips200_show_uint(32, LINE_H * 14, view->openart_frame_count, 5);
+    }
 }
 
 void screen_draw_home(const screen_home_view_struct *view)
@@ -664,30 +693,14 @@ void screen_draw_home(const screen_home_view_struct *view)
     ips200_show_string(0, LINE_H * 7, "Save: ");
     show_text_value(48, LINE_H * 7, save_state_name(view->save_state), 12);
     draw_home_status_labels();
-    draw_home_status_values(view->encoder_count,
-        view->imu_yaw,
-        view->target_yaw,
-        view->yaw_error,
-        view->vz,
-        view->vzt,
-        view->pose_x_cm,
-        view->pose_y_cm,
-        view->openart_frame_count);
+    draw_home_status_values(view);
     show_hint("K1/K2 Move  K3 Enter", "K4 Save  K4L Home");
 }
 
 void screen_draw_home_status(const screen_home_view_struct *view)
 {
     begin_page(SCREEN_PAGE_HOME);
-    draw_home_status_values(view->encoder_count,
-        view->imu_yaw,
-        view->target_yaw,
-        view->yaw_error,
-        view->vz,
-        view->vzt,
-        view->pose_x_cm,
-        view->pose_y_cm,
-        view->openart_frame_count);
+    draw_home_status_values(view);
 }
 
 void screen_draw_nav_cursor(uint8 previous_cursor, uint8 cursor)

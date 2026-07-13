@@ -1,10 +1,14 @@
 #include "zf_common_headfile.h"
+#include "drive_config.h"
+#include "timebase.h"
 #include "vision_uart.h"
 
 #define VISION_UART_INDEX          (UART_4)
 #define VISION_RX_BUFFER_SIZE      (256u)
 #define VISION_LINE_SIZE           (64u)
 #define VISION_SAMPLE_QUEUE_SIZE   (8u)
+#define VISION_BOARD_RETRY_MS      (1000u)
+#define VISION_BOARD_TIMEOUT_MS    (5000u)
 
 static volatile uint8 rx_buffer[VISION_RX_BUFFER_SIZE];
 static volatile uint16 rx_write_index;
@@ -21,6 +25,11 @@ static vision_mode_enum requested_mode;
 static vision_mode_enum ready_mode;
 static uint16 current_request_id;
 static uint8 request_active;
+static vision_uart_board_test_status_struct board_test_status;
+#if VISION_UART_BOARD_TEST_ENABLE
+static uint16 board_test_request_id;
+static uint32 board_test_phase_start_ms;
+#endif
 
 static uint16 next_index(uint16 index, uint16 capacity)
 {
@@ -328,4 +337,71 @@ void vision_uart_cancel(void)
     request_active = 0u;
     clear_samples();
     uart_write_string(VISION_UART_INDEX, "VISION_CANCEL\n");
+}
+
+void vision_uart_board_test_init(void)
+{
+    memset(&board_test_status, 0, sizeof(board_test_status));
+#if VISION_UART_BOARD_TEST_ENABLE
+    board_test_status.state = VISION_UART_BOARD_TEST_WAIT_READY;
+    board_test_phase_start_ms = time_ms();
+    board_test_request_id = 0u;
+    vision_uart_set_mode(VISION_MODE_BOX);
+#else
+    board_test_status.state = VISION_UART_BOARD_TEST_DISABLED;
+#endif
+}
+
+void vision_uart_board_test_poll(void)
+{
+#if VISION_UART_BOARD_TEST_ENABLE
+    uint32 now_ms = time_ms();
+
+    if(VISION_UART_BOARD_TEST_WAIT_READY == board_test_status.state)
+    {
+        if(0 != vision_uart_mode_ready(VISION_MODE_BOX))
+        {
+            board_test_request_id = vision_uart_request_classification();
+            board_test_phase_start_ms = now_ms;
+            board_test_status.state = VISION_UART_BOARD_TEST_WAIT_SAMPLE;
+        }
+        else if((now_ms - board_test_phase_start_ms) >= VISION_BOARD_RETRY_MS)
+        {
+            vision_uart_set_mode(VISION_MODE_BOX);
+            board_test_phase_start_ms = now_ms;
+        }
+        return;
+    }
+
+    if(VISION_UART_BOARD_TEST_WAIT_SAMPLE == board_test_status.state)
+    {
+        vision_sample_struct sample;
+
+        while(0 != vision_uart_get_sample(&sample))
+        {
+            board_test_status.sample_count++;
+            board_test_status.class_id = sample.class_id;
+            board_test_status.confidence_q = sample.confidence_q;
+            if(board_test_status.sample_count >= 3u)
+            {
+                vision_uart_ack(board_test_request_id);
+                board_test_status.state = VISION_UART_BOARD_TEST_PASS;
+                return;
+            }
+        }
+        if((now_ms - board_test_phase_start_ms) >= VISION_BOARD_TIMEOUT_MS)
+        {
+            vision_uart_cancel();
+            board_test_status.state = VISION_UART_BOARD_TEST_FAIL;
+        }
+    }
+#endif
+}
+
+void vision_uart_board_test_get_status(vision_uart_board_test_status_struct *status)
+{
+    if(0 != status)
+    {
+        *status = board_test_status;
+    }
 }

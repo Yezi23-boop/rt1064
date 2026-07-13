@@ -85,8 +85,8 @@ namespace["poll_uart_rx"](uart)
 assert namespace["request_id"] == 18
 assert namespace["request_active"] is False
 
-assert 'CARTOON_MODEL = "/sd/model_in-uint8_out-uint8_channel_ptq.tflite"' in SOURCE
-assert 'NUMBER_MODEL = "/sd/numint8_in-int8_out-int8_channel_ptq.tflite"' in SOURCE
+assert 'CARTOON_MODEL = "/sd/cartoon_V2.tflite"' in SOURCE
+assert 'NUMBER_MODEL = "/sd/number_V1.tflite"' in SOURCE
 assert "tf.load(CARTOON_MODEL, load_to_fb=True)" in SOURCE
 assert "tf.load(NUMBER_MODEL, load_to_fb=True)" in SOURCE
 assert "VISION_READY BOOT\\n" in SOURCE

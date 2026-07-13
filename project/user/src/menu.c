@@ -764,6 +764,12 @@ static void execute_current_selection(void)
     art_replan_update_struct update;
     competition_action_enum action;
 
+#if VISION_UART_BOARD_TEST_ENABLE
+    run_state = "V4 Test";
+    mark_redraw();
+    return;
+#endif
+
     candidate_mode = run_mode;
     art_replan_cancel();
     subject2_cancel();
@@ -840,6 +846,7 @@ static void build_home_view(screen_home_view_struct *view)
 {
     const control_status_struct *status = get_control_status();
     const drive_pose_struct *pose = drive_pose_get();
+    vision_uart_board_test_status_struct vision_test;
 
     view->items = home_items;
     view->item_count = HOME_ITEM_COUNT;
@@ -856,6 +863,13 @@ static void build_home_view(screen_home_view_struct *view)
     view->pose_x_cm = pose->x_cm;
     view->pose_y_cm = pose->y_cm;
     view->openart_frame_count = openart_uart_get_frame_count();
+    vision_uart_board_test_get_status(&vision_test);
+    view->vision_test_enabled =
+        (VISION_UART_BOARD_TEST_DISABLED != vision_test.state) ? 1u : 0u;
+    view->vision_test_state = vision_test.state;
+    view->vision_test_samples = vision_test.sample_count;
+    view->vision_test_class = vision_test.class_id;
+    view->vision_test_confidence_q = vision_test.confidence_q;
 }
 
 static void build_run_view(screen_run_view_struct *view)

@@ -40,8 +40,8 @@ COMPETITION_MODE_FULL
 OpenART #2 优先在启动时同时加载卡通和数字模型：
 
 ```text
-卡通：model_in-uint8_out-uint8_channel_ptq.tflite
-数字：numint8_in-int8_out-int8_channel_ptq.tflite
+卡通：cartoon_V2.tflite（当前最新版，V1 保留回退）
+数字：number_V1.tflite
 ```
 
 两模型同时加载失败时，脚本明确报告模型内存错误。经过上板验证确认无法同时加载后，才退回按批次释放和切换模型的实现，不在首版中同时维护两套加载路径。

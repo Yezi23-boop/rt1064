@@ -291,8 +291,8 @@ Expected: `openmv/视觉/main.py` 不存在或缺少协议函数。
 ```python
 UART_INDEX = 12
 UART_BAUD = 115200
-CARTOON_MODEL = "/sd/model_in-uint8_out-uint8_channel_ptq.tflite"
-NUMBER_MODEL = "/sd/numint8_in-int8_out-int8_channel_ptq.tflite"
+CARTOON_MODEL = "/sd/cartoon_V2.tflite"
+NUMBER_MODEL = "/sd/number_V1.tflite"
 MODE_NONE = 0
 MODE_BOX = 1
 MODE_TARGET = 2

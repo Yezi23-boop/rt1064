@@ -9,8 +9,8 @@ UART_INDEX = 12
 UART_BAUD = 115200
 UART_RX_LINE_MAX = 64
 
-CARTOON_MODEL = "/sd/model_in-uint8_out-uint8_channel_ptq.tflite"
-NUMBER_MODEL = "/sd/numint8_in-int8_out-int8_channel_ptq.tflite"
+CARTOON_MODEL = "/sd/cartoon_V2.tflite"
+NUMBER_MODEL = "/sd/number_V1.tflite"
 
 MODE_NONE = 0
 MODE_BOX = 1

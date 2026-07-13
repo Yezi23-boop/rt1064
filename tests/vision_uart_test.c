@@ -6,6 +6,12 @@
 static char tx_text[96];
 static uint8 init_called;
 static uint8 irq_called;
+static uint32 test_now_ms;
+
+uint32 time_ms(void)
+{
+    return test_now_ms;
+}
 
 void uart_write_string(int uartn, const char *str)
 {
@@ -81,6 +87,7 @@ int main(void)
 {
     uint8 passed = 1u;
     uint16 request_id;
+    vision_uart_board_test_status_struct board_status;
 
     vision_uart_init();
     passed &= run_case("uart4-init", (0u != init_called) && (0u != irq_called));
@@ -123,6 +130,45 @@ int main(void)
     request_id = vision_uart_request_classification();
     passed &= run_case("request-id-two", 2u == request_id);
     passed &= run_case("request-two-command", 0 == strcmp(tx_text, "VISION_REQ 2\n"));
+
+    vision_uart_init();
+    test_now_ms = 0u;
+    clear_tx();
+    vision_uart_board_test_init();
+    vision_uart_board_test_get_status(&board_status);
+    passed &= run_case("board-test-mode", (0 == strcmp(tx_text, "VISION_MODE BOX\n")) &&
+                       (VISION_UART_BOARD_TEST_WAIT_READY == board_status.state));
+
+    feed_line("VISION_READY BOX");
+    clear_tx();
+    vision_uart_board_test_poll();
+    vision_uart_board_test_get_status(&board_status);
+    passed &= run_case("board-test-request", (0 == strcmp(tx_text, "VISION_REQ 1\n")) &&
+                       (VISION_UART_BOARD_TEST_WAIT_SAMPLE == board_status.state));
+
+    feed_line("VISION_SAMPLE 1 1 8 910");
+    vision_uart_board_test_poll();
+    feed_line("VISION_SAMPLE 1 2 8 920");
+    vision_uart_board_test_poll();
+    feed_line("VISION_SAMPLE 1 3 8 930");
+    clear_tx();
+    vision_uart_board_test_poll();
+    vision_uart_board_test_get_status(&board_status);
+    passed &= run_case("board-test-pass", (0 == strcmp(tx_text, "VISION_ACK 1\n")) &&
+                       (VISION_UART_BOARD_TEST_PASS == board_status.state) &&
+                       (3u == board_status.sample_count) &&
+                       (8u == board_status.class_id) &&
+                       (930u == board_status.confidence_q));
+
+    vision_uart_init();
+    test_now_ms = 0u;
+    vision_uart_board_test_init();
+    feed_line("VISION_READY BOX");
+    vision_uart_board_test_poll();
+    test_now_ms = 5001u;
+    vision_uart_board_test_poll();
+    vision_uart_board_test_get_status(&board_status);
+    passed &= run_case("board-test-timeout", VISION_UART_BOARD_TEST_FAIL == board_status.state);
 
     return (0u != passed) ? 0 : 1;
 }

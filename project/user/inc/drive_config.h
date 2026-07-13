@@ -106,6 +106,8 @@
 #define COMPETITION_MODE_SUBJECT2_DEBUG (2u)
 #define COMPETITION_MODE_FULL (3u)
 #define COMPETITION_MODE (COMPETITION_MODE_SUBJECT2_DEBUG)
+/** UART4 与 OpenART #2 板级自检；1=上电自动测试并禁止启动比赛，0=正常比赛。 */
+#define VISION_UART_BOARD_TEST_ENABLE (0)
 /** 科目二分类结果最低置信度，单位千分值。 */
 #define SUBJECT2_CLASS_CONFIDENCE_Q (750u)
 /** 科目二分类需要连续一致的有效样本数。 */
