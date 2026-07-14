@@ -91,4 +91,17 @@ subject2_track_result_enum subject2_track_active_box(
     const uint16 *new_boxes,
     uint8 new_box_count);
 
+/**
+ * @brief 将冻结地图中的唯一小车格归一化到多帧中心所在格。
+ * @note 中心格只允许位于原 C/+ 格或其八邻域；输出快照由调用方持有。
+ */
+uint8 subject2_normalize_center_map(
+    const map_source_struct *source,
+    uint16 center_col_q,
+    uint16 center_row_q,
+    map_source_struct *normalized,
+    char normalized_rows[MAP_ROWS][MAP_COLS + 1],
+    uint8 *car_row,
+    uint8 *car_col);
+
 #endif

@@ -263,6 +263,78 @@ static uint8 multiple_changes_are_ambiguous(void)
                                       new_boxes, 3u)) ? 1u : 0u;
 }
 
+static uint8 center_map_same_cell_is_preserved(void)
+{
+    test_map_struct map;
+    test_map_struct normalized;
+    uint8 car_row = 0u;
+    uint8 car_col = 0u;
+
+    init_map(&map, 5u, 5u);
+    map.rows[4][8] = 'B';
+    map.rows[7][9] = 'T';
+
+    if(0u == subject2_normalize_center_map(&map.source, 550u, 550u,
+                                            &normalized.source, normalized.rows,
+                                            &car_row, &car_col))
+    {
+        return 0u;
+    }
+    return ((5u == car_row) && (5u == car_col) &&
+            ('C' == normalized.rows[5][5]) &&
+            ('B' == normalized.rows[4][8]) &&
+            ('T' == normalized.rows[7][9])) ? 1u : 0u;
+}
+
+static uint8 center_map_neighbor_preserves_targets(void)
+{
+    test_map_struct map;
+    test_map_struct normalized;
+    uint8 car_row = 0u;
+    uint8 car_col = 0u;
+
+    init_map(&map, 5u, 6u);
+    map.rows[5][6] = '+';
+    map.rows[5][5] = 'T';
+
+    if(0u == subject2_normalize_center_map(&map.source, 550u, 550u,
+                                            &normalized.source, normalized.rows,
+                                            &car_row, &car_col))
+    {
+        return 0u;
+    }
+    return ((5u == car_row) && (5u == car_col) &&
+            ('T' == normalized.rows[5][6]) &&
+            ('+' == normalized.rows[5][5])) ? 1u : 0u;
+}
+
+static uint8 center_map_invalid_reference_is_rejected(void)
+{
+    test_map_struct map;
+    test_map_struct normalized;
+    uint8 car_row = 0u;
+    uint8 car_col = 0u;
+
+    init_map(&map, 5u, 5u);
+    if(0u != subject2_normalize_center_map(&map.source, 750u, 550u,
+                                           &normalized.source, normalized.rows,
+                                           &car_row, &car_col))
+    {
+        return 0u;
+    }
+    if(0u != subject2_normalize_center_map(&map.source,
+                                           (uint16)(MAP_COLS * 100u), 550u,
+                                           &normalized.source, normalized.rows,
+                                           &car_row, &car_col))
+    {
+        return 0u;
+    }
+    map.rows[5][6] = 'B';
+    return (0u == subject2_normalize_center_map(&map.source, 650u, 550u,
+                                                &normalized.source, normalized.rows,
+                                                &car_row, &car_col)) ? 1u : 0u;
+}
+
 int main(void)
 {
     uint8 passed = 1u;
@@ -275,6 +347,9 @@ int main(void)
     passed &= run_case("binding-sets", bindings_are_unique_and_sets_match());
     passed &= run_case("track-active-box", active_box_identity_tracks_one_move());
     passed &= run_case("track-ambiguous", multiple_changes_are_ambiguous());
+    passed &= run_case("center-map-same-cell", center_map_same_cell_is_preserved());
+    passed &= run_case("center-map-neighbor", center_map_neighbor_preserves_targets());
+    passed &= run_case("center-map-invalid", center_map_invalid_reference_is_rejected());
 
     return (0u != passed) ? 0 : 1;
 }

@@ -394,3 +394,55 @@ subject2_track_result_enum subject2_track_active_box(
     bindings[active_class].box_cell = unmatched_cell;
     return SUBJECT2_TRACK_MOVED;
 }
+
+uint8 subject2_normalize_center_map(
+    const map_source_struct *source,
+    uint16 center_col_q,
+    uint16 center_row_q,
+    map_source_struct *normalized,
+    char normalized_rows[MAP_ROWS][MAP_COLS + 1],
+    uint8 *car_row,
+    uint8 *car_col)
+{
+    uint8 source_row;
+    uint8 source_col;
+    uint8 median_row;
+    uint8 median_col;
+    char destination;
+
+    if((0 == source) || (0 == normalized) || (0 == normalized_rows) ||
+       (0 == car_row) || (0 == car_col) ||
+       (center_col_q >= (MAP_COLS * 100u)) ||
+       (center_row_q >= (MAP_ROWS * 100u)) ||
+       (0 == map_find_car(source, &source_row, &source_col, 0)))
+    {
+        return 0u;
+    }
+
+    median_col = (uint8)(center_col_q / 100u);
+    median_row = (uint8)(center_row_q / 100u);
+    if((absolute_difference(source_row, median_row) > 1u) ||
+       (absolute_difference(source_col, median_col) > 1u))
+    {
+        return 0u;
+    }
+
+    destination = source->rows[median_row][median_col];
+    if(('.' != destination) && ('T' != destination) &&
+       ('C' != destination) && ('+' != destination))
+    {
+        return 0u;
+    }
+
+    map_source_snapshot(normalized, normalized_rows, source);
+    if((source_row != median_row) || (source_col != median_col))
+    {
+        normalized_rows[source_row][source_col] =
+            ('+' == normalized_rows[source_row][source_col]) ? 'T' : '.';
+        normalized_rows[median_row][median_col] =
+            ('T' == destination) ? '+' : 'C';
+    }
+    *car_row = median_row;
+    *car_col = median_col;
+    return 1u;
+}
