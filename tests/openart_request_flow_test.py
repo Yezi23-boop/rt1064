@@ -170,8 +170,10 @@ pre_push_box_body = function_body(
     "static void art_replan_tick_pre_push_box(",
     "static uint8 art_replan_get_pre_push_reference_cell",
 )
-assert "openart_request_observation" in begin_body
-assert "openart_get_observation_sample" in pre_push_box_body
+assert "art_box_observation_request" in begin_body
+assert "openart_request_observation" in ART_REPLAN_SOURCE
+assert "art_box_observation_collect" in pre_push_box_body
+assert "openart_get_observation_sample" in ART_REPLAN_SOURCE
 assert "executor_start_pre_push_box_preparation" in pre_push_box_body
 assert '"E:BObs"' in pre_push_box_body
 assert '"E:BGeo"' in pre_push_box_body

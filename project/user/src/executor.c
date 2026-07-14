@@ -8,10 +8,12 @@
 
 #define ART_PLAYER_CENTER_FILTER_WINDOW (ART_CENTER_SAMPLE_COUNT)
 #define ART_BOX_OBSERVATION_FILTER_WINDOW (3u)
+#define ART_BOX_MATCH_MAX_OFFSET_Q (80)
 
 typedef enum
 {
     PRE_PUSH_BOX_IDLE = 0,
+    PRE_PUSH_BOX_RETRY_NUDGE,
     PRE_PUSH_BOX_SAFE_GAP,
     PRE_PUSH_BOX_ALIGN_PERP,
     PRE_PUSH_BOX_APPROACH
@@ -186,11 +188,16 @@ static uint8 center_q_is_near_cell(uint16 row_q, uint16 col_q,
 #endif
 }
 
-static uint8 center_q_is_in_cell(uint16 row_q, uint16 col_q,
-                                 uint8 cell_row, uint8 cell_col)
+static uint8 box_center_q_matches_cell(uint16 row_q, uint16 col_q,
+                                      uint8 cell_row, uint8 cell_col)
 {
-    return (((row_q / 100u) == cell_row) &&
-            ((col_q / 100u) == cell_col)) ? 1u : 0u;
+    int16 row_offset_q = (int16)row_q - (int16)(cell_row * 100u + 50u);
+    int16 col_offset_q = (int16)col_q - (int16)(cell_col * 100u + 50u);
+
+    return ((row_offset_q >= -ART_BOX_MATCH_MAX_OFFSET_Q) &&
+            (row_offset_q <= ART_BOX_MATCH_MAX_OFFSET_Q) &&
+            (col_offset_q >= -ART_BOX_MATCH_MAX_OFFSET_Q) &&
+            (col_offset_q <= ART_BOX_MATCH_MAX_OFFSET_Q)) ? 1u : 0u;
 }
 
 static uint8 action_is_x_axis(char action)
@@ -208,18 +215,19 @@ static uint8 action_is_push(char action)
     return ((action >= 'A') && (action <= 'Z')) ? 1u : 0u;
 }
 
-static uint8 executor_get_pre_push_box_context(uint16 *push_step,
-                                               uint8 *consume_current)
+static uint8 executor_get_pre_push_box_context_at(uint16 prepare_step,
+                                                  uint16 *push_step,
+                                                  uint8 *consume_current)
 {
-    if((0 == exec_waypoints) || (current_step >= exec_waypoint_count))
+    if((0 == exec_waypoints) || (prepare_step >= exec_waypoint_count))
     {
         return 0u;
     }
-    if(0 != action_is_push(exec_waypoints[current_step].action))
+    if(0 != action_is_push(exec_waypoints[prepare_step].action))
     {
         if(0 != push_step)
         {
-            *push_step = current_step;
+            *push_step = prepare_step;
         }
         if(0 != consume_current)
         {
@@ -227,12 +235,12 @@ static uint8 executor_get_pre_push_box_context(uint16 *push_step,
         }
         return 1u;
     }
-    if(((current_step + 1u) < exec_waypoint_count) &&
-       (0 != action_is_push(exec_waypoints[current_step + 1u].action)))
+    if(((prepare_step + 1u) < exec_waypoint_count) &&
+       (0 != action_is_push(exec_waypoints[prepare_step + 1u].action)))
     {
         if(0 != push_step)
         {
-            *push_step = (uint16)(current_step + 1u);
+            *push_step = (uint16)(prepare_step + 1u);
         }
         if(0 != consume_current)
         {
@@ -241,6 +249,14 @@ static uint8 executor_get_pre_push_box_context(uint16 *push_step,
         return 1u;
     }
     return 0u;
+}
+
+static uint8 executor_get_pre_push_box_context(uint16 *push_step,
+                                               uint8 *consume_current)
+{
+    return executor_get_pre_push_box_context_at(current_step,
+                                                push_step,
+                                                consume_current);
 }
 
 static char action_direction(char action)
@@ -510,6 +526,52 @@ uint8 executor_get_pre_push_box_request(uint8 *box_row, uint8 *box_col)
     *box_row = exec_waypoints[push_step].row;
     *box_col = exec_waypoints[push_step].col;
     return 1u;
+}
+
+uint8 executor_get_pre_push_box_prefetch_request(uint8 *box_row, uint8 *box_col)
+{
+    uint16 prepare_step;
+    uint16 push_step;
+    uint8 found = 0u;
+    uint32 primask;
+
+    if((0 == box_row) || (0 == box_col))
+    {
+        return 0u;
+    }
+
+    primask = interrupt_global_disable();
+    if((EXEC_STATE_RUNNING != exec_state) || (0u == art_sync_enabled) ||
+       (0u != pre_push_center_waiting) || (0 == exec_waypoints))
+    {
+        goto done;
+    }
+
+    prepare_step = current_step;
+    if(((prepare_step + 1u) < exec_waypoint_count) &&
+       (0u != exec_waypoints[prepare_step + 1u].center_correct_before) &&
+       (0u != executor_get_pre_push_box_context_at(
+                   (uint16)(prepare_step + 1u), &push_step, 0)))
+    {
+        found = 1u;
+    }
+    else if((prepare_step < exec_waypoint_count) &&
+            (0u != exec_waypoints[prepare_step].center_correct_before) &&
+            (0u != executor_get_pre_push_box_context_at(
+                        prepare_step, &push_step, 0)))
+    {
+        found = 1u;
+    }
+
+    if(0u != found)
+    {
+        *box_row = exec_waypoints[push_step].row;
+        *box_col = exec_waypoints[push_step].col;
+    }
+
+done:
+    interrupt_global_enable(primask);
+    return found;
 }
 
 uint8 executor_continue_after_pre_push_center(void)
@@ -816,9 +878,9 @@ executor_art_box_prep_result_enum executor_start_pre_push_box_preparation(void)
     if((0 == center_q_is_near_cell(art_box_car_median_row_q,
                                    art_box_car_median_col_q,
                                    current_row, current_col)) ||
-       (0 == center_q_is_in_cell(art_box_median_row_q,
-                                 art_box_median_col_q,
-                                 push_wp->row, push_wp->col)))
+       (0 == box_center_q_matches_cell(art_box_median_row_q,
+                                      art_box_median_col_q,
+                                      push_wp->row, push_wp->col)))
     {
         result = EXEC_ART_BOX_PREP_GEOMETRY_ERROR;
         goto clear_samples;
@@ -897,6 +959,60 @@ done:
     return result;
 }
 
+uint8 executor_start_pre_push_box_retry_nudge(float distance_cm)
+{
+    const drive_pose_struct *pose;
+    uint16 push_step;
+    char action;
+    uint8 started = 0u;
+    uint32 primask = interrupt_global_disable();
+
+    if((distance_cm <= 0.0f) ||
+       (0 == executor_art_pre_push_pending()) ||
+       (0 == executor_get_pre_push_box_context(&push_step, 0)))
+    {
+        goto done;
+    }
+
+    action = exec_waypoints[push_step].action;
+    pose = drive_pose_get();
+    pre_push_box_target_x_cm = pose->x_cm;
+    pre_push_box_target_y_cm = pose->y_cm;
+    if('R' == action)
+    {
+        pre_push_box_target_x_cm -= distance_cm;
+    }
+    else if('L' == action)
+    {
+        pre_push_box_target_x_cm += distance_cm;
+    }
+    else if('U' == action)
+    {
+        pre_push_box_target_y_cm -= distance_cm;
+    }
+    else if('D' == action)
+    {
+        pre_push_box_target_y_cm += distance_cm;
+    }
+    else
+    {
+        goto done;
+    }
+
+    pre_push_box_action = action;
+    pre_push_box_phase = PRE_PUSH_BOX_RETRY_NUDGE;
+    pre_push_alignment_stable_ticks = 0u;
+    pre_push_alignment_elapsed_ms = 0u;
+    arrival_stable_ticks = 0u;
+    path_pid_reset(&x_pid);
+    path_pid_reset(&y_pid);
+    started = 1u;
+
+done:
+    interrupt_global_enable(primask);
+    return started;
+}
+
 uint8 executor_pre_push_box_preparation_active(void)
 {
     return ((EXEC_STATE_RUNNING == exec_state) &&
@@ -905,6 +1021,10 @@ uint8 executor_pre_push_box_preparation_active(void)
 
 const char *executor_pre_push_box_state_name(void)
 {
+    if(PRE_PUSH_BOX_RETRY_NUDGE == pre_push_box_phase)
+    {
+        return "BRetry";
+    }
     if(PRE_PUSH_BOX_SAFE_GAP == pre_push_box_phase)
     {
         return "BGap";
@@ -1100,7 +1220,8 @@ static void executor_update_pre_push_box_20ms(void)
             vx_world = path_pid_update_with_arrival_deadband(&x_pid, error);
         }
     }
-    else if((PRE_PUSH_BOX_SAFE_GAP == pre_push_box_phase) ||
+    else if((PRE_PUSH_BOX_RETRY_NUDGE == pre_push_box_phase) ||
+            (PRE_PUSH_BOX_SAFE_GAP == pre_push_box_phase) ||
             (PRE_PUSH_BOX_APPROACH == pre_push_box_phase))
     {
         if(0 != action_is_x_axis(pre_push_box_action))
@@ -1132,7 +1253,13 @@ static void executor_update_pre_push_box_20ms(void)
             pre_push_alignment_stable_ticks = 0u;
             path_pid_reset(&x_pid);
             path_pid_reset(&y_pid);
-            if(PRE_PUSH_BOX_SAFE_GAP == pre_push_box_phase)
+            if(PRE_PUSH_BOX_RETRY_NUDGE == pre_push_box_phase)
+            {
+                pre_push_box_phase = PRE_PUSH_BOX_IDLE;
+                pre_push_box_action = '\0';
+                pre_push_alignment_elapsed_ms = 0u;
+            }
+            else if(PRE_PUSH_BOX_SAFE_GAP == pre_push_box_phase)
             {
                 pre_push_box_phase = PRE_PUSH_BOX_ALIGN_PERP;
             }

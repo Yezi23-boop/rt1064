@@ -418,6 +418,67 @@ static uint8 final_approach_requests_next_box(void)
             (5u == box_row) && (6u == box_col)) ? 1u : 0u;
 }
 
+static uint8 previous_waypoint_prefetches_next_box(void)
+{
+    waypoint_struct waypoints[3] = {
+        {6u, 5u, 'u', 0u, 1u, 0u, 0u},
+        {5u, 5u, 'u', 1u, 2u, 0u, 1u},
+        {5u, 6u, 'R', 2u, 3u, 1u, 0u}
+    };
+    uint8 box_row = 0u;
+    uint8 box_col = 0u;
+
+    reset_fixture();
+    executor_start(waypoints, 3u, 7u, 5u, 0.0f, 0.0f, 0u, 1u);
+
+    return ((0u != executor_get_pre_push_box_prefetch_request(&box_row, &box_col)) &&
+            (5u == box_row) && (6u == box_col)) ? 1u : 0u;
+}
+
+static uint8 retry_nudge_direction(char action, uint8 box_row, uint8 box_col,
+                                   float expected_sign, uint8 x_axis)
+{
+    waypoint_struct waypoint = {box_row, box_col, action, 0u, 1u, 1u, 1u};
+    uint8 tick;
+
+    reset_fixture();
+    executor_start(&waypoint, 1u, 5u, 5u, 0.0f, 0.0f, 0u, 1u);
+    executor_update_20ms();
+    if((0u == executor_start_pre_push_box_retry_nudge(5.0f)) ||
+       (0 != strcmp(executor_pre_push_box_state_name(), "BRetry")))
+    {
+        return 0u;
+    }
+    executor_update_20ms();
+    if(0u != x_axis)
+    {
+        if(((last_motion_vx * expected_sign) <= 0.0f) ||
+           (fabsf(last_motion_vy) > 0.0001f)) return 0u;
+        test_pose.x_cm = expected_sign * 5.0f;
+    }
+    else
+    {
+        if(((last_motion_vy * expected_sign) <= 0.0f) ||
+           (fabsf(last_motion_vx) > 0.0001f)) return 0u;
+        test_pose.y_cm = expected_sign * 5.0f;
+    }
+    for(tick = 0u; tick < EXEC_ARRIVAL_STABLE_TICKS; tick++)
+    {
+        executor_update_20ms();
+    }
+    return ((0u == executor_pre_push_box_preparation_active()) &&
+            (0u != executor_art_pre_push_pending()) &&
+            (0u == executor_get_current_step())) ? 1u : 0u;
+}
+
+static uint8 retry_nudge_moves_away_in_all_directions(void)
+{
+    return ((0u != retry_nudge_direction('R', 5u, 6u, -1.0f, 1u)) &&
+            (0u != retry_nudge_direction('L', 5u, 4u, 1.0f, 1u)) &&
+            (0u != retry_nudge_direction('U', 4u, 5u, -1.0f, 0u)) &&
+            (0u != retry_nudge_direction('D', 6u, 5u, 1.0f, 0u))) ? 1u : 0u;
+}
+
 static uint8 box_preparation_aligns_and_consumes_approach(void)
 {
     waypoint_struct waypoints[2] = {
@@ -508,6 +569,22 @@ static uint8 adjacent_box_cell_is_rejected(void)
     }
 
     return (EXEC_ART_BOX_PREP_GEOMETRY_ERROR ==
+            executor_start_pre_push_box_preparation()) ? 1u : 0u;
+}
+
+static uint8 box_center_crossing_cell_boundary_is_accepted(void)
+{
+    waypoint_struct waypoint = {5u, 6u, 'R', 0u, 1u, 1u, 1u};
+
+    reset_fixture();
+    executor_start(&waypoint, 1u, 5u, 5u, 0.0f, 0.0f, 0u, 1u);
+    executor_update_20ms();
+    if(0u == collect_box_observation(550u, 550u, 705u, 550u))
+    {
+        return 0u;
+    }
+
+    return (EXEC_ART_BOX_PREP_STARTED ==
             executor_start_pre_push_box_preparation()) ? 1u : 0u;
 }
 
@@ -807,10 +884,13 @@ int main(void)
     passed &= run_case("art-fusion-configured", art_center_uses_configured_fusion());
     passed &= run_case("art-samples-reset", art_center_samples_can_be_reset());
     passed &= run_case("box-request-next-waypoint", final_approach_requests_next_box());
+    passed &= run_case("box-prefetch-previous", previous_waypoint_prefetches_next_box());
+    passed &= run_case("box-retry-nudge", retry_nudge_moves_away_in_all_directions());
     passed &= run_case("box-align-consumes-approach", box_preparation_aligns_and_consumes_approach());
     passed &= run_case("box-short-gap-retreat", short_gap_retreats_before_alignment());
     passed &= run_case("box-wrong-side-rejected", wrong_side_box_is_rejected());
     passed &= run_case("box-adjacent-cell-rejected", adjacent_box_cell_is_rejected());
+    passed &= run_case("box-boundary-offset", box_center_crossing_cell_boundary_is_accepted());
     passed &= run_case("box-all-directions", box_preparation_targets_all_directions());
     passed &= run_case("box-step-pauses", step_box_preparation_pauses_before_push());
     passed &= run_case("run-push-chain-continuous", run_push_chain_switches_without_stop());

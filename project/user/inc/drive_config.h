@@ -107,6 +107,16 @@
 #define ART_LAUNCH_FALLBACK_MOVE_CM (30.0f)
 /** ART 来源执行时，完整地图需要连续一致的新帧数量。 */
 #define EXEC_ART_STABLE_FRAMES (1u)
+/** 推箱前车箱观察单次等待时间，单位 ms。 */
+#define ART_BOX_OBSERVE_WAIT_MS (1500u)
+/** 提前预取的车箱中心最大允许年龄，单位 ms。 */
+#define ART_BOX_OBSERVE_SAMPLE_MAX_AGE_MS (500u)
+/** 车箱观察失败后沿推箱反方向退开的距离，单位 cm。 */
+#define ART_BOX_OBSERVE_RETRY_MOVE_CM (5.0f)
+/** 观察恢复动作完成后的停稳时间，单位 ms。 */
+#define ART_BOX_OBSERVE_RETRY_SETTLE_MS (300u)
+/** 车箱观察最多自动恢复重试次数。 */
+#define ART_BOX_OBSERVE_MAX_RETRIES (1u)
 /** 比赛运行范围：只跑科目一、只跑科目二或一次 K3 完整连续运行。 */
 #define COMPETITION_MODE_SUBJECT1_DEBUG (1u)
 #define COMPETITION_MODE_SUBJECT2_DEBUG (2u)

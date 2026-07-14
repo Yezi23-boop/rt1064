@@ -183,6 +183,13 @@ assert namespace["observation_request_row"] == 5
 assert namespace["observation_request_col"] == 8
 assert namespace["observation_request_sample_count"] == 0
 
+observation_loop = SOURCE[
+    SOURCE.index("        box_centers = []"):
+    SOURCE.index("        debug_box_centers = []")
+]
+assert "element_matrix[observation_request_row][observation_request_col]" not in observation_loop
+assert "observation_box_center = detect_box_center(" in observation_loop
+
 uart = FakeUart()
 process = namespace["process_observation_request"]
 process(uart, None, (850, 550))

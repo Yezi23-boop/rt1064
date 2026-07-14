@@ -52,6 +52,15 @@ static uint16 art_requested_center_row_q = 0;                       // 当前请
 static uint8 art_requested_center_valid = 0;                        // 1 表示当前请求已得到多帧样本中值。
 static uint8 art_pre_push_box_request_active = 0;                   // 1 表示当前 waypoint 前等待使用 OBSERVE_REQ。
 static uint8 art_pre_push_box_preparation_started = 0;              // 1 表示 executor 已接管二维安全准备位。
+static uint8 art_box_prefetch_active = 0u;
+static uint8 art_box_prefetch_ready = 0u;
+static uint8 art_box_prefetch_row = 0u;
+static uint8 art_box_prefetch_col = 0u;
+static uint32 art_box_prefetch_ready_ms = 0u;
+static uint8 art_pre_push_box_retry_count = 0u;
+static uint8 art_pre_push_box_retry_moving = 0u;
+static uint8 art_pre_push_box_retry_settling = 0u;
+static uint32 art_pre_push_box_retry_settle_start_ms = 0u;
 static float art_launch_target_x_cm = 0.0f;                         // 发车移动目标距离，单位 cm。
 static uint8 art_launch_arrival_ticks = 0;                          // 发车移动连续到点计数。
 static uint32 art_launch_move_start_ms = 0;                         // 发车移动开始时间。
@@ -214,6 +223,54 @@ static void art_replan_begin_center_request(art_replan_phase_enum phase,
     }
 }
 
+static void art_box_prefetch_clear(void)
+{
+    art_box_prefetch_active = 0u;
+    art_box_prefetch_ready = 0u;
+    art_box_prefetch_row = 0u;
+    art_box_prefetch_col = 0u;
+    art_box_prefetch_ready_ms = 0u;
+}
+
+static uint8 art_box_observation_collect(void)
+{
+    openart_observation_sample_struct sample;
+
+    while(0u != openart_get_observation_sample(&sample))
+    {
+        if(0u != executor_apply_art_box_observation(sample.car_col_q,
+                                                    sample.car_row_q,
+                                                    sample.box_col_q,
+                                                    sample.box_row_q))
+        {
+            art_box_prefetch_active = 0u;
+            art_box_prefetch_ready = 1u;
+            art_box_prefetch_ready_ms = time_ms();
+        }
+    }
+    return art_box_prefetch_ready;
+}
+
+static uint8 art_box_prefetch_is_fresh(uint8 box_row, uint8 box_col)
+{
+    return ((0u != art_box_prefetch_ready) &&
+            (box_row == art_box_prefetch_row) &&
+            (box_col == art_box_prefetch_col) &&
+            ((time_ms() - art_box_prefetch_ready_ms) <=
+             ART_BOX_OBSERVE_SAMPLE_MAX_AGE_MS)) ? 1u : 0u;
+}
+
+static void art_box_observation_request(uint8 box_row, uint8 box_col)
+{
+    executor_reset_art_box_observation_samples();
+    openart_request_observation(box_row, box_col);
+    art_box_prefetch_active = 1u;
+    art_box_prefetch_ready = 0u;
+    art_box_prefetch_row = box_row;
+    art_box_prefetch_col = box_col;
+    art_box_prefetch_ready_ms = 0u;
+}
+
 static void art_replan_begin(art_replan_phase_enum phase, art_replan_update_struct *update)
 {
     if(ART_REPLAN_PRE_PUSH_CENTER == phase)
@@ -223,13 +280,22 @@ static void art_replan_begin(art_replan_phase_enum phase, art_replan_update_stru
 
         art_pre_push_box_request_active = 0u;
         art_pre_push_box_preparation_started = 0u;
+        art_pre_push_box_retry_count = 0u;
+        art_pre_push_box_retry_moving = 0u;
+        art_pre_push_box_retry_settling = 0u;
+        art_pre_push_box_retry_settle_start_ms = 0u;
         if(0 != executor_get_pre_push_box_request(&box_row, &box_col))
         {
             stop_motion();
             art_replan_phase = phase;
             art_wait_start_ms = time_ms();
-            executor_reset_art_box_observation_samples();
-            openart_request_observation(box_row, box_col);
+            if((0u == art_box_prefetch_is_fresh(box_row, box_col)) &&
+               ((0u == art_box_prefetch_active) ||
+                (box_row != art_box_prefetch_row) ||
+                (box_col != art_box_prefetch_col)))
+            {
+                art_box_observation_request(box_row, box_col);
+            }
             art_pre_push_box_request_active = 1u;
             if(0 != update)
             {
@@ -539,9 +605,49 @@ static void art_replan_fail_pre_push_box(const char *state,
 
 static void art_replan_tick_pre_push_box(art_replan_update_struct *update)
 {
-    openart_observation_sample_struct sample;
     executor_art_box_prep_result_enum prep_result;
-    uint8 ready = 0u;
+
+    if(0u != art_pre_push_box_retry_moving)
+    {
+        if(0u != executor_pre_push_box_preparation_active())
+        {
+            if(0 != update) update->run_state = "BRetry";
+            return;
+        }
+        if(EXEC_STATE_ERROR == executor_get_state())
+        {
+            art_replan_cancel();
+            if(0 != update)
+            {
+                update->run_state = "E:BTim";
+                update->redraw = 1u;
+            }
+            return;
+        }
+        if(0u == art_pre_push_box_retry_settling)
+        {
+            art_pre_push_box_retry_settling = 1u;
+            art_pre_push_box_retry_settle_start_ms = time_ms();
+        }
+        if((time_ms() - art_pre_push_box_retry_settle_start_ms) <
+           ART_BOX_OBSERVE_RETRY_SETTLE_MS)
+        {
+            if(0 != update) update->run_state = "BSet";
+            return;
+        }
+
+        art_pre_push_box_retry_moving = 0u;
+        art_pre_push_box_retry_settling = 0u;
+        art_box_observation_request(art_box_prefetch_row,
+                                    art_box_prefetch_col);
+        art_wait_start_ms = time_ms();
+        if(0 != update)
+        {
+            update->run_state = "BCtr";
+            update->redraw = 1u;
+        }
+        return;
+    }
 
     if(0u != art_pre_push_box_preparation_started)
     {
@@ -573,21 +679,33 @@ static void art_replan_tick_pre_push_box(art_replan_update_struct *update)
         return;
     }
 
-    while(0u != openart_get_observation_sample(&sample))
+    if(0u == art_box_observation_collect())
     {
-        if(0u != executor_apply_art_box_observation(sample.car_col_q,
-                                                    sample.car_row_q,
-                                                    sample.box_col_q,
-                                                    sample.box_row_q))
+        if((time_ms() - art_wait_start_ms) >= ART_BOX_OBSERVE_WAIT_MS)
         {
-            ready = 1u;
-        }
-    }
-    if(0u == ready)
-    {
-        if((time_ms() - art_wait_start_ms) >= EXEC_ART_SYNC_TIMEOUT_MS)
-        {
-            art_replan_fail_pre_push_box("E:BObs", update);
+            if(art_pre_push_box_retry_count < ART_BOX_OBSERVE_MAX_RETRIES)
+            {
+                art_box_prefetch_active = 0u;
+                art_box_prefetch_ready = 0u;
+                executor_reset_art_box_observation_samples();
+                if(0 == executor_start_pre_push_box_retry_nudge(
+                             ART_BOX_OBSERVE_RETRY_MOVE_CM))
+                {
+                    art_replan_fail_pre_push_box("E:BTim", update);
+                    return;
+                }
+                art_pre_push_box_retry_count++;
+                art_pre_push_box_retry_moving = 1u;
+                if(0 != update)
+                {
+                    update->run_state = "BRetry";
+                    update->redraw = 1u;
+                }
+            }
+            else
+            {
+                art_replan_fail_pre_push_box("E:BObs", update);
+            }
         }
         else if(0 != update)
         {
@@ -603,12 +721,36 @@ static void art_replan_tick_pre_push_box(art_replan_update_struct *update)
         return;
     }
 
+    art_box_prefetch_clear();
     art_pre_push_box_preparation_started = 1u;
     if(0 != update)
     {
         update->run_state = executor_pre_push_box_state_name();
         update->redraw = 1u;
     }
+}
+
+static void art_replan_tick_box_prefetch(void)
+{
+    uint8 box_row;
+    uint8 box_col;
+
+    if(0u != art_box_prefetch_active)
+    {
+        (void)art_box_observation_collect();
+    }
+    if(0 == executor_get_pre_push_box_prefetch_request(&box_row, &box_col))
+    {
+        return;
+    }
+    if(((0u != art_box_prefetch_active) &&
+        (box_row == art_box_prefetch_row) &&
+        (box_col == art_box_prefetch_col)) ||
+       (0u != art_box_prefetch_is_fresh(box_row, box_col)))
+    {
+        return;
+    }
+    art_box_observation_request(box_row, box_col);
 }
 
 static uint8 art_replan_get_pre_push_reference_cell(
@@ -1378,6 +1520,11 @@ void art_replan_cancel(void)
     art_requested_center_clear();
     art_pre_push_box_request_active = 0u;
     art_pre_push_box_preparation_started = 0u;
+    art_box_prefetch_clear();
+    art_pre_push_box_retry_count = 0u;
+    art_pre_push_box_retry_moving = 0u;
+    art_pre_push_box_retry_settling = 0u;
+    art_pre_push_box_retry_settle_start_ms = 0u;
 }
 
 void art_replan_begin_initial(art_replan_update_struct *update)
@@ -1449,6 +1596,12 @@ void art_replan_tick(const art_replan_context_struct *context,
        (0 != art_replan_handle_host_completion(update)))
     {
         return;
+    }
+
+    if((ART_REPLAN_IDLE == art_replan_phase) &&
+       (0 != art_source_enabled))
+    {
+        art_replan_tick_box_prefetch();
     }
 
     if((ART_REPLAN_IDLE == art_replan_phase) &&

@@ -155,6 +155,12 @@ uint8 executor_start_pre_push_alignment(uint8 reference_row, uint8 reference_col
  */
 uint8 executor_get_pre_push_box_request(uint8 *box_row, uint8 *box_col);
 
+/**
+ * @brief 在进入推箱准备等待前一个 waypoint 时预取下一箱子格。
+ * @return 1 表示当前或下一 waypoint 将触发车箱准备，并已返回箱子格。
+ */
+uint8 executor_get_pre_push_box_prefetch_request(uint8 *box_row, uint8 *box_col);
+
 /** 清空当前推箱准备的车箱配对观察样本。 */
 void executor_reset_art_box_observation_samples(void);
 
@@ -167,6 +173,12 @@ uint8 executor_apply_art_box_observation(uint16 car_col_q, uint16 car_row_q,
 
 /** 使用已缓存的3帧中值启动推箱前二维安全准备位。 */
 executor_art_box_prep_result_enum executor_start_pre_push_box_preparation(void);
+
+/**
+ * @brief 观察超时后沿推箱反方向退开指定距离，完成后仍保持当前推箱等待。
+ * @return 1 表示恢复动作已启动；0 表示当前状态不允许启动。
+ */
+uint8 executor_start_pre_push_box_retry_nudge(float distance_cm);
 
 /** 返回1表示正在执行退开、垂直对齐或靠近阶段。 */
 uint8 executor_pre_push_box_preparation_active(void);

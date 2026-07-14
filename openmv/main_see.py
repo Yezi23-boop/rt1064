@@ -1371,14 +1371,13 @@ def main():
         if center_map_sent:
             last_uart_send_ms = now_ms
         box_centers = []
-        if observation_request_active or DEBUG_OBSERVATION_ENABLE:
+        if DEBUG_OBSERVATION_ENABLE:
             box_centers = detect_box_centers(
                 recognition_img, recognition_points, element_matrix)
         observation_box_center = None
-        if (observation_request_active and
-                element_matrix[observation_request_row][observation_request_col] == "box"):
-            observation_box_center = select_box_center(
-                box_centers, recognition_points,
+        if observation_request_active:
+            observation_box_center = detect_box_center(
+                recognition_img, recognition_points,
                 observation_request_row, observation_request_col)
         observation_player_grid = player_center_to_grid_q(
             precise_player_center,

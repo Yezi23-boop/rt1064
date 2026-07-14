@@ -29,6 +29,7 @@ static float executor_initial_y_cm;
 static uint8 fake_sync_pending;
 static uint8 fake_pre_push_pending;
 static uint8 fake_pre_push_box_request;
+static uint8 fake_pre_push_box_prefetch_request;
 static uint8 fake_pre_push_box_active;
 static uint8 fake_error_on_box_active_query;
 static uint8 fake_pre_push_box_row;
@@ -36,6 +37,8 @@ static uint8 fake_pre_push_box_col;
 static const char *fake_pre_push_box_state = "BGap";
 static executor_art_box_prep_result_enum fake_pre_push_box_result;
 static uint16 start_pre_push_box_count;
+static uint16 start_pre_push_box_retry_count;
+static uint8 fake_art_box_sample_count;
 static uint8 fake_center_requires_push_alignment;
 static uint16 continue_pre_push_count;
 static uint16 start_pre_push_alignment_count;
@@ -160,19 +163,23 @@ uint8 executor_get_pre_push_box_request(uint8 *box_row, uint8 *box_col)
     *box_col = fake_pre_push_box_col;
     return 1u;
 }
-void executor_reset_art_box_observation_samples(void) { }
+uint8 executor_get_pre_push_box_prefetch_request(uint8 *box_row, uint8 *box_col)
+{
+    if(0u == fake_pre_push_box_prefetch_request) return 0u;
+    *box_row = fake_pre_push_box_row;
+    *box_col = fake_pre_push_box_col;
+    return 1u;
+}
+void executor_reset_art_box_observation_samples(void)
+{
+    fake_art_box_sample_count = 0u;
+}
 uint8 executor_apply_art_box_observation(uint16 car_col_q, uint16 car_row_q,
                                          uint16 box_col_q, uint16 box_row_q)
 {
-    static uint8 sample_count;
     (void)car_col_q; (void)car_row_q; (void)box_col_q; (void)box_row_q;
-    sample_count++;
-    if(sample_count >= 3u)
-    {
-        sample_count = 0u;
-        return 1u;
-    }
-    return 0u;
+    if(fake_art_box_sample_count < 3u) fake_art_box_sample_count++;
+    return (fake_art_box_sample_count >= 3u) ? 1u : 0u;
 }
 executor_art_box_prep_result_enum executor_start_pre_push_box_preparation(void)
 {
@@ -183,6 +190,15 @@ executor_art_box_prep_result_enum executor_start_pre_push_box_preparation(void)
         fake_pre_push_box_active = 1u;
     }
     return fake_pre_push_box_result;
+}
+uint8 executor_start_pre_push_box_retry_nudge(float distance_cm)
+{
+    if((0u == fake_pre_push_pending) ||
+       (distance_cm != ART_BOX_OBSERVE_RETRY_MOVE_CM)) return 0u;
+    start_pre_push_box_retry_count++;
+    fake_pre_push_box_active = 1u;
+    fake_pre_push_box_state = "BRetry";
+    return 1u;
 }
 uint8 executor_pre_push_box_preparation_active(void)
 {
@@ -308,12 +324,14 @@ static void init_pre_push_box_test(art_replan_context_struct *context)
     fake_executor_error = EXEC_ERROR_NONE;
     fake_pre_push_pending = 1u;
     fake_pre_push_box_request = 1u;
+    fake_pre_push_box_prefetch_request = 0u;
     fake_pre_push_box_active = 0u;
     fake_error_on_box_active_query = 0u;
     fake_pre_push_box_row = 5u;
     fake_pre_push_box_col = 5u;
     fake_pre_push_box_state = "BGap";
     fake_pre_push_box_result = EXEC_ART_BOX_PREP_STARTED;
+    fake_art_box_sample_count = 0u;
     observation_count = 0u;
     observation_read = 0u;
 }
@@ -347,6 +365,48 @@ static uint8 pre_push_box_observation_flow(void)
     return (0 == strcmp(update.run_state, "Running")) ? 1u : 0u;
 }
 
+static uint8 pre_push_box_prefetch_freshness(void)
+{
+    art_replan_context_struct context;
+    art_replan_update_struct update;
+    uint16 request_before;
+    uint16 start_before;
+
+    init_pre_push_box_test(&context);
+    fake_pre_push_pending = 0u;
+    fake_pre_push_box_prefetch_request = 1u;
+    request_before = observation_request_count;
+    start_before = start_pre_push_box_count;
+    art_replan_tick(&context, 1u, &update);
+    if(request_before + 1u != observation_request_count) return 0u;
+    feed_observation(450u, 550u, 550u, 550u);
+    art_replan_tick(&context, 1u, &update);
+
+    fake_pre_push_pending = 1u;
+    fake_pre_push_box_prefetch_request = 0u;
+    fake_time_ms += ART_BOX_OBSERVE_SAMPLE_MAX_AGE_MS;
+    art_replan_tick(&context, 1u, &update);
+    if((request_before + 1u != observation_request_count) ||
+       (start_before + 1u != start_pre_push_box_count) ||
+       (0 != strcmp(update.run_state, "BGap"))) return 0u;
+
+    init_pre_push_box_test(&context);
+    fake_pre_push_pending = 0u;
+    fake_pre_push_box_prefetch_request = 1u;
+    request_before = observation_request_count;
+    start_before = start_pre_push_box_count;
+    art_replan_tick(&context, 1u, &update);
+    feed_observation(450u, 550u, 550u, 550u);
+    art_replan_tick(&context, 1u, &update);
+    fake_time_ms += ART_BOX_OBSERVE_SAMPLE_MAX_AGE_MS + 1u;
+    fake_pre_push_pending = 1u;
+    fake_pre_push_box_prefetch_request = 0u;
+    art_replan_tick(&context, 1u, &update);
+    return ((request_before + 2u == observation_request_count) &&
+            (start_before == start_pre_push_box_count) &&
+            (0 == strcmp(update.run_state, "BCtr"))) ? 1u : 0u;
+}
+
 static uint8 pre_push_box_failures_stop(void)
 {
     art_replan_context_struct context;
@@ -356,7 +416,17 @@ static uint8 pre_push_box_failures_stop(void)
     init_pre_push_box_test(&context);
     errors_before = executor_error_count;
     art_replan_tick(&context, 1u, &update);
-    fake_time_ms += EXEC_ART_SYNC_TIMEOUT_MS;
+    fake_time_ms += ART_BOX_OBSERVE_WAIT_MS;
+    art_replan_tick(&context, 1u, &update);
+    if((errors_before != executor_error_count) ||
+       (0u == start_pre_push_box_retry_count) ||
+       (0 != strcmp(update.run_state, "BRetry"))) return 0u;
+    fake_pre_push_box_active = 0u;
+    art_replan_tick(&context, 1u, &update);
+    fake_time_ms += ART_BOX_OBSERVE_RETRY_SETTLE_MS;
+    art_replan_tick(&context, 1u, &update);
+    if(0 != strcmp(update.run_state, "BCtr")) return 0u;
+    fake_time_ms += ART_BOX_OBSERVE_WAIT_MS;
     art_replan_tick(&context, 1u, &update);
     if((errors_before + 1u != executor_error_count) ||
        (0 != strcmp(update.run_state, "E:BObs"))) return 0u;
@@ -736,6 +806,8 @@ int main(void)
     printf("host-completion-replan        %s\n", (0 != passed) ? "PASS" : "FAIL");
     passed &= pre_push_box_observation_flow();
     printf("pre-push-box-observation      %s\n", (0 != passed) ? "PASS" : "FAIL");
+    passed &= pre_push_box_prefetch_freshness();
+    printf("pre-push-box-prefetch         %s\n", (0 != passed) ? "PASS" : "FAIL");
     passed &= pre_push_box_failures_stop();
     printf("pre-push-box-failures         %s\n", (0 != passed) ? "PASS" : "FAIL");
     return (0 != passed) ? 0 : 1;

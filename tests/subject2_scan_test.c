@@ -51,6 +51,7 @@ static uint8 correction_start_allowed;
 static uint8 executor_start_art_sync;
 static uint8 fake_pre_push_pending;
 static uint8 fake_pre_push_box_request;
+static uint8 fake_pre_push_box_prefetch_request;
 static uint8 fake_pre_push_box_active;
 static uint8 fake_error_on_box_active_query;
 static uint8 fake_pre_push_box_row;
@@ -59,6 +60,7 @@ static const char *fake_pre_push_box_state;
 static executor_art_box_prep_result_enum fake_pre_push_box_result;
 static uint8 fake_art_box_sample_count;
 static uint16 start_pre_push_box_count;
+static uint16 start_pre_push_box_retry_count;
 static uint8 fake_center_requires_push_alignment;
 static executor_art_center_result_enum fake_center_result;
 static uint8 fake_sync_pending;
@@ -163,6 +165,13 @@ uint8 executor_get_pre_push_box_request(uint8 *box_row, uint8 *box_col)
     *box_col = fake_pre_push_box_col;
     return 1u;
 }
+uint8 executor_get_pre_push_box_prefetch_request(uint8 *box_row, uint8 *box_col)
+{
+    if(0u == fake_pre_push_box_prefetch_request) return 0u;
+    *box_row = fake_pre_push_box_row;
+    *box_col = fake_pre_push_box_col;
+    return 1u;
+}
 void executor_reset_art_box_observation_samples(void)
 {
     fake_art_box_sample_count = 0u;
@@ -183,6 +192,15 @@ executor_art_box_prep_result_enum executor_start_pre_push_box_preparation(void)
         fake_pre_push_box_active = 1u;
     }
     return fake_pre_push_box_result;
+}
+uint8 executor_start_pre_push_box_retry_nudge(float distance_cm)
+{
+    if((0u == fake_pre_push_pending) ||
+       (distance_cm != ART_BOX_OBSERVE_RETRY_MOVE_CM)) return 0u;
+    start_pre_push_box_retry_count++;
+    fake_pre_push_box_active = 1u;
+    fake_pre_push_box_state = "BRetry";
+    return 1u;
 }
 uint8 executor_pre_push_box_preparation_active(void)
 {
@@ -340,6 +358,7 @@ static void build_map(void)
     executor_start_art_sync = 0u;
     fake_pre_push_pending = 0u;
     fake_pre_push_box_request = 1u;
+    fake_pre_push_box_prefetch_request = 0u;
     fake_pre_push_box_active = 0u;
     fake_error_on_box_active_query = 0u;
     fake_pre_push_box_row = 5u;
@@ -348,6 +367,7 @@ static void build_map(void)
     fake_pre_push_box_result = EXEC_ART_BOX_PREP_STARTED;
     fake_art_box_sample_count = 0u;
     start_pre_push_box_count = 0u;
+    start_pre_push_box_retry_count = 0u;
     fake_center_requires_push_alignment = 1u;
     fake_center_result = EXEC_ART_CENTER_APPLIED;
     fake_sync_pending = 0u;
@@ -671,13 +691,112 @@ static uint8 pre_push_box_observation_timeout_stops(void)
     if((SUBJECT2_PRE_PUSH_CENTER != subject2_get_state()) ||
        (0 != strcmp(update.run_state, "BCtr"))) return 0u;
 
-    fake_time_ms += EXEC_ART_SYNC_TIMEOUT_MS;
+    fake_time_ms += ART_BOX_OBSERVE_WAIT_MS;
+    subject2_tick(&context, &update);
+    if((SUBJECT2_PRE_PUSH_CENTER != subject2_get_state()) ||
+       (1u != start_pre_push_box_retry_count) ||
+       (0 != strcmp(update.run_state, "BRetry"))) return 0u;
+    fake_pre_push_box_active = 0u;
+    subject2_tick(&context, &update);
+    if(0 != strcmp(update.run_state, "BSet")) return 0u;
+    fake_time_ms += ART_BOX_OBSERVE_RETRY_SETTLE_MS;
+    subject2_tick(&context, &update);
+    if(0 != strcmp(update.run_state, "BCtr")) return 0u;
+    fake_time_ms += ART_BOX_OBSERVE_WAIT_MS;
     subject2_tick(&context, &update);
 
     return ((SUBJECT2_ERROR == subject2_get_state()) &&
             (0u == continue_pre_push_count) &&
             (EXEC_ERROR_ART_CENTER == fake_executor_error) &&
             (0 == strcmp(update.run_state, "E:BObs"))) ? 1u : 0u;
+}
+
+static uint8 pre_push_box_prefetch_freshness(void)
+{
+    subject2_context_struct context;
+    subject2_update_struct update;
+    uint16 request_before;
+
+    build_map();
+    init_context(&context);
+    if(0 == scan_to_select_push(&context, &update)) return 0u;
+    subject2_tick(&context, &update);
+    if(SUBJECT2_EXECUTE_PUSH != subject2_get_state()) return 0u;
+    fake_pre_push_box_prefetch_request = 1u;
+    request_before = observation_request_count;
+    subject2_tick(&context, &update);
+    if(request_before + 1u != observation_request_count) return 0u;
+    feed_observation(550u, 550u, 650u, 550u);
+    subject2_tick(&context, &update);
+    fake_time_ms += ART_BOX_OBSERVE_SAMPLE_MAX_AGE_MS;
+    fake_pre_push_box_prefetch_request = 0u;
+    fake_pre_push_pending = 1u;
+    subject2_tick(&context, &update);
+    subject2_tick(&context, &update);
+    if((request_before + 1u != observation_request_count) ||
+       (SUBJECT2_PRE_PUSH_CENTER != subject2_get_state()) ||
+       (0 != strcmp(update.run_state, "BGap"))) return 0u;
+
+    build_map();
+    init_context(&context);
+    if(0 == scan_to_select_push(&context, &update)) return 0u;
+    subject2_tick(&context, &update);
+    fake_pre_push_box_prefetch_request = 1u;
+    request_before = observation_request_count;
+    subject2_tick(&context, &update);
+    feed_observation(550u, 550u, 650u, 550u);
+    subject2_tick(&context, &update);
+    fake_time_ms += ART_BOX_OBSERVE_SAMPLE_MAX_AGE_MS + 1u;
+    fake_pre_push_box_prefetch_request = 0u;
+    fake_pre_push_pending = 1u;
+    subject2_tick(&context, &update);
+    return ((request_before + 2u == observation_request_count) &&
+            (SUBJECT2_PRE_PUSH_CENTER == subject2_get_state()) &&
+            (0 == strcmp(update.run_state, "BCtr"))) ? 1u : 0u;
+}
+
+static uint8 confirm_map_clears_box_prefetch(void)
+{
+    subject2_context_struct context;
+    subject2_update_struct update;
+    uint8 car_row;
+    uint8 car_col;
+    uint16 request_before;
+
+    build_map();
+    init_context(&context);
+    if(0 == scan_to_select_push(&context, &update)) return 0u;
+    subject2_tick(&context, &update);
+    if(SUBJECT2_EXECUTE_PUSH != subject2_get_state()) return 0u;
+
+    fake_pre_push_box_prefetch_request = 1u;
+    subject2_tick(&context, &update);
+    feed_observation(550u, 550u, 650u, 550u);
+    subject2_tick(&context, &update);
+    request_before = observation_request_count;
+
+    fake_pre_push_box_prefetch_request = 0u;
+    fake_sync_pending = 1u;
+    subject2_tick(&context, &update);
+    if(SUBJECT2_CONFIRM_MAP != subject2_get_state()) return 0u;
+
+    live_rows[5][6] = '.';
+    live_rows[5][7] = 'B';
+    fake_frame_count++;
+    subject2_tick(&context, &update);
+    if(SUBJECT2_REPLAN_CENTER != subject2_get_state()) return 0u;
+
+    if(0 == map_find_car(&live_source, &car_row, &car_col, 0)) return 0u;
+    feed_center((uint16)(car_col * 100u + 50u),
+                (uint16)(car_row * 100u + 50u));
+    subject2_tick(&context, &update);
+    if(SUBJECT2_SELECT_PUSH != subject2_get_state()) return 0u;
+    subject2_tick(&context, &update);
+    if(SUBJECT2_EXECUTE_PUSH != subject2_get_state()) return 0u;
+
+    fake_pre_push_box_prefetch_request = 1u;
+    subject2_tick(&context, &update);
+    return (request_before + 1u == observation_request_count) ? 1u : 0u;
 }
 
 static uint8 turn_center_continues_without_push_alignment(void)
@@ -1707,6 +1826,10 @@ int main(void)
     printf("subject2-step-observe       %s\n", (0u != passed) ? "PASS" : "FAIL");
     passed &= pre_push_box_observation_timeout_stops();
     printf("subject2-box-observe-tmo    %s\n", (0u != passed) ? "PASS" : "FAIL");
+    passed &= pre_push_box_prefetch_freshness();
+    printf("subject2-box-prefetch       %s\n", (0u != passed) ? "PASS" : "FAIL");
+    passed &= confirm_map_clears_box_prefetch();
+    printf("subject2-prefetch-replan    %s\n", (0u != passed) ? "PASS" : "FAIL");
     passed &= turn_center_continues_without_push_alignment();
     printf("subject2-turn-center        %s\n", (0u != passed) ? "PASS" : "FAIL");
     passed &= invalid_pre_push_box_geometry_stops();

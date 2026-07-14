@@ -26,6 +26,15 @@ static uint8 center_sample_count;
 static uint32 pre_push_center_start_ms;
 static uint8 pre_push_box_request_active;
 static uint8 pre_push_box_preparation_started;
+static uint8 pre_push_box_prefetch_active;
+static uint8 pre_push_box_prefetch_ready;
+static uint8 pre_push_box_prefetch_row;
+static uint8 pre_push_box_prefetch_col;
+static uint32 pre_push_box_prefetch_ready_ms;
+static uint8 pre_push_box_retry_count;
+static uint8 pre_push_box_retry_moving;
+static uint8 pre_push_box_retry_settling;
+static uint32 pre_push_box_retry_settle_start_ms;
 static float current_pose_offset_x_cm;
 static float current_pose_offset_y_cm;
 static uint8 navigation_start_row;
@@ -1135,6 +1144,77 @@ static void subject2_tick_select_push(const subject2_context_struct *context,
     }
 }
 
+static void subject2_box_prefetch_clear(void)
+{
+    pre_push_box_prefetch_active = 0u;
+    pre_push_box_prefetch_ready = 0u;
+    pre_push_box_prefetch_row = 0u;
+    pre_push_box_prefetch_col = 0u;
+    pre_push_box_prefetch_ready_ms = 0u;
+}
+
+static uint8 subject2_box_observation_collect(void)
+{
+    openart_observation_sample_struct sample;
+
+    while(0u != openart_get_observation_sample(&sample))
+    {
+        if(0u != executor_apply_art_box_observation(sample.car_col_q,
+                                                    sample.car_row_q,
+                                                    sample.box_col_q,
+                                                    sample.box_row_q))
+        {
+            pre_push_box_prefetch_active = 0u;
+            pre_push_box_prefetch_ready = 1u;
+            pre_push_box_prefetch_ready_ms = time_ms();
+        }
+    }
+    return pre_push_box_prefetch_ready;
+}
+
+static uint8 subject2_box_prefetch_is_fresh(uint8 box_row, uint8 box_col)
+{
+    return ((0u != pre_push_box_prefetch_ready) &&
+            (box_row == pre_push_box_prefetch_row) &&
+            (box_col == pre_push_box_prefetch_col) &&
+            ((time_ms() - pre_push_box_prefetch_ready_ms) <=
+             ART_BOX_OBSERVE_SAMPLE_MAX_AGE_MS)) ? 1u : 0u;
+}
+
+static void subject2_box_observation_request(uint8 box_row, uint8 box_col)
+{
+    executor_reset_art_box_observation_samples();
+    openart_request_observation(box_row, box_col);
+    pre_push_box_prefetch_active = 1u;
+    pre_push_box_prefetch_ready = 0u;
+    pre_push_box_prefetch_row = box_row;
+    pre_push_box_prefetch_col = box_col;
+    pre_push_box_prefetch_ready_ms = 0u;
+}
+
+static void subject2_tick_box_prefetch(void)
+{
+    uint8 box_row;
+    uint8 box_col;
+
+    if(0u != pre_push_box_prefetch_active)
+    {
+        (void)subject2_box_observation_collect();
+    }
+    if(0 == executor_get_pre_push_box_prefetch_request(&box_row, &box_col))
+    {
+        return;
+    }
+    if(((0u != pre_push_box_prefetch_active) &&
+        (box_row == pre_push_box_prefetch_row) &&
+        (box_col == pre_push_box_prefetch_col)) ||
+       (0u != subject2_box_prefetch_is_fresh(box_row, box_col)))
+    {
+        return;
+    }
+    subject2_box_observation_request(box_row, box_col);
+}
+
 static void subject2_begin_pre_push_center(subject2_update_struct *update)
 {
     uint8 box_row;
@@ -1142,12 +1222,21 @@ static void subject2_begin_pre_push_center(subject2_update_struct *update)
 
     pre_push_box_request_active = 0u;
     pre_push_box_preparation_started = 0u;
+    pre_push_box_retry_count = 0u;
+    pre_push_box_retry_moving = 0u;
+    pre_push_box_retry_settling = 0u;
+    pre_push_box_retry_settle_start_ms = 0u;
     pre_push_center_start_ms = time_ms();
     subject2_state = SUBJECT2_PRE_PUSH_CENTER;
     if(0 != executor_get_pre_push_box_request(&box_row, &box_col))
     {
-        executor_reset_art_box_observation_samples();
-        openart_request_observation(box_row, box_col);
+        if((0u == subject2_box_prefetch_is_fresh(box_row, box_col)) &&
+           ((0u == pre_push_box_prefetch_active) ||
+            (box_row != pre_push_box_prefetch_row) ||
+            (box_col != pre_push_box_prefetch_col)))
+        {
+            subject2_box_observation_request(box_row, box_col);
+        }
         pre_push_box_request_active = 1u;
     }
     else
@@ -1164,9 +1253,44 @@ static void subject2_begin_pre_push_center(subject2_update_struct *update)
 
 static void subject2_tick_pre_push_box(subject2_update_struct *update)
 {
-    openart_observation_sample_struct sample;
     executor_art_box_prep_result_enum prep_result;
-    uint8 ready = 0u;
+
+    if(0u != pre_push_box_retry_moving)
+    {
+        if(0u != executor_pre_push_box_preparation_active())
+        {
+            if(0 != update) update->run_state = "BRetry";
+            return;
+        }
+        if(EXEC_STATE_ERROR == executor_get_state())
+        {
+            subject2_fail(EXEC_ERROR_ART_CENTER, "E:BTim", update);
+            return;
+        }
+        if(0u == pre_push_box_retry_settling)
+        {
+            pre_push_box_retry_settling = 1u;
+            pre_push_box_retry_settle_start_ms = time_ms();
+        }
+        if((time_ms() - pre_push_box_retry_settle_start_ms) <
+           ART_BOX_OBSERVE_RETRY_SETTLE_MS)
+        {
+            if(0 != update) update->run_state = "BSet";
+            return;
+        }
+
+        pre_push_box_retry_moving = 0u;
+        pre_push_box_retry_settling = 0u;
+        subject2_box_observation_request(pre_push_box_prefetch_row,
+                                         pre_push_box_prefetch_col);
+        pre_push_center_start_ms = time_ms();
+        if(0 != update)
+        {
+            update->run_state = "BCtr";
+            update->redraw = 1u;
+        }
+        return;
+    }
 
     if(0u != pre_push_box_preparation_started)
     {
@@ -1196,21 +1320,33 @@ static void subject2_tick_pre_push_box(subject2_update_struct *update)
         return;
     }
 
-    while(0u != openart_get_observation_sample(&sample))
+    if(0u == subject2_box_observation_collect())
     {
-        if(0u != executor_apply_art_box_observation(sample.car_col_q,
-                                                    sample.car_row_q,
-                                                    sample.box_col_q,
-                                                    sample.box_row_q))
+        if((time_ms() - pre_push_center_start_ms) >= ART_BOX_OBSERVE_WAIT_MS)
         {
-            ready = 1u;
-        }
-    }
-    if(0u == ready)
-    {
-        if((time_ms() - pre_push_center_start_ms) >= EXEC_ART_SYNC_TIMEOUT_MS)
-        {
-            subject2_fail(EXEC_ERROR_ART_CENTER, "E:BObs", update);
+            if(pre_push_box_retry_count < ART_BOX_OBSERVE_MAX_RETRIES)
+            {
+                pre_push_box_prefetch_active = 0u;
+                pre_push_box_prefetch_ready = 0u;
+                executor_reset_art_box_observation_samples();
+                if(0 == executor_start_pre_push_box_retry_nudge(
+                             ART_BOX_OBSERVE_RETRY_MOVE_CM))
+                {
+                    subject2_fail(EXEC_ERROR_ART_CENTER, "E:BTim", update);
+                    return;
+                }
+                pre_push_box_retry_count++;
+                pre_push_box_retry_moving = 1u;
+                if(0 != update)
+                {
+                    update->run_state = "BRetry";
+                    update->redraw = 1u;
+                }
+            }
+            else
+            {
+                subject2_fail(EXEC_ERROR_ART_CENTER, "E:BObs", update);
+            }
         }
         else if(0 != update)
         {
@@ -1226,6 +1362,7 @@ static void subject2_tick_pre_push_box(subject2_update_struct *update)
         return;
     }
 
+    subject2_box_prefetch_clear();
     pre_push_box_preparation_started = 1u;
     if(0 != update)
     {
@@ -1327,6 +1464,7 @@ static void subject2_tick_pre_push_center(const subject2_context_struct *context
 
 static void subject2_begin_confirm_map(subject2_update_struct *update)
 {
+    subject2_box_prefetch_clear();
     confirm_last_frame = openart_uart_get_frame_count();
     confirm_candidate_valid = 0u;
     confirm_stable_count = 0u;
@@ -1517,6 +1655,7 @@ static void subject2_tick_replan_center(const subject2_context_struct *context,
 
 static void subject2_tick_execute_push(subject2_update_struct *update)
 {
+    subject2_tick_box_prefetch();
     if(0 != executor_art_pre_push_pending())
     {
         subject2_begin_pre_push_center(update);
@@ -1692,6 +1831,11 @@ void subject2_cancel(void)
     pre_push_center_start_ms = 0u;
     pre_push_box_request_active = 0u;
     pre_push_box_preparation_started = 0u;
+    subject2_box_prefetch_clear();
+    pre_push_box_retry_count = 0u;
+    pre_push_box_retry_moving = 0u;
+    pre_push_box_retry_settling = 0u;
+    pre_push_box_retry_settle_start_ms = 0u;
     validation_retry_count = 0u;
     active_class = SUBJECT2_INVALID_CLASS;
     last_recognition_valid = 0u;
