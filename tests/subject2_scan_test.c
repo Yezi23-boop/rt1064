@@ -35,7 +35,12 @@ static uint16 center_row_q[ART_CENTER_SAMPLE_COUNT];
 static uint8 center_count;
 static uint8 center_read;
 static uint16 center_request_count;
+static openart_observation_sample_struct observation_samples[3];
+static uint8 observation_count;
+static uint8 observation_read;
 static uint16 observation_request_count;
+static uint8 observation_request_row;
+static uint8 observation_request_col;
 static uint16 pose_reset_count;
 static uint16 executor_start_count;
 static uint8 executor_start_single_step;
@@ -45,6 +50,15 @@ static float correction_target_y;
 static uint8 correction_start_allowed;
 static uint8 executor_start_art_sync;
 static uint8 fake_pre_push_pending;
+static uint8 fake_pre_push_box_request;
+static uint8 fake_pre_push_box_active;
+static uint8 fake_error_on_box_active_query;
+static uint8 fake_pre_push_box_row;
+static uint8 fake_pre_push_box_col;
+static const char *fake_pre_push_box_state;
+static executor_art_box_prep_result_enum fake_pre_push_box_result;
+static uint8 fake_art_box_sample_count;
+static uint16 start_pre_push_box_count;
 static uint8 fake_center_requires_push_alignment;
 static executor_art_center_result_enum fake_center_result;
 static uint8 fake_sync_pending;
@@ -142,6 +156,49 @@ executor_art_center_result_enum executor_commit_art_player_center(uint8 row, uin
     return fake_center_result;
 }
 uint8 executor_art_pre_push_pending(void) { return fake_pre_push_pending; }
+uint8 executor_get_pre_push_box_request(uint8 *box_row, uint8 *box_col)
+{
+    if((0u == fake_pre_push_pending) || (0u == fake_pre_push_box_request)) return 0u;
+    *box_row = fake_pre_push_box_row;
+    *box_col = fake_pre_push_box_col;
+    return 1u;
+}
+void executor_reset_art_box_observation_samples(void)
+{
+    fake_art_box_sample_count = 0u;
+}
+uint8 executor_apply_art_box_observation(uint16 car_col_q, uint16 car_row_q,
+                                         uint16 box_col_q, uint16 box_row_q)
+{
+    (void)car_col_q; (void)car_row_q; (void)box_col_q; (void)box_row_q;
+    if(fake_art_box_sample_count < 3u) fake_art_box_sample_count++;
+    return (fake_art_box_sample_count >= 3u) ? 1u : 0u;
+}
+executor_art_box_prep_result_enum executor_start_pre_push_box_preparation(void)
+{
+    start_pre_push_box_count++;
+    if(EXEC_ART_BOX_PREP_STARTED == fake_pre_push_box_result)
+    {
+        fake_pre_push_pending = 0u;
+        fake_pre_push_box_active = 1u;
+    }
+    return fake_pre_push_box_result;
+}
+uint8 executor_pre_push_box_preparation_active(void)
+{
+    if(0u != fake_error_on_box_active_query)
+    {
+        fake_error_on_box_active_query = 0u;
+        fake_pre_push_box_active = 0u;
+        fake_executor_error = EXEC_ERROR_ART_CENTER;
+        fake_executor_state = EXEC_STATE_ERROR;
+    }
+    return fake_pre_push_box_active;
+}
+const char *executor_pre_push_box_state_name(void)
+{
+    return fake_pre_push_box_state;
+}
 uint8 executor_center_requires_push_alignment(void)
 {
     return fake_center_requires_push_alignment;
@@ -184,14 +241,17 @@ uint8 openart_get_requested_center_sample(uint16 *col_q, uint16 *row_q)
 }
 void openart_request_observation(uint8 box_row, uint8 box_col)
 {
-    (void)box_row;
-    (void)box_col;
+    observation_request_row = box_row;
+    observation_request_col = box_col;
     observation_request_count++;
+    observation_count = 0u;
+    observation_read = 0u;
 }
 uint8 openart_get_observation_sample(openart_observation_sample_struct *sample)
 {
-    (void)sample;
-    return 0u;
+    if((0 == sample) || (observation_read >= observation_count)) return 0u;
+    *sample = observation_samples[observation_read++];
+    return 1u;
 }
 const map_source_struct *openart_map_get(void) { return &live_source; }
 const map_source_struct *openart_get_requested_center_map(void)
@@ -265,7 +325,11 @@ static void build_map(void)
     center_count = 0u;
     center_read = 0u;
     center_request_count = 0u;
+    observation_count = 0u;
+    observation_read = 0u;
     observation_request_count = 0u;
+    observation_request_row = 0u;
+    observation_request_col = 0u;
     pose_reset_count = 0u;
     executor_start_count = 0u;
     executor_start_single_step = 0u;
@@ -275,6 +339,15 @@ static void build_map(void)
     correction_start_allowed = 1u;
     executor_start_art_sync = 0u;
     fake_pre_push_pending = 0u;
+    fake_pre_push_box_request = 1u;
+    fake_pre_push_box_active = 0u;
+    fake_error_on_box_active_query = 0u;
+    fake_pre_push_box_row = 5u;
+    fake_pre_push_box_col = 6u;
+    fake_pre_push_box_state = "BGap";
+    fake_pre_push_box_result = EXEC_ART_BOX_PREP_STARTED;
+    fake_art_box_sample_count = 0u;
+    start_pre_push_box_count = 0u;
     fake_center_requires_push_alignment = 1u;
     fake_center_result = EXEC_ART_CENTER_APPLIED;
     fake_sync_pending = 0u;
@@ -332,6 +405,22 @@ static void feed_center(uint16 col_q, uint16 row_q)
     center_read = 0u;
     map_source_snapshot(&paired_center_source, paired_center_rows, &live_source);
     paired_center_valid = 1u;
+}
+
+static void feed_observation(uint16 car_col_q, uint16 car_row_q,
+                             uint16 box_col_q, uint16 box_row_q)
+{
+    uint8 index;
+
+    for(index = 0u; index < 3u; index++)
+    {
+        observation_samples[index].car_col_q = (uint16)(car_col_q + index);
+        observation_samples[index].car_row_q = car_row_q;
+        observation_samples[index].box_col_q = (uint16)(box_col_q + index);
+        observation_samples[index].box_row_q = box_row_q;
+    }
+    observation_count = 3u;
+    observation_read = 0u;
 }
 
 static void feed_class(uint8 class_id)
@@ -488,6 +577,8 @@ static uint8 run_scan(void)
 {
     subject2_context_struct context;
     subject2_update_struct update;
+    uint16 center_before;
+    uint16 observation_before;
 
     init_context(&context);
     if(0 == scan_to_select_push(&context, &update)) return 0u;
@@ -498,17 +589,25 @@ static uint8 run_scan(void)
        (1u != executor_start_art_sync) ||
        (4u != subject2_get_active_class())) return 0u;
 
+    center_before = center_request_count;
+    observation_before = observation_request_count;
     fake_pre_push_pending = 1u;
     subject2_tick(&context, &update);
     if((SUBJECT2_PRE_PUSH_CENTER != subject2_get_state()) ||
-       (3u != center_request_count)) return 0u;
+       (center_before != center_request_count) ||
+       (observation_before + 1u != observation_request_count) ||
+       (5u != observation_request_row) || (6u != observation_request_col) ||
+       (0 != strcmp(update.run_state, "BCtr"))) return 0u;
 
-    feed_center((uint16)(executor_target_col * 100u + 50u),
-                (uint16)(executor_target_row * 100u + 50u));
+    feed_observation(550u, 550u, 650u, 550u);
+    subject2_tick(&context, &update);
+    if((SUBJECT2_PRE_PUSH_CENTER != subject2_get_state()) ||
+       (1u != start_pre_push_box_count) ||
+       (0 != strcmp(update.run_state, "BGap"))) return 0u;
+    fake_pre_push_box_active = 0u;
     subject2_tick(&context, &update);
     if((SUBJECT2_EXECUTE_PUSH != subject2_get_state()) ||
-       (0u != continue_pre_push_count) ||
-       (1u != start_pre_push_alignment_count)) return 0u;
+       (0 != strcmp(update.run_state, "S2Push"))) return 0u;
 
     fake_sync_pending = 1u;
     subject2_tick(&context, &update);
@@ -520,7 +619,7 @@ static uint8 run_scan(void)
     fake_frame_count++;
     subject2_tick(&context, &update);
     if((SUBJECT2_REPLAN_CENTER != subject2_get_state()) ||
-       (4u != center_request_count)) return 0u;
+       (center_before + 1u != center_request_count)) return 0u;
 
     feed_center((uint16)(executor_target_col * 100u + 50u),
                 (uint16)(executor_target_row * 100u + 50u));
@@ -556,7 +655,7 @@ static uint8 host_completion_before_task_end_enters_confirm(void)
             ('.' == snapshot.rows[5][9])) ? 1u : 0u;
 }
 
-static uint8 pre_push_center_timeout_continues(void)
+static uint8 pre_push_box_observation_timeout_stops(void)
 {
     subject2_context_struct context;
     subject2_update_struct update;
@@ -569,25 +668,16 @@ static uint8 pre_push_center_timeout_continues(void)
 
     fake_pre_push_pending = 1u;
     subject2_tick(&context, &update);
-    if(SUBJECT2_PRE_PUSH_CENTER != subject2_get_state()) return 0u;
+    if((SUBJECT2_PRE_PUSH_CENTER != subject2_get_state()) ||
+       (0 != strcmp(update.run_state, "BCtr"))) return 0u;
 
-    center_col_q[0] = 550u;
-    center_row_q[0] = 550u;
-    center_count = 1u;
-    center_read = 0u;
     fake_time_ms += EXEC_ART_SYNC_TIMEOUT_MS;
     subject2_tick(&context, &update);
 
-#if ART_CENTER_TIMEOUT_FALLBACK_ENABLE
-    return ((SUBJECT2_EXECUTE_PUSH == subject2_get_state()) &&
-            (1u == continue_pre_push_count) &&
-            (0u == start_pre_push_alignment_count) &&
-            (0 == strcmp(update.run_state, "S2Push"))) ? 1u : 0u;
-#else
     return ((SUBJECT2_ERROR == subject2_get_state()) &&
             (0u == continue_pre_push_count) &&
-            (0 == strcmp(update.run_state, "E:CPsh"))) ? 1u : 0u;
-#endif
+            (EXEC_ERROR_ART_CENTER == fake_executor_error) &&
+            (0 == strcmp(update.run_state, "E:BObs"))) ? 1u : 0u;
 }
 
 static uint8 turn_center_continues_without_push_alignment(void)
@@ -602,6 +692,7 @@ static uint8 turn_center_continues_without_push_alignment(void)
     if(SUBJECT2_EXECUTE_PUSH != subject2_get_state()) return 0u;
 
     fake_pre_push_pending = 1u;
+    fake_pre_push_box_request = 0u;
     fake_center_requires_push_alignment = 0u;
     subject2_tick(&context, &update);
     if(SUBJECT2_PRE_PUSH_CENTER != subject2_get_state()) return 0u;
@@ -615,7 +706,7 @@ static uint8 turn_center_continues_without_push_alignment(void)
             (0u == start_pre_push_alignment_count)) ? 1u : 0u;
 }
 
-static uint8 rejected_pre_push_center_replans_active_box(void)
+static uint8 invalid_pre_push_box_geometry_stops(void)
 {
     subject2_context_struct context;
     subject2_update_struct update;
@@ -630,19 +721,17 @@ static uint8 rejected_pre_push_center_replans_active_box(void)
     subject2_tick(&context, &update);
     if(SUBJECT2_PRE_PUSH_CENTER != subject2_get_state()) return 0u;
 
-    fake_center_result = EXEC_ART_CENTER_REJECTED;
-    feed_center((uint16)(start_col * 100u + 50u),
-                (uint16)(start_row * 100u + 50u));
+    fake_pre_push_box_result = EXEC_ART_BOX_PREP_GEOMETRY_ERROR;
+    feed_observation(550u, 550u, 650u, 550u);
     subject2_tick(&context, &update);
 
-    return ((SUBJECT2_REPLAN_CENTER == subject2_get_state()) &&
-            (0 == strcmp(update.run_state, "RCtr")) &&
-            (EXEC_STATE_IDLE == fake_executor_state) &&
-            (4u == center_request_count) &&
-            (EXEC_ERROR_NONE == fake_executor_error)) ? 1u : 0u;
+    return ((SUBJECT2_ERROR == subject2_get_state()) &&
+            (0 == strcmp(update.run_state, "E:BGeo")) &&
+            (EXEC_STATE_ERROR == fake_executor_state) &&
+            (EXEC_ERROR_ART_CENTER == fake_executor_error)) ? 1u : 0u;
 }
 
-static uint8 pre_push_alignment_error_stays_center_error(void)
+static uint8 pre_push_box_motion_error_has_timeout_reason(void)
 {
     subject2_context_struct context;
     subject2_update_struct update;
@@ -653,13 +742,33 @@ static uint8 pre_push_alignment_error_stays_center_error(void)
     subject2_tick(&context, &update);
     if(SUBJECT2_EXECUTE_PUSH != subject2_get_state()) return 0u;
 
+    fake_pre_push_pending = 1u;
+    subject2_tick(&context, &update);
+    feed_observation(550u, 550u, 650u, 550u);
+    subject2_tick(&context, &update);
+    if((SUBJECT2_PRE_PUSH_CENTER != subject2_get_state()) ||
+       (0u == fake_pre_push_box_active)) return 0u;
+
+    fake_pre_push_box_active = 0u;
     fake_executor_error = EXEC_ERROR_ART_CENTER;
     fake_executor_state = EXEC_STATE_ERROR;
     subject2_tick(&context, &update);
+    if((SUBJECT2_ERROR != subject2_get_state()) ||
+       (EXEC_ERROR_ART_CENTER != fake_executor_error) ||
+       (0 != strcmp(update.run_state, "E:BTim"))) return 0u;
 
+    build_map();
+    init_context(&context);
+    if(0 == scan_to_select_push(&context, &update)) return 0u;
+    subject2_tick(&context, &update);
+    fake_pre_push_pending = 1u;
+    subject2_tick(&context, &update);
+    feed_observation(550u, 550u, 650u, 550u);
+    subject2_tick(&context, &update);
+    fake_error_on_box_active_query = 1u;
+    subject2_tick(&context, &update);
     return ((SUBJECT2_ERROR == subject2_get_state()) &&
-            (EXEC_ERROR_ART_CENTER == fake_executor_error) &&
-            (0 == strcmp(update.run_state, "E:CPsh"))) ? 1u : 0u;
+            (0 == strcmp(update.run_state, "E:BTim"))) ? 1u : 0u;
 }
 
 static uint8 push_retry_tracks_active_box(void)
@@ -1596,13 +1705,13 @@ int main(void)
     printf("subject2-request-once       %s\n", (0u != passed) ? "PASS" : "FAIL");
     passed &= step_mode_only_pauses_navigation();
     printf("subject2-step-observe       %s\n", (0u != passed) ? "PASS" : "FAIL");
-    passed &= pre_push_center_timeout_continues();
-    printf("subject2-pctr-timeout       %s\n", (0u != passed) ? "PASS" : "FAIL");
+    passed &= pre_push_box_observation_timeout_stops();
+    printf("subject2-box-observe-tmo    %s\n", (0u != passed) ? "PASS" : "FAIL");
     passed &= turn_center_continues_without_push_alignment();
     printf("subject2-turn-center        %s\n", (0u != passed) ? "PASS" : "FAIL");
-    passed &= rejected_pre_push_center_replans_active_box();
-    printf("subject2-pctr-replan        %s\n", (0u != passed) ? "PASS" : "FAIL");
-    passed &= pre_push_alignment_error_stays_center_error();
-    printf("subject2-pctr-error         %s\n", (0u != passed) ? "PASS" : "FAIL");
+    passed &= invalid_pre_push_box_geometry_stops();
+    printf("subject2-box-geometry       %s\n", (0u != passed) ? "PASS" : "FAIL");
+    passed &= pre_push_box_motion_error_has_timeout_reason();
+    printf("subject2-box-motion-error   %s\n", (0u != passed) ? "PASS" : "FAIL");
     return (0u != passed) ? 0 : 1;
 }

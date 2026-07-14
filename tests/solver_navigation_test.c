@@ -92,7 +92,7 @@ static uint8 each_push_action_is_a_waypoint(void)
             return 0;
         }
     }
-    return ((0u == result.waypoints[0].center_correct_before) &&
+    return ((1u == result.waypoints[0].center_correct_before) &&
             (0u == result.waypoints[1].center_correct_before)) ? 1u : 0u;
 }
 
@@ -110,12 +110,14 @@ static uint8 same_direction_push_is_not_marked(void)
     }
 
     return ((0 == strcmp(result.actions, "rrRR")) &&
-            (3u == result.waypoint_count) &&
-            (3u == result.waypoints[0].col) &&
+            (4u == result.waypoint_count) &&
+            (2u == result.waypoints[0].col) &&
             (0u == result.waypoints[0].center_correct_before) &&
-            ('R' == result.waypoints[1].action) &&
-            (0u == result.waypoints[1].center_correct_before) &&
-            (0u == result.waypoints[2].center_correct_before)) ? 1u : 0u;
+            ('r' == result.waypoints[1].action) &&
+            (1u == result.waypoints[1].center_correct_before) &&
+            ('R' == result.waypoints[2].action) &&
+            (0u == result.waypoints[2].center_correct_before) &&
+            (0u == result.waypoints[3].center_correct_before)) ? 1u : 0u;
 }
 
 static uint8 turn_into_push_is_marked(void)
@@ -134,9 +136,9 @@ static uint8 turn_into_push_is_marked(void)
     return ((0 == strcmp(result.actions, "dR")) &&
             (2u == result.waypoint_count) &&
             ('d' == result.waypoints[0].action) &&
-            (0u == result.waypoints[0].center_correct_before) &&
+            (1u == result.waypoints[0].center_correct_before) &&
             ('R' == result.waypoints[1].action) &&
-            (1u == result.waypoints[1].center_correct_before)) ? 1u : 0u;
+            (0u == result.waypoints[1].center_correct_before)) ? 1u : 0u;
 }
 
 static uint8 merged_turn_marks_next_waypoint(void)
@@ -188,13 +190,15 @@ static uint8 merged_push_approach_marks_turn(void)
     }
 
     return ((0 == strcmp(result.actions, "ddrrR")) &&
-            (3u == result.waypoint_count) &&
+            (4u == result.waypoint_count) &&
             ('d' == result.waypoints[0].action) &&
             (0u == result.waypoints[0].center_correct_before) &&
             ('r' == result.waypoints[1].action) &&
             (1u == result.waypoints[1].center_correct_before) &&
-            ('R' == result.waypoints[2].action) &&
-            (0u == result.waypoints[2].center_correct_before)) ? 1u : 0u;
+            ('r' == result.waypoints[2].action) &&
+            (1u == result.waypoints[2].center_correct_before) &&
+            ('R' == result.waypoints[3].action) &&
+            (0u == result.waypoints[3].center_correct_before)) ? 1u : 0u;
 }
 
 static uint8 bound_box_uses_requested_target(void)

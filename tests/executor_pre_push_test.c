@@ -382,6 +382,221 @@ static uint8 art_center_samples_can_be_reset(void)
     return (0u == executor_apply_art_player_center(572u, 550u, 3u)) ? 1u : 0u;
 }
 
+static uint8 collect_box_observation(uint16 car_col_q, uint16 car_row_q,
+                                     uint16 box_col_q, uint16 box_row_q)
+{
+    executor_reset_art_box_observation_samples();
+    if(0u != executor_apply_art_box_observation(
+            car_col_q, car_row_q, box_col_q, box_row_q))
+    {
+        return 0u;
+    }
+    if(0u != executor_apply_art_box_observation(
+            car_col_q, car_row_q, box_col_q, box_row_q))
+    {
+        return 0u;
+    }
+    return executor_apply_art_box_observation(
+        car_col_q, car_row_q, box_col_q, box_row_q);
+}
+
+static uint8 final_approach_requests_next_box(void)
+{
+    waypoint_struct waypoints[2] = {
+        {5u, 5u, 'd', 0u, 1u, 0u, 1u},
+        {5u, 6u, 'R', 1u, 2u, 1u, 0u}
+    };
+    uint8 box_row = 0u;
+    uint8 box_col = 0u;
+
+    reset_fixture();
+    executor_start(waypoints, 2u, 4u, 5u, 0.0f, 0.0f, 0u, 1u);
+    executor_update_20ms();
+
+    return ((0u != executor_art_pre_push_pending()) &&
+            (0u != executor_get_pre_push_box_request(&box_row, &box_col)) &&
+            (5u == box_row) && (6u == box_col)) ? 1u : 0u;
+}
+
+static uint8 box_preparation_aligns_and_consumes_approach(void)
+{
+    waypoint_struct waypoints[2] = {
+        {5u, 5u, 'd', 0u, 1u, 0u, 1u},
+        {5u, 6u, 'R', 1u, 2u, 1u, 0u}
+    };
+    uint8 tick;
+
+    reset_fixture();
+    executor_start(waypoints, 2u, 4u, 5u, 0.0f, 0.0f, 0u, 1u);
+    executor_update_20ms();
+    if((0u == collect_box_observation(550u, 450u, 650u, 550u)) ||
+       (EXEC_ART_BOX_PREP_STARTED != executor_start_pre_push_box_preparation()))
+    {
+        return 0u;
+    }
+
+    executor_update_20ms();
+    if((fabsf(last_motion_vx) > 0.0001f) || (last_motion_vy >= 0.0f) ||
+       (0 != strcmp(executor_pre_push_box_state_name(), "BAlign")))
+    {
+        return 0u;
+    }
+
+    test_pose.y_cm = -20.0f;
+    for(tick = 0u; tick < (EXEC_ARRIVAL_STABLE_TICKS * 2u); tick++)
+    {
+        executor_update_20ms();
+    }
+    if((1u != executor_get_current_step()) ||
+       (0u != executor_pre_push_box_preparation_active()))
+    {
+        return 0u;
+    }
+
+    executor_update_20ms();
+    return ((last_motion_vx > 0.0f) &&
+            (fabsf(last_motion_vy) < 0.0001f)) ? 1u : 0u;
+}
+
+static uint8 short_gap_retreats_before_alignment(void)
+{
+    waypoint_struct waypoint = {5u, 6u, 'R', 0u, 1u, 1u, 1u};
+
+    reset_fixture();
+    executor_start(&waypoint, 1u, 5u, 5u, 5.0f, 0.0f, 0u, 1u);
+    executor_update_20ms();
+    if((0u == collect_box_observation(575u, 550u, 650u, 550u)) ||
+       (EXEC_ART_BOX_PREP_STARTED != executor_start_pre_push_box_preparation()))
+    {
+        return 0u;
+    }
+    executor_update_20ms();
+
+    return ((last_motion_vx < 0.0f) &&
+            (fabsf(last_motion_vy) < 0.0001f) &&
+            (0 == strcmp(executor_pre_push_box_state_name(), "BGap"))) ? 1u : 0u;
+}
+
+static uint8 wrong_side_box_is_rejected(void)
+{
+    waypoint_struct waypoint = {5u, 6u, 'R', 0u, 1u, 1u, 1u};
+
+    reset_fixture();
+    executor_start(&waypoint, 1u, 5u, 5u, 22.0f, 0.0f, 0u, 1u);
+    executor_update_20ms();
+    if(0u == collect_box_observation(660u, 550u, 650u, 550u))
+    {
+        return 0u;
+    }
+
+    return ((EXEC_ART_BOX_PREP_GEOMETRY_ERROR ==
+             executor_start_pre_push_box_preparation()) &&
+            (0u == executor_get_current_step()) &&
+            (0u == executor_pre_push_box_preparation_active())) ? 1u : 0u;
+}
+
+static uint8 adjacent_box_cell_is_rejected(void)
+{
+    waypoint_struct waypoint = {5u, 6u, 'R', 0u, 1u, 1u, 1u};
+
+    reset_fixture();
+    executor_start(&waypoint, 1u, 5u, 5u, 0.0f, 0.0f, 0u, 1u);
+    executor_update_20ms();
+    if(0u == collect_box_observation(550u, 550u, 750u, 550u))
+    {
+        return 0u;
+    }
+
+    return (EXEC_ART_BOX_PREP_GEOMETRY_ERROR ==
+            executor_start_pre_push_box_preparation()) ? 1u : 0u;
+}
+
+static uint8 box_preparation_approach_direction(char action,
+                                                uint8 box_row, uint8 box_col,
+                                                uint16 car_col_q, uint16 car_row_q,
+                                                uint16 box_col_q, uint16 box_row_q,
+                                                float expected_sign,
+                                                uint8 x_axis)
+{
+    waypoint_struct waypoint = {box_row, box_col, action, 0u, 1u, 1u, 1u};
+    uint8 tick;
+
+    reset_fixture();
+    executor_start(&waypoint, 1u, 5u, 5u, 0.0f, 0.0f, 0u, 1u);
+    executor_update_20ms();
+    if((0u == collect_box_observation(car_col_q, car_row_q,
+                                      box_col_q, box_row_q)) ||
+       (EXEC_ART_BOX_PREP_STARTED != executor_start_pre_push_box_preparation()))
+    {
+        return 0u;
+    }
+
+    if(0u != x_axis)
+    {
+        test_pose.y_cm = 0.0f;
+    }
+    else
+    {
+        test_pose.x_cm = 0.0f;
+    }
+    for(tick = 0u; tick < EXEC_ARRIVAL_STABLE_TICKS; tick++)
+    {
+        executor_update_20ms();
+    }
+    if(0 != strcmp(executor_pre_push_box_state_name(), "BNear"))
+    {
+        return 0u;
+    }
+    executor_update_20ms();
+
+    if(0u != x_axis)
+    {
+        return (((last_motion_vx * expected_sign) > 0.0f) &&
+                (fabsf(last_motion_vy) < 0.0001f)) ? 1u : 0u;
+    }
+    return (((last_motion_vy * expected_sign) > 0.0f) &&
+            (fabsf(last_motion_vx) < 0.0001f)) ? 1u : 0u;
+}
+
+static uint8 box_preparation_targets_all_directions(void)
+{
+    return ((0u != box_preparation_approach_direction(
+                        'R', 5u, 6u, 550u, 540u, 670u, 550u, 1.0f, 1u)) &&
+            (0u != box_preparation_approach_direction(
+                        'L', 5u, 4u, 550u, 540u, 430u, 550u, -1.0f, 1u)) &&
+            (0u != box_preparation_approach_direction(
+                        'U', 4u, 5u, 540u, 550u, 550u, 430u, 1.0f, 0u)) &&
+            (0u != box_preparation_approach_direction(
+                        'D', 6u, 5u, 540u, 550u, 550u, 670u, -1.0f, 0u))) ? 1u : 0u;
+}
+
+static uint8 step_box_preparation_pauses_before_push(void)
+{
+    waypoint_struct waypoints[2] = {
+        {5u, 5u, 'd', 0u, 1u, 0u, 1u},
+        {5u, 6u, 'R', 1u, 2u, 1u, 0u}
+    };
+    uint8 tick;
+
+    reset_fixture();
+    executor_start(waypoints, 2u, 4u, 5u, 0.0f, 0.0f, 1u, 1u);
+    executor_resume();
+    executor_update_20ms();
+    if((0u == collect_box_observation(550u, 450u, 650u, 550u)) ||
+       (EXEC_ART_BOX_PREP_STARTED != executor_start_pre_push_box_preparation()))
+    {
+        return 0u;
+    }
+    test_pose.y_cm = -20.0f;
+    for(tick = 0u; tick < (EXEC_ARRIVAL_STABLE_TICKS * 2u); tick++)
+    {
+        executor_update_20ms();
+    }
+
+    return ((EXEC_STATE_PAUSED == executor_get_state()) &&
+            (1u == executor_get_current_step())) ? 1u : 0u;
+}
+
 static uint8 run_push_chain_switches_without_stop(void)
 {
     waypoint_struct waypoints[2] = {
@@ -591,6 +806,13 @@ int main(void)
     passed &= run_case("center-error-stops", center_error_stops_on_same_waypoint());
     passed &= run_case("art-fusion-configured", art_center_uses_configured_fusion());
     passed &= run_case("art-samples-reset", art_center_samples_can_be_reset());
+    passed &= run_case("box-request-next-waypoint", final_approach_requests_next_box());
+    passed &= run_case("box-align-consumes-approach", box_preparation_aligns_and_consumes_approach());
+    passed &= run_case("box-short-gap-retreat", short_gap_retreats_before_alignment());
+    passed &= run_case("box-wrong-side-rejected", wrong_side_box_is_rejected());
+    passed &= run_case("box-adjacent-cell-rejected", adjacent_box_cell_is_rejected());
+    passed &= run_case("box-all-directions", box_preparation_targets_all_directions());
+    passed &= run_case("box-step-pauses", step_box_preparation_pauses_before_push());
     passed &= run_case("run-push-chain-continuous", run_push_chain_switches_without_stop());
     passed &= run_case("run-move-push-continuous", run_move_into_push_switches_without_stop());
     passed &= run_case("run-push-chain-lookahead", run_push_chain_targets_straight_end());

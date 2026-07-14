@@ -7,6 +7,15 @@
 #include <math.h>
 
 #define ART_PLAYER_CENTER_FILTER_WINDOW (ART_CENTER_SAMPLE_COUNT)
+#define ART_BOX_OBSERVATION_FILTER_WINDOW (3u)
+
+typedef enum
+{
+    PRE_PUSH_BOX_IDLE = 0,
+    PRE_PUSH_BOX_SAFE_GAP,
+    PRE_PUSH_BOX_ALIGN_PERP,
+    PRE_PUSH_BOX_APPROACH
+} pre_push_box_phase_enum;
 
 /* 执行器状态由主循环启动/停止、PIT_CH1 20ms 推进共同访问；
  * 这里不做阻塞等待，ART 同步等待交给主循环处理。 */
@@ -38,6 +47,21 @@ static uint8 pre_push_alignment_stable_ticks = 0; // 单轴误差连续进入到
 static uint16 pre_push_alignment_elapsed_ms = 0; // 单轴对齐累计时间，达到 ART 同步超时后报中心错误。
 static float pre_push_alignment_target_x_cm = 0.0f; // 当前 C 格中心的本地世界 X。
 static float pre_push_alignment_target_y_cm = 0.0f; // 当前 C 格中心的本地世界 Y。
+static pre_push_box_phase_enum pre_push_box_phase = PRE_PUSH_BOX_IDLE;
+static uint8 pre_push_box_consumes_waypoint = 0u;
+static char pre_push_box_action = '\0';
+static float pre_push_box_target_x_cm = 0.0f;
+static float pre_push_box_target_y_cm = 0.0f;
+static uint16 art_box_car_col_samples[ART_BOX_OBSERVATION_FILTER_WINDOW];
+static uint16 art_box_car_row_samples[ART_BOX_OBSERVATION_FILTER_WINDOW];
+static uint16 art_box_col_samples[ART_BOX_OBSERVATION_FILTER_WINDOW];
+static uint16 art_box_row_samples[ART_BOX_OBSERVATION_FILTER_WINDOW];
+static uint8 art_box_observation_count = 0u;
+static uint8 art_box_observation_valid = 0u;
+static uint16 art_box_car_median_col_q = 0u;
+static uint16 art_box_car_median_row_q = 0u;
+static uint16 art_box_median_col_q = 0u;
+static uint16 art_box_median_row_q = 0u;
 static char last_completed_action = '\0'; // 最近完成并触发 ART 等待的 waypoint 动作；主循环用它区分普通移动/推箱确认。
 static uint16 art_player_center_x_history[ART_PLAYER_CENTER_FILTER_WINDOW];
 static uint16 art_player_center_y_history[ART_PLAYER_CENTER_FILTER_WINDOW];
@@ -90,6 +114,11 @@ static void executor_reset_segment_state(void)
     pre_push_alignment_elapsed_ms = 0;
     pre_push_alignment_target_x_cm = 0.0f;
     pre_push_alignment_target_y_cm = 0.0f;
+    pre_push_box_phase = PRE_PUSH_BOX_IDLE;
+    pre_push_box_consumes_waypoint = 0u;
+    pre_push_box_action = '\0';
+    pre_push_box_target_x_cm = 0.0f;
+    pre_push_box_target_y_cm = 0.0f;
     path_pid_reset(&x_pid);
     path_pid_reset(&y_pid);
 }
@@ -99,6 +128,16 @@ static void executor_clear_art_center_history(void)
     art_player_center_history_count = 0;
     art_player_center_history_head = 0;
     art_player_center_median_valid = 0;
+}
+
+static void executor_clear_art_box_observation(void)
+{
+    art_box_observation_count = 0u;
+    art_box_observation_valid = 0u;
+    art_box_car_median_col_q = 0u;
+    art_box_car_median_row_q = 0u;
+    art_box_median_col_q = 0u;
+    art_box_median_row_q = 0u;
 }
 
 static uint16 median_u16_values(const uint16 *values, uint8 count)
@@ -147,6 +186,13 @@ static uint8 center_q_is_near_cell(uint16 row_q, uint16 col_q,
 #endif
 }
 
+static uint8 center_q_is_in_cell(uint16 row_q, uint16 col_q,
+                                 uint8 cell_row, uint8 cell_col)
+{
+    return (((row_q / 100u) == cell_row) &&
+            ((col_q / 100u) == cell_col)) ? 1u : 0u;
+}
+
 static uint8 action_is_x_axis(char action)
 {
     return (('l' == action) || ('L' == action) || ('r' == action) || ('R' == action)) ? 1u : 0u;
@@ -160,6 +206,41 @@ static uint8 action_is_y_axis(char action)
 static uint8 action_is_push(char action)
 {
     return ((action >= 'A') && (action <= 'Z')) ? 1u : 0u;
+}
+
+static uint8 executor_get_pre_push_box_context(uint16 *push_step,
+                                               uint8 *consume_current)
+{
+    if((0 == exec_waypoints) || (current_step >= exec_waypoint_count))
+    {
+        return 0u;
+    }
+    if(0 != action_is_push(exec_waypoints[current_step].action))
+    {
+        if(0 != push_step)
+        {
+            *push_step = current_step;
+        }
+        if(0 != consume_current)
+        {
+            *consume_current = 0u;
+        }
+        return 1u;
+    }
+    if(((current_step + 1u) < exec_waypoint_count) &&
+       (0 != action_is_push(exec_waypoints[current_step + 1u].action)))
+    {
+        if(0 != push_step)
+        {
+            *push_step = (uint16)(current_step + 1u);
+        }
+        if(0 != consume_current)
+        {
+            *consume_current = 1u;
+        }
+        return 1u;
+    }
+    return 0u;
 }
 
 static char action_direction(char action)
@@ -416,6 +497,21 @@ uint8 executor_center_requires_push_alignment(void)
     return action_is_push(exec_waypoints[current_step].action);
 }
 
+uint8 executor_get_pre_push_box_request(uint8 *box_row, uint8 *box_col)
+{
+    uint16 push_step;
+
+    if((0 == box_row) || (0 == box_col) ||
+       (0 == executor_art_pre_push_pending()) ||
+       (0 == executor_get_pre_push_box_context(&push_step, 0)))
+    {
+        return 0u;
+    }
+    *box_row = exec_waypoints[push_step].row;
+    *box_col = exec_waypoints[push_step].col;
+    return 1u;
+}
+
 uint8 executor_continue_after_pre_push_center(void)
 {
     uint8 continued = 0;
@@ -562,35 +658,27 @@ void executor_reset_art_player_center_samples(void)
     interrupt_global_enable(primask);
 }
 
-executor_art_center_result_enum executor_commit_art_player_center(uint8 current_car_row,
-                                                                  uint8 current_car_col)
+static executor_art_center_result_enum executor_commit_art_center_values(
+    uint16 center_col_q, uint16 center_row_q,
+    uint8 current_car_row, uint8 current_car_col)
 {
     const drive_pose_struct *pose;
     float corrected_x_cm;
     float corrected_y_cm;
     float pose_yaw;
     executor_art_center_result_enum result;
-    uint32 primask = interrupt_global_disable();
 
-    if(0 == art_player_center_median_valid)
-    {
-        set_art_center_debug(EXEC_ART_CENTER_NONE, 0.0f, 0.0f, 0.0f);
-        result = EXEC_ART_CENTER_NONE;
-        goto done;
-    }
-    if(0 == center_q_is_near_cell(art_player_center_median_row_q,
-                                  art_player_center_median_col_q,
+    if(0 == center_q_is_near_cell(center_row_q,
+                                  center_col_q,
                                   current_car_row,
                                   current_car_col))
     {
-        art_player_center_median_valid = 0;
         set_art_center_debug(EXEC_ART_CENTER_REJECTED, 0.0f, 0.0f, 0.0f);
-        result = EXEC_ART_CENTER_REJECTED;
-        goto done;
+        return EXEC_ART_CENTER_REJECTED;
     }
 
-    grid_q_to_physical(art_player_center_median_row_q,
-                       art_player_center_median_col_q,
+    grid_q_to_physical(center_row_q,
+                       center_col_q,
                        &corrected_x_cm,
                        &corrected_y_cm);
     pose = drive_pose_get();
@@ -601,27 +689,22 @@ executor_art_center_result_enum executor_commit_art_player_center(uint8 current_
         float dy = corrected_y_cm - pose->y_cm;
         float diff_cm = sqrt_distance_cm(dx, dy);
 
-        art_player_center_median_valid = 0;
-
         if(diff_cm < EXEC_ART_CENTER_IGNORE_CM)
         {
             set_art_center_debug(EXEC_ART_CENTER_IGNORED, dx, dy, diff_cm);
-            result = EXEC_ART_CENTER_IGNORED;
-            goto done;
+            return EXEC_ART_CENTER_IGNORED;
         }
 
         if(diff_cm > EXEC_ART_CENTER_ABNORMAL_CM)
         {
             set_art_center_debug(EXEC_ART_CENTER_ABNORMAL, dx, dy, diff_cm);
-            result = EXEC_ART_CENTER_ABNORMAL;
-            goto done;
+            return EXEC_ART_CENTER_ABNORMAL;
         }
 
         if(diff_cm > EXEC_ART_CENTER_FUSE_MAX_CM)
         {
             set_art_center_debug(EXEC_ART_CENTER_REJECTED, dx, dy, diff_cm);
-            result = EXEC_ART_CENTER_REJECTED;
-            goto done;
+            return EXEC_ART_CENTER_REJECTED;
         }
 
         corrected_x_cm = pose->x_cm + (dx * EXEC_ART_CENTER_FUSE_ALPHA);
@@ -630,10 +713,211 @@ executor_art_center_result_enum executor_commit_art_player_center(uint8 current_
         set_art_center_debug(EXEC_ART_CENTER_APPLIED, dx, dy, diff_cm);
     }
     result = EXEC_ART_CENTER_APPLIED;
+    return result;
+}
+
+executor_art_center_result_enum executor_commit_art_player_center(uint8 current_car_row,
+                                                                  uint8 current_car_col)
+{
+    executor_art_center_result_enum result;
+    uint32 primask = interrupt_global_disable();
+
+    if(0 == art_player_center_median_valid)
+    {
+        set_art_center_debug(EXEC_ART_CENTER_NONE, 0.0f, 0.0f, 0.0f);
+        result = EXEC_ART_CENTER_NONE;
+        goto done;
+    }
+    result = executor_commit_art_center_values(
+        art_player_center_median_col_q,
+        art_player_center_median_row_q,
+        current_car_row,
+        current_car_col);
+    art_player_center_median_valid = 0;
 
 done:
     interrupt_global_enable(primask);
     return result;
+}
+
+void executor_reset_art_box_observation_samples(void)
+{
+    uint32 primask = interrupt_global_disable();
+    executor_clear_art_box_observation();
+    interrupt_global_enable(primask);
+}
+
+uint8 executor_apply_art_box_observation(uint16 car_col_q, uint16 car_row_q,
+                                         uint16 box_col_q, uint16 box_row_q)
+{
+    uint8 ready = 0u;
+    uint32 primask = interrupt_global_disable();
+
+    if(art_box_observation_count < ART_BOX_OBSERVATION_FILTER_WINDOW)
+    {
+        uint8 index = art_box_observation_count;
+        art_box_car_col_samples[index] = car_col_q;
+        art_box_car_row_samples[index] = car_row_q;
+        art_box_col_samples[index] = box_col_q;
+        art_box_row_samples[index] = box_row_q;
+        art_box_observation_count++;
+    }
+    if(art_box_observation_count >= ART_BOX_OBSERVATION_FILTER_WINDOW)
+    {
+        art_box_car_median_col_q = median_u16_values(
+            art_box_car_col_samples, ART_BOX_OBSERVATION_FILTER_WINDOW);
+        art_box_car_median_row_q = median_u16_values(
+            art_box_car_row_samples, ART_BOX_OBSERVATION_FILTER_WINDOW);
+        art_box_median_col_q = median_u16_values(
+            art_box_col_samples, ART_BOX_OBSERVATION_FILTER_WINDOW);
+        art_box_median_row_q = median_u16_values(
+            art_box_row_samples, ART_BOX_OBSERVATION_FILTER_WINDOW);
+        art_box_observation_valid = 1u;
+        ready = 1u;
+    }
+    interrupt_global_enable(primask);
+    return ready;
+}
+
+executor_art_box_prep_result_enum executor_start_pre_push_box_preparation(void)
+{
+    const waypoint_struct *push_wp;
+    executor_art_center_result_enum center_result;
+    uint16 push_step;
+    uint8 consume_current;
+    uint8 current_row;
+    uint8 current_col;
+    float car_x_cm;
+    float car_y_cm;
+    float box_x_cm;
+    float box_y_cm;
+    float signed_gap_cm;
+    executor_art_box_prep_result_enum result = EXEC_ART_BOX_PREP_NONE;
+    uint32 primask = interrupt_global_disable();
+
+    if((0 == executor_art_pre_push_pending()) ||
+       (0 == art_box_observation_valid) ||
+       (0 == executor_get_pre_push_box_context(&push_step, &consume_current)))
+    {
+        goto done;
+    }
+
+    push_wp = &exec_waypoints[push_step];
+    if(0u == current_step)
+    {
+        current_row = start_row;
+        current_col = start_col;
+    }
+    else
+    {
+        current_row = exec_waypoints[current_step - 1u].row;
+        current_col = exec_waypoints[current_step - 1u].col;
+    }
+    if((0 == center_q_is_near_cell(art_box_car_median_row_q,
+                                   art_box_car_median_col_q,
+                                   current_row, current_col)) ||
+       (0 == center_q_is_in_cell(art_box_median_row_q,
+                                 art_box_median_col_q,
+                                 push_wp->row, push_wp->col)))
+    {
+        result = EXEC_ART_BOX_PREP_GEOMETRY_ERROR;
+        goto clear_samples;
+    }
+
+    grid_q_to_physical(art_box_car_median_row_q,
+                       art_box_car_median_col_q,
+                       &car_x_cm, &car_y_cm);
+    grid_q_to_physical(art_box_median_row_q,
+                       art_box_median_col_q,
+                       &box_x_cm, &box_y_cm);
+
+    pre_push_box_target_x_cm = box_x_cm;
+    pre_push_box_target_y_cm = box_y_cm;
+    if('R' == push_wp->action)
+    {
+        signed_gap_cm = box_x_cm - car_x_cm;
+        pre_push_box_target_x_cm -= GRID_SIZE_CM;
+    }
+    else if('L' == push_wp->action)
+    {
+        signed_gap_cm = car_x_cm - box_x_cm;
+        pre_push_box_target_x_cm += GRID_SIZE_CM;
+    }
+    else if('U' == push_wp->action)
+    {
+        signed_gap_cm = box_y_cm - car_y_cm;
+        pre_push_box_target_y_cm -= GRID_SIZE_CM;
+    }
+    else if('D' == push_wp->action)
+    {
+        signed_gap_cm = car_y_cm - box_y_cm;
+        pre_push_box_target_y_cm += GRID_SIZE_CM;
+    }
+    else
+    {
+        result = EXEC_ART_BOX_PREP_GEOMETRY_ERROR;
+        goto clear_samples;
+    }
+    if(signed_gap_cm <= PATH_ARRIVAL_THRESHOLD_CM)
+    {
+        result = EXEC_ART_BOX_PREP_GEOMETRY_ERROR;
+        goto clear_samples;
+    }
+
+    center_result = executor_commit_art_center_values(
+        art_box_car_median_col_q,
+        art_box_car_median_row_q,
+        current_row,
+        current_col);
+    if((EXEC_ART_CENTER_APPLIED != center_result) &&
+       (EXEC_ART_CENTER_IGNORED != center_result))
+    {
+        result = EXEC_ART_BOX_PREP_GEOMETRY_ERROR;
+        goto clear_samples;
+    }
+
+    pre_push_box_consumes_waypoint = consume_current;
+    pre_push_box_action = push_wp->action;
+    pre_push_center_waiting = 0u;
+    pre_push_center_confirmed = 0u;
+    pre_push_alignment_stable_ticks = 0u;
+    pre_push_alignment_elapsed_ms = 0u;
+    arrival_stable_ticks = 0u;
+    path_pid_reset(&x_pid);
+    path_pid_reset(&y_pid);
+    pre_push_box_phase =
+        (signed_gap_cm < (GRID_SIZE_CM - PATH_ARRIVAL_THRESHOLD_CM)) ?
+        PRE_PUSH_BOX_SAFE_GAP : PRE_PUSH_BOX_ALIGN_PERP;
+    result = EXEC_ART_BOX_PREP_STARTED;
+
+clear_samples:
+    executor_clear_art_box_observation();
+done:
+    interrupt_global_enable(primask);
+    return result;
+}
+
+uint8 executor_pre_push_box_preparation_active(void)
+{
+    return ((EXEC_STATE_RUNNING == exec_state) &&
+            (PRE_PUSH_BOX_IDLE != pre_push_box_phase)) ? 1u : 0u;
+}
+
+const char *executor_pre_push_box_state_name(void)
+{
+    if(PRE_PUSH_BOX_SAFE_GAP == pre_push_box_phase)
+    {
+        return "BGap";
+    }
+    if(PRE_PUSH_BOX_ALIGN_PERP == pre_push_box_phase)
+    {
+        return "BAlign";
+    }
+    if(PRE_PUSH_BOX_APPROACH == pre_push_box_phase)
+    {
+        return "BNear";
+    }
+    return "";
 }
 
 static void executor_enter_segment_settle(void)
@@ -698,6 +982,7 @@ static void executor_enter_pre_push_center_wait(void)
     path_pid_reset(&x_pid);
     path_pid_reset(&y_pid);
     executor_clear_art_center_history();
+    executor_clear_art_box_observation();
 }
 
 static void executor_update_pre_push_alignment_20ms(void)
@@ -760,6 +1045,110 @@ static void executor_update_pre_push_alignment_20ms(void)
     }
 
     pre_push_alignment_stable_ticks = 0;
+    world_velocity_to_body(vx_world, vy_world, pose->yaw_deg, &vx_body, &vy_body);
+    set_motion(vx_body, vy_body);
+}
+
+static void executor_finish_pre_push_box_preparation(void)
+{
+    uint8 consume_current = pre_push_box_consumes_waypoint;
+
+    pre_push_box_phase = PRE_PUSH_BOX_IDLE;
+    pre_push_box_consumes_waypoint = 0u;
+    pre_push_alignment_stable_ticks = 0u;
+    pre_push_alignment_elapsed_ms = 0u;
+    arrival_stable_ticks = 0u;
+    path_pid_reset(&x_pid);
+    path_pid_reset(&y_pid);
+
+    if(0u != consume_current)
+    {
+        executor_advance_after_segment();
+    }
+    else
+    {
+        pre_push_center_confirmed = 1u;
+    }
+}
+
+static void executor_update_pre_push_box_20ms(void)
+{
+    const drive_pose_struct *pose = drive_pose_get();
+    float error;
+    float vx_world = 0.0f;
+    float vy_world = 0.0f;
+    float vx_body;
+    float vy_body;
+
+    if(pre_push_alignment_elapsed_ms >= EXEC_ART_SYNC_TIMEOUT_MS)
+    {
+        executor_set_error(EXEC_ERROR_ART_CENTER);
+        return;
+    }
+    pre_push_alignment_elapsed_ms += CONTROL_PERIOD_MS;
+
+    if(PRE_PUSH_BOX_ALIGN_PERP == pre_push_box_phase)
+    {
+        if(0 != action_is_x_axis(pre_push_box_action))
+        {
+            error = pre_push_box_target_y_cm - pose->y_cm;
+            vy_world = path_pid_update_with_arrival_deadband(&y_pid, error);
+        }
+        else
+        {
+            error = pre_push_box_target_x_cm - pose->x_cm;
+            vx_world = path_pid_update_with_arrival_deadband(&x_pid, error);
+        }
+    }
+    else if((PRE_PUSH_BOX_SAFE_GAP == pre_push_box_phase) ||
+            (PRE_PUSH_BOX_APPROACH == pre_push_box_phase))
+    {
+        if(0 != action_is_x_axis(pre_push_box_action))
+        {
+            error = pre_push_box_target_x_cm - pose->x_cm;
+            vx_world = path_pid_update_with_arrival_deadband(&x_pid, error);
+        }
+        else
+        {
+            error = pre_push_box_target_y_cm - pose->y_cm;
+            vy_world = path_pid_update_with_arrival_deadband(&y_pid, error);
+        }
+    }
+    else
+    {
+        executor_set_error(EXEC_ERROR_ART_CENTER);
+        return;
+    }
+
+    if(abs_float(error) < PATH_ARRIVAL_THRESHOLD_CM)
+    {
+        reset_motion_segment();
+        if(pre_push_alignment_stable_ticks < EXEC_ARRIVAL_STABLE_TICKS)
+        {
+            pre_push_alignment_stable_ticks++;
+        }
+        if(pre_push_alignment_stable_ticks >= EXEC_ARRIVAL_STABLE_TICKS)
+        {
+            pre_push_alignment_stable_ticks = 0u;
+            path_pid_reset(&x_pid);
+            path_pid_reset(&y_pid);
+            if(PRE_PUSH_BOX_SAFE_GAP == pre_push_box_phase)
+            {
+                pre_push_box_phase = PRE_PUSH_BOX_ALIGN_PERP;
+            }
+            else if(PRE_PUSH_BOX_ALIGN_PERP == pre_push_box_phase)
+            {
+                pre_push_box_phase = PRE_PUSH_BOX_APPROACH;
+            }
+            else
+            {
+                executor_finish_pre_push_box_preparation();
+            }
+        }
+        return;
+    }
+
+    pre_push_alignment_stable_ticks = 0u;
     world_velocity_to_body(vx_world, vy_world, pose->yaw_deg, &vx_body, &vy_body);
     set_motion(vx_body, vy_body);
 }
@@ -885,6 +1274,12 @@ void executor_update_20ms(void)
     {
         /* 等 ART 期间每个 20ms 都保持段间停止，避免低频重定位时车继续滑动。 */
         reset_motion_segment();
+        return;
+    }
+
+    if(PRE_PUSH_BOX_IDLE != pre_push_box_phase)
+    {
+        executor_update_pre_push_box_20ms();
         return;
     }
 

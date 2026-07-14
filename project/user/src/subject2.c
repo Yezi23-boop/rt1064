@@ -24,6 +24,8 @@ static uint16 center_col_samples[ART_CENTER_SAMPLE_COUNT];
 static uint16 center_row_samples[ART_CENTER_SAMPLE_COUNT];
 static uint8 center_sample_count;
 static uint32 pre_push_center_start_ms;
+static uint8 pre_push_box_request_active;
+static uint8 pre_push_box_preparation_started;
 static float current_pose_offset_x_cm;
 static float current_pose_offset_y_cm;
 static uint8 navigation_start_row;
@@ -1135,13 +1137,99 @@ static void subject2_tick_select_push(const subject2_context_struct *context,
 
 static void subject2_begin_pre_push_center(subject2_update_struct *update)
 {
-    executor_reset_art_player_center_samples();
-    openart_request_player_center();
+    uint8 box_row;
+    uint8 box_col;
+
+    pre_push_box_request_active = 0u;
+    pre_push_box_preparation_started = 0u;
     pre_push_center_start_ms = time_ms();
     subject2_state = SUBJECT2_PRE_PUSH_CENTER;
+    if(0 != executor_get_pre_push_box_request(&box_row, &box_col))
+    {
+        executor_reset_art_box_observation_samples();
+        openart_request_observation(box_row, box_col);
+        pre_push_box_request_active = 1u;
+    }
+    else
+    {
+        executor_reset_art_player_center_samples();
+        openart_request_player_center();
+    }
     if(0 != update)
     {
-        update->run_state = "PCtr";
+        update->run_state = (0u != pre_push_box_request_active) ? "BCtr" : "PCtr";
+        update->redraw = 1u;
+    }
+}
+
+static void subject2_tick_pre_push_box(subject2_update_struct *update)
+{
+    openart_observation_sample_struct sample;
+    executor_art_box_prep_result_enum prep_result;
+    uint8 ready = 0u;
+
+    if(0u != pre_push_box_preparation_started)
+    {
+        if(0u != executor_pre_push_box_preparation_active())
+        {
+            if(0 != update)
+            {
+                update->run_state = executor_pre_push_box_state_name();
+            }
+            return;
+        }
+        if(EXEC_STATE_ERROR == executor_get_state())
+        {
+            subject2_fail(EXEC_ERROR_ART_CENTER, "E:BTim", update);
+            return;
+        }
+
+        pre_push_center_start_ms = 0u;
+        pre_push_box_request_active = 0u;
+        pre_push_box_preparation_started = 0u;
+        subject2_state = SUBJECT2_EXECUTE_PUSH;
+        if(0 != update)
+        {
+            update->run_state = "S2Push";
+            update->redraw = 1u;
+        }
+        return;
+    }
+
+    while(0u != openart_get_observation_sample(&sample))
+    {
+        if(0u != executor_apply_art_box_observation(sample.car_col_q,
+                                                    sample.car_row_q,
+                                                    sample.box_col_q,
+                                                    sample.box_row_q))
+        {
+            ready = 1u;
+        }
+    }
+    if(0u == ready)
+    {
+        if((time_ms() - pre_push_center_start_ms) >= EXEC_ART_SYNC_TIMEOUT_MS)
+        {
+            subject2_fail(EXEC_ERROR_ART_CENTER, "E:BObs", update);
+        }
+        else if(0 != update)
+        {
+            update->run_state = "BCtr";
+        }
+        return;
+    }
+
+    prep_result = executor_start_pre_push_box_preparation();
+    if(EXEC_ART_BOX_PREP_STARTED != prep_result)
+    {
+        subject2_fail(EXEC_ERROR_ART_CENTER, "E:BGeo", update);
+        return;
+    }
+
+    pre_push_box_preparation_started = 1u;
+    if(0 != update)
+    {
+        update->run_state = executor_pre_push_box_state_name();
         update->redraw = 1u;
     }
 }
@@ -1157,6 +1245,12 @@ static void subject2_tick_pre_push_center(const subject2_context_struct *context
     uint8 ready = 0u;
     uint8 car_row;
     uint8 car_col;
+
+    if(0u != pre_push_box_request_active)
+    {
+        subject2_tick_pre_push_box(update);
+        return;
+    }
 
     while(0u != (sample_index = openart_get_requested_center_sample(&col_q, &row_q)))
     {
@@ -1596,6 +1690,8 @@ void subject2_cancel(void)
     classify_start_ms = 0u;
     center_sample_count = 0u;
     pre_push_center_start_ms = 0u;
+    pre_push_box_request_active = 0u;
+    pre_push_box_preparation_started = 0u;
     validation_retry_count = 0u;
     active_class = SUBJECT2_INVALID_CLASS;
     last_recognition_valid = 0u;

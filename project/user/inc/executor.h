@@ -41,6 +41,13 @@ typedef enum {
     EXEC_ART_CENTER_ABNORMAL       /**< 偏差过大，需要 ART 地图确认/重算。 */
 } executor_art_center_result_enum;
 
+/** 推箱前车箱二维准备位启动结果。 */
+typedef enum {
+    EXEC_ART_BOX_PREP_NONE = 0,        /**< 当前没有可启动的推箱准备请求或样本不足。 */
+    EXEC_ART_BOX_PREP_STARTED,         /**< 车箱样本有效，二维安全准备位已接管 executor。 */
+    EXEC_ART_BOX_PREP_GEOMETRY_ERROR   /**< 小车或箱子中心与当前推箱几何不一致。 */
+} executor_art_box_prep_result_enum;
+
 typedef struct {
     float target_x_cm;             /**< 当前 waypoint 目标 X，单位 cm。 */
     float target_y_cm;             /**< 当前 waypoint 目标 Y，单位 cm。 */
@@ -141,6 +148,31 @@ uint8 executor_continue_after_pre_push_center(void);
  * @note L/R 只对齐世界 Y，U/D 只对齐世界 X；完成后自动放行同一个 waypoint。
  */
 uint8 executor_start_pre_push_alignment(uint8 reference_row, uint8 reference_col);
+
+/**
+ * @brief 查询当前中心等待是否对应一段推箱链，并取得应观察的箱子格。
+ * @return 1 表示应发送 `OBSERVE_REQ row,col`；0 表示仍走普通小车中心校正。
+ */
+uint8 executor_get_pre_push_box_request(uint8 *box_row, uint8 *box_col);
+
+/** 清空当前推箱准备的车箱配对观察样本。 */
+void executor_reset_art_box_observation_samples(void);
+
+/**
+ * @brief 缓存一帧配套的小车中心和箱子中心。
+ * @return 收满3帧并得到中值时返回1，否则返回0。
+ */
+uint8 executor_apply_art_box_observation(uint16 car_col_q, uint16 car_row_q,
+                                         uint16 box_col_q, uint16 box_row_q);
+
+/** 使用已缓存的3帧中值启动推箱前二维安全准备位。 */
+executor_art_box_prep_result_enum executor_start_pre_push_box_preparation(void);
+
+/** 返回1表示正在执行退开、垂直对齐或靠近阶段。 */
+uint8 executor_pre_push_box_preparation_active(void);
+
+/** 返回当前二维准备位短状态：BGap、BAlign、BNear或空字符串。 */
+const char *executor_pre_push_box_state_name(void);
 
 /**
  * @brief ART 视觉中心采样窗口是否打开。

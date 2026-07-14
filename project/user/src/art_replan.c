@@ -22,7 +22,7 @@ typedef enum
     ART_REPLAN_INITIAL_CENTER,   /**< 初次稳定地图已冻结，等待请求式精确中心后再求解。 */
     ART_REPLAN_SEGMENT,          /**< waypoint 段末同步：按 ART 最新地图做确认。 */
     ART_REPLAN_SEGMENT_CENTER,   /**< 单箱任务稳定地图已冻结，等待请求式精确中心后再重算。 */
-    ART_REPLAN_PRE_PUSH_CENTER,  /**< 方向转折点收多帧中心并修正 pose。 */
+    ART_REPLAN_PRE_PUSH_CENTER,  /**< waypoint 前中心校正；推箱链使用车箱配对观察。 */
     ART_REPLAN_RETURN_GRID,      /**< 推箱完成后执行网格 BFS 返航到左侧出口。 */
     ART_REPLAN_RETURN_CENTER,    /**< 到达出口后采集中心，用于计算返航精确偏移。 */
     ART_REPLAN_RETURN_ALIGN_Y,   /**< 在出口内先对齐发车中心所在 Y。 */
@@ -50,6 +50,8 @@ static uint8 art_requested_center_sample_count = 0;                 // 当前请
 static uint16 art_requested_center_col_q = 0;                       // 当前请求列中值，单位 1/100 格。
 static uint16 art_requested_center_row_q = 0;                       // 当前请求行中值，单位 1/100 格。
 static uint8 art_requested_center_valid = 0;                        // 1 表示当前请求已得到多帧样本中值。
+static uint8 art_pre_push_box_request_active = 0;                   // 1 表示当前 waypoint 前等待使用 OBSERVE_REQ。
+static uint8 art_pre_push_box_preparation_started = 0;              // 1 表示 executor 已接管二维安全准备位。
 static float art_launch_target_x_cm = 0.0f;                         // 发车移动目标距离，单位 cm。
 static uint8 art_launch_arrival_ticks = 0;                          // 发车移动连续到点计数。
 static uint32 art_launch_move_start_ms = 0;                         // 发车移动开始时间。
@@ -216,7 +218,29 @@ static void art_replan_begin(art_replan_phase_enum phase, art_replan_update_stru
 {
     if(ART_REPLAN_PRE_PUSH_CENTER == phase)
     {
-        art_replan_begin_center_request(phase, "PCtr", update);
+        uint8 box_row;
+        uint8 box_col;
+
+        art_pre_push_box_request_active = 0u;
+        art_pre_push_box_preparation_started = 0u;
+        if(0 != executor_get_pre_push_box_request(&box_row, &box_col))
+        {
+            stop_motion();
+            art_replan_phase = phase;
+            art_wait_start_ms = time_ms();
+            executor_reset_art_box_observation_samples();
+            openart_request_observation(box_row, box_col);
+            art_pre_push_box_request_active = 1u;
+            if(0 != update)
+            {
+                update->run_state = "BCtr";
+                update->redraw = 1u;
+            }
+        }
+        else
+        {
+            art_replan_begin_center_request(phase, "PCtr", update);
+        }
         return;
     }
 
@@ -498,6 +522,92 @@ static void art_replan_fail_pre_push_center(art_replan_update_struct *update)
     {
         update->run_state = "E:Ctr";
         update->redraw = 1;
+    }
+}
+
+static void art_replan_fail_pre_push_box(const char *state,
+                                         art_replan_update_struct *update)
+{
+    executor_set_error(EXEC_ERROR_ART_CENTER);
+    art_replan_cancel();
+    if(0 != update)
+    {
+        update->run_state = state;
+        update->redraw = 1u;
+    }
+}
+
+static void art_replan_tick_pre_push_box(art_replan_update_struct *update)
+{
+    openart_observation_sample_struct sample;
+    executor_art_box_prep_result_enum prep_result;
+    uint8 ready = 0u;
+
+    if(0u != art_pre_push_box_preparation_started)
+    {
+        if(0u != executor_pre_push_box_preparation_active())
+        {
+            if(0 != update)
+            {
+                update->run_state = executor_pre_push_box_state_name();
+            }
+            return;
+        }
+        if(EXEC_STATE_ERROR == executor_get_state())
+        {
+            art_replan_cancel();
+            if(0 != update)
+            {
+                update->run_state = "E:BTim";
+                update->redraw = 1u;
+            }
+            return;
+        }
+
+        art_replan_cancel();
+        if(0 != update)
+        {
+            update->run_state = executor_state_name();
+            update->redraw = 1u;
+        }
+        return;
+    }
+
+    while(0u != openart_get_observation_sample(&sample))
+    {
+        if(0u != executor_apply_art_box_observation(sample.car_col_q,
+                                                    sample.car_row_q,
+                                                    sample.box_col_q,
+                                                    sample.box_row_q))
+        {
+            ready = 1u;
+        }
+    }
+    if(0u == ready)
+    {
+        if((time_ms() - art_wait_start_ms) >= EXEC_ART_SYNC_TIMEOUT_MS)
+        {
+            art_replan_fail_pre_push_box("E:BObs", update);
+        }
+        else if(0 != update)
+        {
+            update->run_state = "BCtr";
+        }
+        return;
+    }
+
+    prep_result = executor_start_pre_push_box_preparation();
+    if(EXEC_ART_BOX_PREP_STARTED != prep_result)
+    {
+        art_replan_fail_pre_push_box("E:BGeo", update);
+        return;
+    }
+
+    art_pre_push_box_preparation_started = 1u;
+    if(0 != update)
+    {
+        update->run_state = executor_pre_push_box_state_name();
+        update->redraw = 1u;
     }
 }
 
@@ -1266,6 +1376,8 @@ void art_replan_cancel(void)
     art_monitor_last_frame = 0;
     art_external_change_pending = 0;
     art_requested_center_clear();
+    art_pre_push_box_request_active = 0u;
+    art_pre_push_box_preparation_started = 0u;
 }
 
 void art_replan_begin_initial(art_replan_update_struct *update)
@@ -1359,8 +1471,15 @@ void art_replan_tick(const art_replan_context_struct *context,
 
     if(ART_REPLAN_PRE_PUSH_CENTER == art_replan_phase)
     {
-        center_ready = art_replan_collect_requested_center();
-        art_replan_tick_pre_push_center(context, center_ready, update);
+        if(0u != art_pre_push_box_request_active)
+        {
+            art_replan_tick_pre_push_box(update);
+        }
+        else
+        {
+            center_ready = art_replan_collect_requested_center();
+            art_replan_tick_pre_push_center(context, center_ready, update);
+        }
         return;
     }
 

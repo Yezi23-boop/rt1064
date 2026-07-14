@@ -165,6 +165,17 @@ assert "executor_start_pre_push_alignment" in pre_push_body
 assert "openart_get_requested_center_sample" in ART_REPLAN_SOURCE
 assert "art_replan_get_pre_push_reference_cell" in ART_REPLAN_SOURCE
 assert "art_replan_get_pre_push_reference_cell(context" in pre_push_body
+pre_push_box_body = function_body(
+    ART_REPLAN_SOURCE,
+    "static void art_replan_tick_pre_push_box(",
+    "static uint8 art_replan_get_pre_push_reference_cell",
+)
+assert "openart_request_observation" in begin_body
+assert "openart_get_observation_sample" in pre_push_box_body
+assert "executor_start_pre_push_box_preparation" in pre_push_box_body
+assert '"E:BObs"' in pre_push_box_body
+assert '"E:BGeo"' in pre_push_box_body
+assert '"E:BTim"' in pre_push_box_body
 assert "ART_REPLAN_INITIAL_CENTER" in ART_REPLAN_SOURCE
 assert "ART_REPLAN_SEGMENT_CENTER" in ART_REPLAN_SOURCE
 assert "art_replan_begin_center_request" in ART_REPLAN_SOURCE
@@ -181,7 +192,7 @@ return_center_body = function_body(
     "static void art_replan_tick_return_center(",
     "static void art_replan_tick_return_axis",
 )
-assert "EXEC_ART_SYNC_TIMEOUT_MS" not in wait_center_body
-assert "EXEC_ART_SYNC_TIMEOUT_MS" not in return_center_body
+assert "EXEC_ART_SYNC_TIMEOUT_MS" in wait_center_body
+assert "EXEC_ART_SYNC_TIMEOUT_MS" in return_center_body
 
 print("openart-request-flow PASS")

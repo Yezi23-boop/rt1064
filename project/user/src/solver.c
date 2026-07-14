@@ -476,9 +476,30 @@ static uint8 apply_path_to_runtime(map_state_struct *map, uint8 box_index, uint8
             box = next_box;
         }
 
-        /* 标记放在转向后的下一段；执行器会在拐点停车后、启动该段前进行中心矫正。 */
+        /* 普通转向仍在新段前校正；推箱链则提前到最后一个普通靠近动作前，
+         * 避免车已到箱子相邻格后才做视觉小修。 */
         center_correct_before = ((0u < i) &&
                                  (0 != action_changes_direction(path[i - 1u], action))) ? 1u : 0u;
+        if((0 == action_is_push(action)) &&
+           ((i + 1u) < path_len) &&
+           (0 != action_is_push(path[i + 1u])))
+        {
+            center_correct_before = 1u;
+        }
+        else if(0 != action_is_push(action))
+        {
+            if((0u == i) ||
+               ((0 != action_is_push(path[i - 1u])) &&
+                (0 != action_changes_direction(path[i - 1u], action))))
+            {
+                center_correct_before = 1u;
+            }
+            else if(0 == action_is_push(path[i - 1u]))
+            {
+                /* 上一个普通动作已承担本推箱链的视觉准备，避免大写动作重复等待。 */
+                center_correct_before = 0u;
+            }
+        }
         player = next_player;
         if(0 == result_append_action(result, action))
         {
