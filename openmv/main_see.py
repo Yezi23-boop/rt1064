@@ -8,24 +8,35 @@ UART_MAP_SEND_INDEX = 12     # UART 编号，OpenART Plus 用户串口使用 UAR
 UART_MAP_SEND_BAUD = 115200  # 波特率，与 RT1064 接收端一致
 UART_MAP_SEND_PERIOD_MS = 200  # 发送周期，单位 ms
 UART_MAP_RX_ENABLE = True    # True=解析 MCU 命令，同时丢弃无需处理的 MAP_OK 回包
-CENTER_SAMPLE_COUNT = 3
+CENTER_SAMPLE_COUNT = 5
+OBSERVATION_SAMPLE_COUNT = 3
 UART_RX_LINE_MAX = 48
 
 # ==================== USER_SWITCHES：现场最常改 ===================
-# 调试开关：正式跑帧率时建议 DEBUG_ENABLE=False
-DEBUG_ENABLE = True          # True=打印地图并绘制调试图形；False=正式高速运行
-DEBUG_DRAW_ROI = True        # True=画绿色地图边界/拉正边框
-DEBUG_DRAW_GRID_LINES = True # True=画 16x12 网格线，用于检查格子是否对齐
-DEBUG_DRAW_POINTS = True     # True=画识别结果圆点；False=画面更干净、显示更快
-DEBUG_PLAYER_CENTER_ENABLE = True # True=普通帧额外识别并显示精确小车中心；不下发给MCU
-DEBUG_PRINT_PERIOD_MS = 1000
+MODE_RUN = 0
+MODE_DEBUG = 1
+WORK_MODE = MODE_DEBUG
 
-# 显示/识别路径：
-# 标定看图：SHOW_RECTIFIED_VIEW=True,  USE_RECTIFIED_RECOGNITION=True
-# 正式高速：SHOW_RECTIFIED_VIEW=False, USE_RECTIFIED_RECOGNITION=False
-# 只看拉正：SHOW_RECTIFIED_VIEW=True,  USE_RECTIFIED_RECOGNITION=False
-SHOW_RECTIFIED_VIEW = True       # True=IDE 显示拉正图；False=IDE 显示原图
-USE_RECTIFIED_RECOGNITION = True # True=在拉正图上识别；False=在原图投影点上识别
+if WORK_MODE == MODE_RUN:
+    DEBUG_ENABLE = False
+    DEBUG_DRAW_ROI = False
+    DEBUG_DRAW_GRID_LINES = False
+    DEBUG_DRAW_POINTS = False
+    DEBUG_PLAYER_CENTER_ENABLE = False
+    DEBUG_OBSERVATION_ENABLE = False
+    SHOW_RECTIFIED_VIEW = True
+    USE_RECTIFIED_RECOGNITION = True
+else:
+    DEBUG_ENABLE = True
+    DEBUG_DRAW_ROI = True
+    DEBUG_DRAW_GRID_LINES = True
+    DEBUG_DRAW_POINTS = True
+    DEBUG_PLAYER_CENTER_ENABLE = False
+    DEBUG_OBSERVATION_ENABLE = True
+    SHOW_RECTIFIED_VIEW = True
+    USE_RECTIFIED_RECOGNITION = True
+
+DEBUG_PRINT_PERIOD_MS = 1000
 
 # 稳定输出地图：同一格连续多帧识别为新类型后才切换。
 STABILIZE_OUTPUT = True # True=过滤单帧跳动；False=直接输出当前帧识别
@@ -56,10 +67,10 @@ GRID_ROWS = 12
 # MAP_CORNERS 表示屏幕地图外边界，用于四角透视标定。
 # 四点按 左上、右上、右下、左下 填写，指向完整 16x12 地图外边界。
 MAP_CORNERS = (
-    (9, 3),
-    (310,11),
-    (310,217),
-    (11, 233),
+    (7, 5),
+    (310,19),
+    (302,220),
+    (9, 237),
 )
 
 # 拉正图上的有效采样区域边距。四角已对齐但整张网格略偏时，只调这里。
@@ -89,6 +100,7 @@ PLAYER_SAMPLE_OFFSETS = (
 )
 
 PLAYER_CENTER_SEARCH_RADIUS = 14 * FRAME_SCALE
+PLAYER_RECENT_C_FALLBACK_FRAMES = 3
 PLAYER_BLOB_PIXELS_THRESHOLD = 6
 PLAYER_BLOB_AREA_THRESHOLD = 6
 PLAYER_BLOB_MARGIN = 2
@@ -99,6 +111,19 @@ PLAYER_PRECISE_TRIM_PERCENT = 10      # 外框两侧各忽略10%离群颜色像�
 # 再用 blob 中心的 RGB 归一化颜色做二次确认，现场还可以继续微调。
 PLAYER_GREEN_BLOB_THRESHOLD = (20, 100, -70, -6, -5, 90)
 PLAYER_CYAN_BLOB_THRESHOLD = (20, 100, -70, -6, -128, 15)
+BOX_CELL_MIN_HITS = 2
+BOX_CELL_MAX_MEAN_OFFSET = 8
+BOX_CENTER_MIN_COLOR_PIXELS = 12
+BOX_YELLOW_BLOB_THRESHOLD = (40, 100, -50, 25, 20, 127)
+BOX_BLOB_AREA_THRESHOLD = 12
+BOX_BLOB_MARGIN = 2
+BOX_SAMPLE_OFFSETS = (
+    (-8, -8), (-4, -8), (0, -8), (4, -8), (8, -8),
+    (-8, -4), (-4, -4), (0, -4), (4, -4), (8, -4),
+    (-8, 0),  (-4, 0),  (0, 0),  (4, 0),  (8, 0),
+    (-8, 4),  (-4, 4),  (0, 4),  (4, 4),  (8, 4),
+    (-8, 8),  (-4, 8),  (0, 8),  (4, 8),  (8, 8),
+)
 
 LAUNCH_PLAYER_WINDOW_ENABLE = True
 LAUNCH_PLAYER_ROW_MIN = 5
@@ -537,6 +562,14 @@ def find_player_coarse_center(recognition_points, preferred_matrix, fallback_mat
     return (total_x // count, total_y // count)
 
 
+def select_recent_player_anchor(current_center, recent_center, missing_frames):
+    if current_center is not None:
+        return current_center
+    if missing_frames >= PLAYER_RECENT_C_FALLBACK_FRAMES:
+        return recent_center
+    return None
+
+
 def blob_center_is_player(blob, img, predicate):
     blob_center = get_average_pixel(img, blob.cx(), blob.cy(), size=2)
     rn, gn, bn, color_sum = normalize_color(
@@ -691,6 +724,162 @@ def detect_player_center_precise(img, anchor_center):
             (top + y_min + top + y_max) // 2)
 
 
+def box_cell_has_coverage(img, center_x, center_y):
+    hits = 0
+    hit_dx_sum = 0
+    hit_dy_sum = 0
+    width = img.width()
+    height = img.height()
+    for dx, dy in BOX_SAMPLE_OFFSETS:
+        x = center_x + dx * FRAME_SCALE
+        y = center_y + dy * FRAME_SCALE
+        if not (0 <= x < width and 0 <= y < height):
+            continue
+        r, g, b = img.get_pixel(x, y)
+        rn, gn, bn, color_sum = normalize_color(r, g, b)
+        if is_box_candidate(rn, gn, bn, color_sum):
+            hits += 1
+            hit_dx_sum += dx * FRAME_SCALE
+            hit_dy_sum += dy * FRAME_SCALE
+    max_sum = hits * BOX_CELL_MAX_MEAN_OFFSET * FRAME_SCALE
+    return (hits >= BOX_CELL_MIN_HITS and
+            abs(hit_dx_sum) < max_sum and abs(hit_dy_sum) < max_sum)
+
+
+def split_box_blob_centers(blob, cell_w, cell_h):
+    # 相邻同色箱子会成为一个大 blob，按单格尺寸拆回独立中心。
+    split_cols = max(1, min(GRID_COLS,
+                            (blob.w() + cell_w // 2) // cell_w))
+    split_rows = max(1, min(GRID_ROWS,
+                            (blob.h() + cell_h // 2) // cell_h))
+    centers = []
+    for split_row in range(split_rows):
+        top = blob.y() + blob.h() * split_row // split_rows
+        bottom = blob.y() + blob.h() * (split_row + 1) // split_rows
+        for split_col in range(split_cols):
+            left = blob.x() + blob.w() * split_col // split_cols
+            right = blob.x() + blob.w() * (split_col + 1) // split_cols
+            centers.append(((left + right) // 2, (top + bottom) // 2))
+    return centers
+
+
+def deduplicate_box_centers(centers, cell_w, cell_h):
+    # 网格线可能把同一个跨格箱子切开，合并距离不足 0.6 格的中心。
+    max_dx = max(2, cell_w * 3 // 5)
+    max_dy = max(2, cell_h * 3 // 5)
+    groups = []
+    for center_x, center_y in centers:
+        matched_group = None
+        for group in groups:
+            group_x = (group[0] + group[2] // 2) // group[2]
+            group_y = (group[1] + group[2] // 2) // group[2]
+            if (abs(center_x - group_x) <= max_dx and
+                    abs(center_y - group_y) <= max_dy):
+                matched_group = group
+                break
+        if matched_group is None:
+            groups.append([center_x, center_y, 1])
+        else:
+            matched_group[0] += center_x
+            matched_group[1] += center_y
+            matched_group[2] += 1
+
+    result = []
+    for sum_x, sum_y, count in groups:
+        result.append(((sum_x + count // 2) // count,
+                       (sum_y + count // 2) // count))
+    return result
+
+
+def detect_box_centers(img, recognition_points, element_matrix):
+    cell_w = max(6, img.width() // GRID_COLS)
+    cell_h = max(6, img.height() // GRID_ROWS)
+    coarse_centers = []
+    for row_idx in range(GRID_ROWS):
+        for col_idx in range(GRID_COLS):
+            if element_matrix[row_idx][col_idx] != "box":
+                continue
+            coarse_centers.append(
+                recognition_points[row_idx * GRID_COLS + col_idx])
+    if not coarse_centers:
+        return []
+
+    left = max(0, min(center[0] for center in coarse_centers) - cell_w)
+    top = max(0, min(center[1] for center in coarse_centers) - cell_h)
+    right = min(img.width(),
+                max(center[0] for center in coarse_centers) + cell_w + 1)
+    bottom = min(img.height(),
+                 max(center[1] for center in coarse_centers) + cell_h + 1)
+    if right <= left or bottom <= top:
+        return []
+
+    blobs = img.find_blobs(
+        [BOX_YELLOW_BLOB_THRESHOLD],
+        roi=(left, top, right - left, bottom - top),
+        pixels_threshold=BOX_CENTER_MIN_COLOR_PIXELS,
+        area_threshold=BOX_BLOB_AREA_THRESHOLD,
+        merge=True,
+        margin=BOX_BLOB_MARGIN)
+    detected_centers = []
+    max_match_dx = max(4, cell_w * 4 // 5)
+    max_match_dy = max(4, cell_h * 4 // 5)
+    for blob in blobs:
+        for detected_x, detected_y in split_box_blob_centers(
+                blob, cell_w, cell_h):
+            for coarse_x, coarse_y in coarse_centers:
+                if (abs(detected_x - coarse_x) <= max_match_dx and
+                        abs(detected_y - coarse_y) <= max_match_dy):
+                    detected_centers.append((detected_x, detected_y))
+                    break
+    return deduplicate_box_centers(detected_centers, cell_w, cell_h)
+
+
+def select_box_center(box_centers, recognition_points, row_idx, col_idx):
+    if not (0 <= row_idx < GRID_ROWS and 0 <= col_idx < GRID_COLS):
+        return None
+    center_x, center_y = recognition_points[
+        row_idx * GRID_COLS + col_idx]
+    if col_idx + 1 < GRID_COLS:
+        cell_w = abs(recognition_points[
+            row_idx * GRID_COLS + col_idx + 1][0] - center_x)
+    else:
+        cell_w = abs(center_x - recognition_points[
+            row_idx * GRID_COLS + col_idx - 1][0])
+    if row_idx + 1 < GRID_ROWS:
+        cell_h = abs(recognition_points[
+            (row_idx + 1) * GRID_COLS + col_idx][1] - center_y)
+    else:
+        cell_h = abs(center_y - recognition_points[
+            (row_idx - 1) * GRID_COLS + col_idx][1])
+    cell_w = max(6, cell_w)
+    cell_h = max(6, cell_h)
+    max_dx = max(4, cell_w * 4 // 5)
+    max_dy = max(4, cell_h * 4 // 5)
+    best_center = None
+    best_distance = None
+    for detected_x, detected_y in box_centers:
+        if (abs(detected_x - center_x) > max_dx or
+                abs(detected_y - center_y) > max_dy):
+            continue
+        distance = ((detected_x - center_x) * (detected_x - center_x) +
+                    (detected_y - center_y) * (detected_y - center_y))
+        if best_distance is None or distance < best_distance:
+            best_center = (detected_x, detected_y)
+            best_distance = distance
+    return best_center
+
+
+def detect_box_center(img, recognition_points, row_idx, col_idx):
+    element_matrix = [["space" for _ in range(GRID_COLS)]
+                      for _ in range(GRID_ROWS)]
+    if not (0 <= row_idx < GRID_ROWS and 0 <= col_idx < GRID_COLS):
+        return None
+    element_matrix[row_idx][col_idx] = "box"
+    box_centers = detect_box_centers(img, recognition_points, element_matrix)
+    return select_box_center(
+        box_centers, recognition_points, row_idx, col_idx)
+
+
 def player_center_to_grid_q(player_center, rectified=True, raw_transform=None):
     if player_center is None:
         return None
@@ -801,6 +990,8 @@ def classify_element(img, row_idx, col_idx, x, y):
     if (is_box_candidate(rn, gn, bn, color_sum) and
             sample_special_color(img, x, y, r, g, b, is_box_color)):
         return "box"
+    if box_cell_has_coverage(img, x, y):
+        return "box"
 
     # 目标点为品红色：G 明显低，暗角/边缘允许 B 比 R 偏高。
     if is_goal_color(rn, gn, bn, color_sum):
@@ -895,6 +1086,11 @@ def init_uart_map():
 center_request_active = False
 center_request_sample_count = 0
 center_request_generation = 0
+observation_request_active = False
+observation_request_row = 0
+observation_request_col = 0
+observation_request_sample_count = 0
+observation_request_generation = 0
 map_uart_rx_line = ""
 
 
@@ -902,11 +1098,34 @@ def parse_map_uart_line(line):
     global center_request_active
     global center_request_sample_count
     global center_request_generation
+    global observation_request_active
+    global observation_request_row
+    global observation_request_col
+    global observation_request_sample_count
+    global observation_request_generation
 
     if line == "CENTER_REQ":
         center_request_active = True
         center_request_sample_count = 0
         center_request_generation += 1
+        return
+    if line.startswith("OBSERVE_REQ "):
+        fields = line[12:].split(",")
+        if len(fields) != 2:
+            return
+        try:
+            row_idx = int(fields[0])
+            col_idx = int(fields[1])
+        except Exception:
+            return
+        if not (0 <= row_idx < GRID_ROWS and 0 <= col_idx < GRID_COLS):
+            observation_request_active = False
+            return
+        observation_request_row = row_idx
+        observation_request_col = col_idx
+        observation_request_sample_count = 0
+        observation_request_generation += 1
+        observation_request_active = True
 
 
 def poll_map_uart_rx(uart):
@@ -937,32 +1156,55 @@ def poll_map_uart_rx(uart):
 
 
 def process_center_request(uart, detected_player_center,
-                           rectified_recognition, raw_transform):
+                           rectified_recognition, raw_transform, char_matrix):
     global center_request_active
     global center_request_sample_count
 
     if not center_request_active or uart is None or detected_player_center is None:
-        return
+        return False
     center_grid = player_center_to_grid_q(
         detected_player_center, rectified_recognition, raw_transform)
     if center_grid is None:
-        return
+        return False
 
     sample_index = center_request_sample_count + 1
+    if not send_map_uart(uart, char_matrix, center_grid):
+        return False
     try:
         uart.write("CENTER_SAMPLE %d,%d,%d\n" %
                    (sample_index, center_grid[0], center_grid[1]))
     except Exception:
-        return
+        return False
 
     center_request_sample_count = sample_index
     if center_request_sample_count >= CENTER_SAMPLE_COUNT:
         center_request_active = False
+    return True
+
+
+def process_observation_request(uart, player_center_grid, box_center_grid):
+    global observation_request_active
+    global observation_request_sample_count
+
+    if (not observation_request_active or uart is None or
+            player_center_grid is None or box_center_grid is None):
+        return
+    sample_index = observation_request_sample_count + 1
+    try:
+        uart.write("OBSERVE_SAMPLE %d,%d,%d,%d,%d\n" %
+                   (sample_index,
+                    player_center_grid[0], player_center_grid[1],
+                    box_center_grid[0], box_center_grid[1]))
+    except Exception:
+        return
+    observation_request_sample_count = sample_index
+    if observation_request_sample_count >= OBSERVATION_SAMPLE_COUNT:
+        observation_request_active = False
 
 
 def send_map_uart(uart, char_matrix, player_center_grid=None):
     if uart is None:
-        return
+        return False
     try:
         poll_map_uart_rx(uart)
         uart.write("MAP_BEGIN\n")
@@ -976,8 +1218,10 @@ def send_map_uart(uart, char_matrix, player_center_grid=None):
             uart.write("PLAYER_CENTER_GRID 0,0 0\n")
         uart.write("MAP_END\n")
         poll_map_uart_rx(uart)
+        return True
     except Exception as exc:
         print("UART_MAP_SEND_ERROR:", repr(exc))
+        return False
 
 
 def init_camera():
@@ -1050,7 +1294,10 @@ def main():
     rectified_view_failed = False
     rectified_recognition_failed = False
     player_center_anchor = None
+    recent_player_coarse_center = None
+    player_coarse_missing_frames = 0
     handled_center_request_generation = -1
+    handled_observation_request_generation = -1
 
     while True:
         loop_start_us = time.ticks_us()
@@ -1086,16 +1333,31 @@ def main():
         update_stable_map(
             raw_element_matrix, element_matrix,
             pending_element_matrix, pending_count_matrix, char_matrix)
+        current_player_coarse_center = find_player_coarse_center(
+            recognition_points, raw_element_matrix, None)
+        if current_player_coarse_center is not None:
+            recent_player_coarse_center = current_player_coarse_center
+            player_coarse_missing_frames = 0
+        else:
+            player_coarse_missing_frames += 1
         precise_player_center = None
-        if center_request_active or DEBUG_PLAYER_CENTER_ENABLE:
-            if handled_center_request_generation != center_request_generation:
+        if (center_request_active or observation_request_active or
+                DEBUG_PLAYER_CENTER_ENABLE or DEBUG_OBSERVATION_ENABLE):
+            if (handled_center_request_generation != center_request_generation or
+                    handled_observation_request_generation != observation_request_generation):
                 player_center_anchor = None
                 handled_center_request_generation = center_request_generation
+                handled_observation_request_generation = observation_request_generation
 
+            search_anchor = (player_center_anchor if player_center_anchor is not None else
+                             select_recent_player_anchor(
+                                 current_player_coarse_center,
+                                 recent_player_coarse_center,
+                                 player_coarse_missing_frames))
             blob_player_center = detect_player_center(
                 recognition_img, recognition_points,
-                element_matrix, raw_element_matrix,
-                player_center_anchor)
+                raw_element_matrix, element_matrix,
+                search_anchor)
             precise_anchor = (blob_player_center if blob_player_center is not None
                               else player_center_anchor)
             precise_player_center = detect_player_center_precise(
@@ -1103,8 +1365,47 @@ def main():
             if precise_player_center is not None:
                 player_center_anchor = precise_player_center
 
-        process_center_request(map_uart, precise_player_center,
-                               rectified_recognition_active, raw_grid_transform)
+        center_map_sent = process_center_request(
+            map_uart, precise_player_center,
+            rectified_recognition_active, raw_grid_transform, char_matrix)
+        if center_map_sent:
+            last_uart_send_ms = now_ms
+        box_centers = []
+        if observation_request_active or DEBUG_OBSERVATION_ENABLE:
+            box_centers = detect_box_centers(
+                recognition_img, recognition_points, element_matrix)
+        observation_box_center = None
+        if (observation_request_active and
+                element_matrix[observation_request_row][observation_request_col] == "box"):
+            observation_box_center = select_box_center(
+                box_centers, recognition_points,
+                observation_request_row, observation_request_col)
+        observation_player_grid = player_center_to_grid_q(
+            precise_player_center,
+            rectified_recognition_active, raw_grid_transform)
+        observation_box_grid = player_center_to_grid_q(
+            observation_box_center,
+            rectified_recognition_active, raw_grid_transform)
+        process_observation_request(
+            map_uart, observation_player_grid, observation_box_grid)
+        debug_box_centers = []
+        if DEBUG_OBSERVATION_ENABLE:
+            debug_seen_centers = []
+            for debug_row in range(GRID_ROWS):
+                for debug_col in range(GRID_COLS):
+                    if element_matrix[debug_row][debug_col] != "box":
+                        continue
+                    debug_center = select_box_center(
+                        box_centers, recognition_points, debug_row, debug_col)
+                    if (debug_center is None or
+                            debug_center in debug_seen_centers):
+                        continue
+                    debug_seen_centers.append(debug_center)
+                    debug_grid = player_center_to_grid_q(
+                        debug_center, rectified_recognition_active,
+                        raw_grid_transform)
+                    debug_box_centers.append(
+                        (debug_row, debug_col, debug_center, debug_grid))
         recognize_done_us = time.ticks_us()
 
         # 识别仍走原图、但 IDE 要看拉正图时，在识别完成后才改变 framebuffer。
@@ -1132,9 +1433,14 @@ def main():
                 (rectified_recognition_active == display_rectified)):
             img.draw_cross(precise_player_center[0], precise_player_center[1],
                            color=(255, 255, 0), thickness=2)
+        if DEBUG_OBSERVATION_ENABLE:
+            if rectified_recognition_active == display_rectified:
+                for _, _, debug_center, _ in debug_box_centers:
+                    img.draw_cross(debug_center[0], debug_center[1],
+                                   color=(0, 255, 0), thickness=2)
         display_done_us = time.ticks_us()
 
-        if ((DEBUG_ENABLE or DEBUG_PLAYER_CENTER_ENABLE) and
+        if ((DEBUG_ENABLE or DEBUG_PLAYER_CENTER_ENABLE or DEBUG_OBSERVATION_ENABLE) and
                 time.ticks_diff(now_ms, last_print_ms) >= DEBUG_PRINT_PERIOD_MS):
             loop_us = time.ticks_diff(time.ticks_us(), loop_start_us)
             loop_fps = 1000000.0 / loop_us if loop_us > 0 else 0.0
@@ -1158,6 +1464,12 @@ def main():
                       (debug_player_center_grid[0], debug_player_center_grid[1]))
             else:
                 print("PLAYER_CENTER_GRID 0,0 0")
+            if DEBUG_OBSERVATION_ENABLE:
+                for debug_row, debug_col, _, debug_grid in debug_box_centers:
+                    if debug_grid is not None:
+                        print("BOX_CENTER_GRID row=%d col=%d center=%d,%d" %
+                              (debug_row, debug_col,
+                               debug_grid[0], debug_grid[1]))
             last_print_ms = now_ms
 
         if UART_MAP_SEND_ENABLE and map_uart is not None and time.ticks_diff(now_ms, last_uart_send_ms) >= UART_MAP_SEND_PERIOD_MS:

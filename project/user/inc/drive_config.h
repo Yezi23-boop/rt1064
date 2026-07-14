@@ -15,9 +15,9 @@
 /** 第一版上板使用的保守目标轮速上限，单位为 encoder count/20ms。 */
 #define MAX_WHEEL_TARGET_COUNT (100.0f)
 /** 前后方向编码器增量到地面位移的标定系数，单位 cm/count；上下准时保持该值不动。 */
-#define POSE_Y_CM_PER_COUNT (0.0078f) // 86
+#define POSE_Y_CM_PER_COUNT (0.0079f) // 86
 /** 左右横移编码器增量到地面位移的标定系数，单位 cm/count；麦轮横移滑移通常需要单独标定。 */
-#define POSE_X_CM_PER_COUNT (0.0078f)
+#define POSE_X_CM_PER_COUNT (0.0079f)
 /** 位姿 X 轴方向校正；当前取 +1，表示麦轮反解的正 X 直接对应右移为正。 */
 #define POSE_X_DIR_SIGN (1.0f)
 /** 位姿 Y 轴方向校正；当前取 +1，表示麦轮反解的正 Y 直接对应前进为正。 */
@@ -38,11 +38,11 @@
 #define MOTOR_PWM_DEADBAND_RB (500)
 
 /** yaw 姿态 PD 比例系数；误差单位为 degree，输出为归一化姿态修正分量 vzt。 */
-#define YAW_KP (0.05f)
+#define YAW_KP (0.08f)
 /** yaw 姿态 PD 微分系数；不加入积分项，避免静态角度误差累积导致过冲。 */
 #define YAW_KD (0.0001f)
 /** yaw 姿态环硬死区，单位 degree；死区内不输出姿态修正，避免零点附近 IMU 小抖动带动车轮。 */
-#define YAW_DEADBAND_DEG (0.10f)
+#define YAW_DEADBAND_DEG (0.05f)
 /** 姿态环允许输出的最大归一化旋转分量。 */
 #define MAX_VZ (1.0f)
 /** 平移/路径执行时姿态保持允许叠加的最大旋转修正，避免横移被 yaw 环抢占。 */
@@ -97,8 +97,14 @@
 #define EXEC_PUSH_OVERSHOOT_ENABLE (0)
 /** 推箱动作额外前压比例，单位为格；0.20 表示每格 20cm 时多走 4cm。 */
 #define EXEC_PUSH_OVERSHOOT_RATIO (0.20f)
-/** ART 等稳定地图和执行发车/返航单轴移动的最长时间；中心请求等待不使用超时。 */
+/** ART 等图、中心请求以及发车/返航/观察回中心动作的最长时间。 */
 #define EXEC_ART_SYNC_TIMEOUT_MS (10000u)
+/** CENTER_REQ 超时降级开关；1=按阶段使用安全兜底继续，0=严格停车报错。 */
+#ifndef ART_CENTER_TIMEOUT_FALLBACK_ENABLE
+#define ART_CENTER_TIMEOUT_FALLBACK_ENABLE (1)
+#endif
+/** 发车中心超时时固定向右移动的距离，单位 cm。 */
+#define ART_LAUNCH_FALLBACK_MOVE_CM (30.0f)
 /** ART 来源执行时，完整地图需要连续一致的新帧数量。 */
 #define EXEC_ART_STABLE_FRAMES (1u)
 /** 比赛运行范围：只跑科目一、只跑科目二或一次 K3 完整连续运行。 */
@@ -112,12 +118,24 @@
 #define SUBJECT2_CLASS_CONFIDENCE_Q (750u)
 /** 科目二分类需要连续一致的有效样本数。 */
 #define SUBJECT2_CLASS_STABLE_SAMPLES (3u)
-/** 科目二单个观察格等待分类结果的最长时间。 */
-#define SUBJECT2_VIEW_TIMEOUT_MS (20000u)
+/** 科目二单个视距等待分类结果的最长时间；超时后先后退扩大视野。 */
+#define SUBJECT2_VIEW_TIMEOUT_MS (5000u)
+/** 科目二首次识别失败时沿远离对象方向后退的距离，单位 cm。 */
+#define SUBJECT2_VIEW_BACKOFF_CM (8.0f)
+/** 科目二观察转向允许误差，单位 degree。 */
+#define SUBJECT2_TURN_TOLERANCE_DEG (0.5f)
+/** yaw 连续处于允许误差内的时间，单位 ms。 */
+#define SUBJECT2_TURN_STABLE_MS (100u)
+/** 科目二观察转向最长时间，单位 ms。 */
+#define SUBJECT2_TURN_TIMEOUT_MS (10000u)
+/** 等待 OpenART #2 READY 时的模式命令重发周期。 */
+#define SUBJECT2_VISION_READY_RETRY_MS (1000u)
+/** 等待 OpenART #2 READY 的总超时时间。 */
+#define SUBJECT2_VISION_READY_TIMEOUT_MS (10000u)
 /** ART 左发车区目标：第二个可走格中心 X，单位 cm；col=2.5, grid=20cm -> 50cm。 */
 #define ART_LAUNCH_TARGET_X_CM (50.0f)
-/** 每次 CENTER_REQ 需要的有效精确中心样本数；所有关键节点共用中值滤波。 */
-#define ART_CENTER_SAMPLE_COUNT (3u)
+/** 每次 CENTER_REQ 需要的有效精确中心样本数；所有关键节点共用5帧中值滤波。 */
+#define ART_CENTER_SAMPLE_COUNT (5u)
 /** ART 发车移动最大归一化速度。 */
 #define ART_LAUNCH_MOVE_MAX_SPEED (1.0f)
 /** 推箱完成后自动返回左侧发车中心。 */
@@ -132,8 +150,8 @@
 #define ART_RETURN_HOME_TOLERANCE_Q (5u)
 /** 最终视觉复核未通过时允许的再次校正次数。 */
 #define ART_RETURN_MAX_CORRECTIONS (2u)
-/** ART 推箱前中心矫正开关；每段连续推箱只在第一个大写动作前采样一次。 */
-#define EXEC_ART_PRE_PUSH_CENTER_CORRECT_ENABLE (1)
+/** ART waypoint 前中心矫正开关；只在实际运动方向发生变化的转折点采样。 */
+#define EXEC_ART_WAYPOINT_CENTER_CORRECT_ENABLE (1)
 /** 旧普通 waypoint 段末中心校正开关；请求式中心模式下保持关闭。 */
 #define EXEC_ART_CENTER_CORRECT_ENABLE (0)
 /** ART 中心点小于该偏差不修正，单位 cm，避免原地小抖动反复写 pose。 */
@@ -143,7 +161,7 @@
 /** ART 中心点超过一个 20cm 格子认为异常。 */
 #define EXEC_ART_CENTER_ABNORMAL_CM (20.0f)
 /** ART 中心点融合比例；0.90 表示本地 pose 保留 10%，ART 观测占 90%。 */
-#define EXEC_ART_CENTER_FUSE_ALPHA (0.90f)
+#define EXEC_ART_CENTER_FUSE_ALPHA (1.00f)
 /** ART 中心格匹配范围；1=接受当前 C 格及八邻域，0=只接受当前 C 格。 */
 #define EXEC_ART_CENTER_ALLOW_NEIGHBOR_CELL (1)
 

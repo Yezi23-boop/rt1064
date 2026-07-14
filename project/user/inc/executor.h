@@ -26,10 +26,11 @@ typedef enum {
     EXEC_ERROR_ART_TIMEOUT, /**< ART 低频重定位等待超时 */
     EXEC_ERROR_ART_SYNC,  /**< ART 稳定地图无效。 */
     EXEC_ERROR_ART_PLAN,  /**< ART 稳定地图重解算失败。 */
-    EXEC_ERROR_ART_CENTER, /**< 推箱前 ART 中心采样或校正失败。 */
+    EXEC_ERROR_ART_CENTER, /**< ART 小车中心采样、可信校验或位置修正失败。 */
     EXEC_ERROR_SUBJECT2_CLASS, /**< 科目二分类或绑定失败。 */
     EXEC_ERROR_SUBJECT2_TRACK, /**< 科目二箱子身份无法恢复。 */
-    EXEC_ERROR_SUBJECT2_PLAN   /**< 科目二剩余绑定均不可解。 */
+    EXEC_ERROR_SUBJECT2_PLAN,  /**< 科目二剩余绑定均不可解。 */
+    EXEC_ERROR_SUBJECT2_YAW    /**< 科目二观察转向无法在时限内稳定。 */
 } executor_error_enum;
 
 typedef enum {
@@ -82,6 +83,13 @@ void executor_start(const waypoint_struct *waypoints, uint16 count,
                     uint8 art_sync);
 
 /**
+ * @brief 使用现有20ms位置环移动到当前局部坐标系中的任意 X/Y 目标。
+ * @return 1 表示已启动；0 表示 executor 正在运行或暂停，未接管。
+ * @note 不重置 pose 和 yaw，只用于科目二观察格的小车中心回正。
+ */
+uint8 executor_start_position_correction(float target_x_cm, float target_y_cm);
+
+/**
  * @brief 停止执行器（急停）。
  * @note 会调用 `stop_motion()` 并清除当前 waypoint 引用。
  */
@@ -107,21 +115,36 @@ void executor_resume(void);
 uint8 executor_art_sync_pending(void);
 
 /**
- * @brief 是否正在等待连续推箱段第一个大写动作前的中心矫正。
- * @return 1 表示底盘已在推箱起点停车，主循环必须完成中心矫正后才能放行。
+ * @brief 是否正在等待 waypoint 执行前的中心矫正。
+ * @return 1 表示底盘已在方向转折点停车，主循环必须完成中心矫正后才能放行。
  */
 uint8 executor_art_pre_push_pending(void);
 
 /**
- * @brief 贴箱中心矫正成功后放行当前第一个推箱 waypoint。
+ * @brief 当前中心矫正完成后是否还需要执行推箱垂直轴对齐。
+ * @return 1 表示当前 waypoint 是大写推箱动作；0 表示普通转折，修正 pose 后直接放行。
+ */
+uint8 executor_center_requires_push_alignment(void);
+
+/**
+ * @brief 中心矫正成功后放行当前 waypoint。
  * @return 1 表示已放行同一个 waypoint；0 表示当前没有中心等待。
- * @note 本函数不推进 waypoint 下标，只允许 20ms executor 开始执行当前推箱动作。
+ * @note 本函数不推进 waypoint 下标，只允许 20ms executor 开始执行当前动作。
  */
 uint8 executor_continue_after_pre_push_center(void);
 
 /**
+ * @brief ART 中心校正成功后，启动当前推箱 waypoint 的垂直轴单轴对齐。
+ * @param[in] reference_row 当前 ART 地图中 `C` 所在行。
+ * @param[in] reference_col 当前 ART 地图中 `C` 所在列。
+ * @return 1 表示已接管当前中心等待并开始对齐；0 表示当前状态或动作不允许启动。
+ * @note L/R 只对齐世界 Y，U/D 只对齐世界 X；完成后自动放行同一个 waypoint。
+ */
+uint8 executor_start_pre_push_alignment(uint8 reference_row, uint8 reference_col);
+
+/**
  * @brief ART 视觉中心采样窗口是否打开。
- * @return 1 表示正在段末停稳/同步，或正在等待推箱前中心矫正。
+ * @return 1 表示正在段末停稳/同步，或正在等待方向转折点中心矫正。
  */
 uint8 executor_art_center_sampling_active(void);
 
@@ -156,11 +179,11 @@ void executor_set_error(executor_error_enum error);
  * @param[in] center_row_q OpenART 视觉中心行坐标，单位 1/100 格。
  * @param[in] sample_count OpenART 中心点样本序号，用于过滤重复读取。
  * @return 1 表示已经收满 3 个有效样本并得到中值；0 表示样本不足或重复。
- * @note 这里只缓存中值，不立刻重置 pose；段末或推箱前流程随后决定是否提交。
+ * @note 这里只缓存中值，不立刻重置 pose；段末或 waypoint 前流程随后决定是否提交。
  */
 uint8 executor_apply_art_player_center(uint16 center_col_q, uint16 center_row_q, uint32 sample_count);
 
-/** 清空尚未提交的 ART 中心样本，开始一次独立的三帧请求。 */
+/** 清空尚未提交的 ART 中心样本，开始一次独立的多帧请求。 */
 void executor_reset_art_player_center_samples(void);
 
 /**

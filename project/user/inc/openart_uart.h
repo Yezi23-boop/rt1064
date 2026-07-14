@@ -4,6 +4,14 @@
 #include "zf_common_typedef.h"
 #include "map_types.h"
 
+typedef struct
+{
+    uint16 car_col_q;
+    uint16 car_row_q;
+    uint16 box_col_q;
+    uint16 box_row_q;
+} openart_observation_sample_struct;
+
 /**
  * @brief 初始化 OpenART 地图接收状态。
  *
@@ -33,7 +41,7 @@ uint8 openart_map_ready(void);
 /**
  * @brief 获取最近一次收到的完整地图。
  *
- * 地图使用 RT 字符：# 墙，. 空地，B 箱子，T 目标点，C 小车，X 炸弹/障碍。
+ * OpenART 输入使用 `#`/`.`/`B`/`T`/`C`/`X`；MCU 快照会用 `+` 表示小车站在目标上。
  *
  * @return 指向模块内部只读快照；尚无有效地图时返回 NULL。
  *
@@ -88,8 +96,8 @@ uint8 openart_find_player_cell(uint8 *row, uint8 *col, uint8 *count);
 uint32 openart_get_player_center(uint16 *col_q, uint16 *row_q, uint8 *valid);
 
 /**
- * @brief 请求 OpenART 临时开启中心识别并逐帧返回3个有效精确中心。
- * @note 会清除上一轮请求样本并通过 UART1 发送一次 `CENTER_REQ`；调用方负责停车等待。
+ * @brief 请求 OpenART 临时开启中心识别并逐帧返回多帧有效精确中心。
+ * @note 会清除上一轮请求样本和配套地图，并通过 UART1 发送一次 `CENTER_REQ`；调用方负责停车等待。
  */
 void openart_request_player_center(void);
 
@@ -97,9 +105,22 @@ void openart_request_player_center(void);
  * @brief 按接收顺序弹出当前请求的一条中心样本。
  * @param[out] col_q 中心列坐标，单位 1/100 格，可传 NULL。
  * @param[out] row_q 中心行坐标，单位 1/100 格，可传 NULL。
- * @return 样本序号 1..3；0 表示当前没有待取样本。
+ * @return 样本序号 1..ART_CENTER_SAMPLE_COUNT；0 表示当前没有待取样本。
  */
 uint8 openart_get_requested_center_sample(uint16 *col_q, uint16 *row_q);
+
+/**
+ * @brief 获取当前 CENTER_REQ 最近一条已接受样本的配套完整地图。
+ * @return 配套地图快照；本轮尚无通过一致性校验的样本时返回 NULL。
+ * @note 快照不会被普通周期地图覆盖，但下一次 CENTER_REQ 会使其失效。
+ */
+const map_source_struct *openart_get_requested_center_map(void);
+
+/** 请求 ART1 返回指定箱子格对应的3帧小车中心与箱子中心。 */
+void openart_request_observation(uint8 box_row, uint8 box_col);
+
+/** 弹出当前观察请求的一条样本；返回1表示有效，0表示队列为空。 */
+uint8 openart_get_observation_sample(openart_observation_sample_struct *sample);
 
 /**
  * @brief 从 UART1 ISR 投递一个接收字节。

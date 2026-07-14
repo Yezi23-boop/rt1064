@@ -104,6 +104,39 @@ static uint8 ambiguity_and_retry_mask_work(void)
             (first.observation_bit != second.observation_bit)) ? 1u : 0u;
 }
 
+static uint8 observation_yaw_matches_four_directions(void)
+{
+    static const uint8 car_rows[4] = {6u, 5u, 4u, 5u};
+    static const uint8 car_cols[4] = {5u, 4u, 5u, 6u};
+    static const float expected_yaw[4] = {180.0f, 90.0f, 0.0f, 270.0f};
+    uint8 index;
+
+    for(index = 0u; index < 4u; index++)
+    {
+        test_map_struct map;
+        subject2_object_struct objects[MAX_BOXES];
+        subject2_observation_plan_struct plan;
+        solve_result_struct path;
+        uint8 object_count = 0u;
+
+        init_map(&map, car_rows[index], car_cols[index]);
+        map.rows[5][5] = 'B';
+        map.rows[4][5] = (car_rows[index] == 4u) ? 'C' : '#';
+        map.rows[6][5] = (car_rows[index] == 6u) ? 'C' : '#';
+        map.rows[5][4] = (car_cols[index] == 4u) ? 'C' : '#';
+        map.rows[5][6] = (car_cols[index] == 6u) ? 'C' : '#';
+
+        if((0u == subject2_collect_objects(&map.source, 'B', objects, &object_count)) ||
+           (0u == subject2_select_observation(&map.source, objects, object_count,
+                                               &plan, &path)) ||
+           (expected_yaw[index] != plan.target_yaw_deg))
+        {
+            return 0u;
+        }
+    }
+    return 1u;
+}
+
 static uint8 classifier_requires_consecutive_confident_samples(void)
 {
     subject2_classifier_struct filter;
@@ -132,6 +165,34 @@ static uint8 classifier_requires_consecutive_confident_samples(void)
     }
     return ((0 != subject2_classifier_push(&filter, 4u, 920u, 750u, 3u, &confirmed)) &&
             (4u == confirmed)) ? 1u : 0u;
+}
+
+static uint8 car_on_target_is_collected(void)
+{
+    test_map_struct map;
+    subject2_object_struct objects[MAX_BOXES];
+    uint16 cells[MAX_BOXES];
+    map_scan_stats_struct stats;
+    uint8 object_count = 0u;
+    uint8 cell_count = 0u;
+
+    init_map(&map, 5u, 5u);
+    map.rows[5][5] = '+';
+    map_scan_stats(&map.source, &stats);
+    if((1u != stats.car_count) || (1u != stats.target_count) ||
+       (5u != stats.car_row) || (5u != stats.car_col))
+    {
+        return 0u;
+    }
+    if((0u == subject2_collect_objects(&map.source, 'T', objects, &object_count)) ||
+       (1u != object_count) ||
+       (map_cell_index(5u, 5u) != objects[0].cell))
+    {
+        return 0u;
+    }
+    return ((0u != subject2_collect_cells(&map.source, 'T', cells, &cell_count)) &&
+            (1u == cell_count) &&
+            (map_cell_index(5u, 5u) == cells[0])) ? 1u : 0u;
 }
 
 static uint8 bindings_are_unique_and_sets_match(void)
@@ -208,7 +269,9 @@ int main(void)
 
     passed &= run_case("collect-select-nearest", collect_and_select_nearest());
     passed &= run_case("ambiguity-retry-mask", ambiguity_and_retry_mask_work());
+    passed &= run_case("observation-yaw", observation_yaw_matches_four_directions());
     passed &= run_case("classifier-consecutive", classifier_requires_consecutive_confident_samples());
+    passed &= run_case("car-on-target", car_on_target_is_collected());
     passed &= run_case("binding-sets", bindings_are_unique_and_sets_match());
     passed &= run_case("track-active-box", active_box_identity_tracks_one_move());
     passed &= run_case("track-ambiguous", multiple_changes_are_ambiguous());

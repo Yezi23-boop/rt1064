@@ -6,9 +6,9 @@
  *   MAP_BEGIN
  *   12 行 RT 地图，每行 16 字符：
  *   # 墙，. 空地，B 箱子，T 目标点，C 小车，X 炸弹/障碍
- *   PLAYER_CENTER_GRID 0,0 0（普通帧协议占位）
+ *   PLAYER_CENTER_GRID col_q,row_q valid
  *   MAP_END
- * 精确中心由 MCU 发送 CENTER_REQ 后，通过独立的 CENTER_SAMPLE 1..3 返回。
+ * 精确中心由 MCU 发送 CENTER_REQ 后，通过独立的 CENTER_SAMPLE 1..N 返回。
  *
  * UART1 底层初始化由 debug_init() 完成；运行期 LPUART1_IRQHandler()
  * 只投递字节到本模块，协议解析在主循环 openart_uart_poll() 中完成。
@@ -16,14 +16,16 @@
 
 #include "zf_common_headfile.h"
 #include "openart_uart.h"
+#include "drive_config.h"
 #include "map_utils.h"
 #include "timebase.h"
 
 #define OPENART_UART_INDEX          (UART_1)
 #define OPENART_HW_RX_BUFFER_SIZE   (384u)
-#define OPENART_LINE_SIZE           (40u)
+#define OPENART_LINE_SIZE           (48u)
 #define OPENART_RX_TIMEOUT_MS       (1000u)
-#define OPENART_REQUESTED_CENTER_SAMPLE_COUNT (3u)
+#define OPENART_REQUESTED_CENTER_SAMPLE_COUNT (ART_CENTER_SAMPLE_COUNT)
+#define OPENART_OBSERVATION_SAMPLE_COUNT      (3u)
 
 typedef enum
 {
@@ -59,11 +61,19 @@ static uint16 player_center_col_q;                               // 最近视觉
 static uint16 player_center_row_q;                               // 最近视觉中心行坐标，单位 1/100 格。
 static uint8 player_center_valid;                                // 1 表示最近一次样本有效。
 static uint32 player_center_count;                               // 视觉中心点样本累计计数。
-static uint8 requested_center_active;                            // 1 表示 MCU 已发送 CENTER_REQ，正在接收 1..3 号样本。
-static uint8 requested_center_count;                             // 当前请求已按顺序接收并入队的样本数，范围 0..3。
-static uint8 requested_center_read_index;                        // 主循环下一条待取样本下标，范围 0..3。
+static uint8 requested_center_active;                            // 1 表示 MCU 已发送 CENTER_REQ，正在接收 1..N 号样本。
+static uint8 requested_center_count;                             // 当前请求已按顺序接收并入队的样本数。
+static uint8 requested_center_read_index;                        // 主循环下一条待取样本下标。
 static uint16 requested_center_col_q[OPENART_REQUESTED_CENTER_SAMPLE_COUNT]; // 请求样本列队列，单位 1/100 格。
 static uint16 requested_center_row_q[OPENART_REQUESTED_CENTER_SAMPLE_COUNT]; // 请求样本行队列，单位 1/100 格。
+static char requested_center_map_rows[MAP_ROWS][MAP_COLS + 1];   // 最近一条有效 CENTER_SAMPLE 前的配套完整地图。
+static map_source_struct requested_center_map_source;            // 指向请求中心配套地图快照。
+static uint8 requested_center_map_valid;                         // 1 表示配套地图与当前请求样本已通过一致性校验。
+static uint32 requested_center_last_map_frame;                   // 上一条已接受样本使用的地图帧号。
+static uint8 observation_active;
+static uint8 observation_count;
+static uint8 observation_read_index;
+static openart_observation_sample_struct observation_samples[OPENART_OBSERVATION_SAMPLE_COUNT];
 
 static void update_map_object_cache(void)
 {
@@ -110,7 +120,8 @@ static uint8 str_equal(const char *left, const char *right)
 static uint8 is_map_char(char ch)
 {
     return (('#' == ch) || ('.' == ch) || ('B' == ch) ||
-            ('T' == ch) || ('C' == ch) || ('X' == ch)) ? 1u : 0u;
+            ('T' == ch) || ('C' == ch) || ('+' == ch) ||
+            ('X' == ch)) ? 1u : 0u;
 }
 
 static uint8 is_valid_map_line(const char *line)
@@ -145,12 +156,88 @@ static void reset_frame_parser(void)
     reset_staging_player_center();
 }
 
+static uint8 find_unique_staging_player(uint8 *player_row_out,
+                                        uint8 *player_col_out)
+{
+    uint8 row;
+    uint8 col;
+    uint8 count = 0u;
+
+    for(row = 0u; row < MAP_ROWS; row++)
+    {
+        for(col = 0u; col < MAP_COLS; col++)
+        {
+            if(('C' == staging_map[row][col]) || ('+' == staging_map[row][col]))
+            {
+                *player_row_out = row;
+                *player_col_out = col;
+                count++;
+            }
+        }
+    }
+    return (1u == count) ? 1u : 0u;
+}
+
+static void normalize_staging_player_from_center(void)
+{
+    uint8 row;
+    uint8 col;
+    uint8 center_row;
+    uint8 center_col;
+    uint8 center_on_target;
+
+    if(0 == staging_player_center_received)
+    {
+        return;
+    }
+
+    if(0 != staging_player_center_valid)
+    {
+        if((staging_player_center_col_q >= (MAP_COLS * 100u)) ||
+           (staging_player_center_row_q >= (MAP_ROWS * 100u)))
+        {
+            return;
+        }
+        center_col = (uint8)(staging_player_center_col_q / 100u);
+        center_row = (uint8)(staging_player_center_row_q / 100u);
+    }
+    /* 普通周期帧不提供精确中心；只有唯一粗车格时才允许继承上一帧目标底色。 */
+    else if(0 == find_unique_staging_player(&center_row, &center_col))
+    {
+        return;
+    }
+
+    center_on_target = (('T' == staging_map[center_row][center_col]) ||
+                        ('+' == staging_map[center_row][center_col]) ||
+                        ((0 != map_valid) &&
+                         (('T' == map_snapshot[center_row][center_col]) ||
+                          ('+' == map_snapshot[center_row][center_col])))) ? 1u : 0u;
+    for(row = 0; row < MAP_ROWS; row++)
+    {
+        for(col = 0; col < MAP_COLS; col++)
+        {
+            if(('C' == staging_map[row][col]) || ('+' == staging_map[row][col]))
+            {
+                staging_map[row][col] = ((0 != map_valid) &&
+                                         ('+' == map_snapshot[row][col])) ? 'T' : '.';
+            }
+            else if((0 != map_valid) && ('+' == map_snapshot[row][col]) &&
+                    ('.' == staging_map[row][col]))
+            {
+                staging_map[row][col] = 'T';
+            }
+        }
+    }
+    staging_map[center_row][center_col] = (0 != center_on_target) ? '+' : 'C';
+}
+
 static void accept_map(void)
 {
     uint8 row;
 
     // staging_map 只保存正在接收的帧；完整帧通过 MAP_END 校验后再一次性发布快照。
     // 这样屏幕和求解器不会读到半帧地图。
+    normalize_staging_player_from_center();
     for(row = 0; row < MAP_ROWS; row++)
     {
         memcpy(map_snapshot[row], staging_map[row], MAP_COLS + 1);
@@ -346,13 +433,110 @@ static void parse_requested_center_line(void)
     {
         return;
     }
+    if((0 == map_valid) ||
+       (0 == player_center_valid) ||
+       (frame_count == requested_center_last_map_frame) ||
+       (center_col_q != player_center_col_q) ||
+       (center_row_q != player_center_row_q) ||
+       (1u != player_count))
+    {
+        return;
+    }
 
     requested_center_col_q[requested_center_count] = center_col_q;
     requested_center_row_q[requested_center_count] = center_row_q;
+    map_source_snapshot(&requested_center_map_source,
+                        requested_center_map_rows,
+                        &openart_map_source);
+    requested_center_map_valid = 1u;
+    requested_center_last_map_frame = frame_count;
     requested_center_count++;
     if(requested_center_count >= OPENART_REQUESTED_CENTER_SAMPLE_COUNT)
     {
         requested_center_active = 0;
+    }
+}
+
+static void append_u16(char *text, uint8 *length, uint16 value)
+{
+    char reverse[5];
+    uint8 count = 0u;
+
+    do
+    {
+        reverse[count++] = (char)('0' + (value % 10u));
+        value = (uint16)(value / 10u);
+    } while((0u != value) && (count < sizeof(reverse)));
+    while(0u != count)
+    {
+        text[(*length)++] = reverse[--count];
+    }
+}
+
+static uint8 parse_observation_sample_line(uint16 values[5])
+{
+    const char *prefix = "OBSERVE_SAMPLE ";
+    char *text = line_buffer + strlen(prefix);
+    char *tokens[5];
+    uint8 index;
+
+    if(0 != strncmp(line_buffer, prefix, strlen(prefix)))
+    {
+        return 0u;
+    }
+    for(index = 0u; index < 4u; index++)
+    {
+        tokens[index] = text;
+        while(('\0' != *text) && (',' != *text))
+        {
+            text++;
+        }
+        if(',' != *text)
+        {
+            return 0u;
+        }
+        *text++ = '\0';
+    }
+    tokens[4] = text;
+    for(index = 0u; index < 5u; index++)
+    {
+        if(0 == parse_uint16_text(tokens[index], &values[index]))
+        {
+            return 0u;
+        }
+    }
+    return 1u;
+}
+
+static void parse_observation_line(void)
+{
+    uint16 values[5];
+    openart_observation_sample_struct *sample;
+
+    if((0u == observation_active) ||
+       (0u == parse_observation_sample_line(values)))
+    {
+        return;
+    }
+    if((values[0] != (uint16)(observation_count + 1u)) ||
+       (values[0] > OPENART_OBSERVATION_SAMPLE_COUNT) ||
+       (values[1] >= (MAP_COLS * 100u)) ||
+       (values[2] >= (MAP_ROWS * 100u)) ||
+       (values[3] >= (MAP_COLS * 100u)) ||
+       (values[4] >= (MAP_ROWS * 100u)))
+    {
+        return;
+    }
+
+    sample = &observation_samples[observation_count];
+    sample->car_col_q = values[1];
+    sample->car_row_q = values[2];
+    sample->box_col_q = values[3];
+    sample->box_row_q = values[4];
+    observation_count++;
+    if(observation_count >= OPENART_OBSERVATION_SAMPLE_COUNT)
+    {
+        observation_active = 0u;
     }
 }
 
@@ -373,6 +557,12 @@ static void parse_line(void)
     if(0 == strncmp(line_buffer, "CENTER_SAMPLE ", 14))
     {
         parse_requested_center_line();
+        return;
+    }
+
+    if(0 == strncmp(line_buffer, "OBSERVE_SAMPLE ", 15))
+    {
+        parse_observation_line();
         return;
     }
 
@@ -464,17 +654,26 @@ void openart_uart_init(void)
     requested_center_active = 0;
     requested_center_count = 0;
     requested_center_read_index = 0;
+    requested_center_map_valid = 0;
+    requested_center_last_map_frame = 0;
     memset(requested_center_col_q, 0, sizeof(requested_center_col_q));
     memset(requested_center_row_q, 0, sizeof(requested_center_row_q));
+    observation_active = 0u;
+    observation_count = 0u;
+    observation_read_index = 0u;
+    memset(observation_samples, 0, sizeof(observation_samples));
     reset_frame_parser();
 
     for(row = 0; row < MAP_ROWS; row++)
     {
         memset(staging_map[row], 0, MAP_COLS + 1);
         memset(map_snapshot[row], 0, MAP_COLS + 1);
+        memset(requested_center_map_rows[row], 0, MAP_COLS + 1);
         openart_map_source.rows[row] = map_snapshot[row];
+        requested_center_map_source.rows[row] = requested_center_map_rows[row];
     }
     openart_map_source.name = "OpenART";
+    requested_center_map_source.name = "OpenART Center";
 }
 
 void openart_uart_poll(void)
@@ -572,6 +771,8 @@ void openart_request_player_center(void)
     requested_center_active = 1;
     requested_center_count = 0;
     requested_center_read_index = 0;
+    requested_center_map_valid = 0;
+    requested_center_last_map_frame = frame_count;
     memset(requested_center_col_q, 0, sizeof(requested_center_col_q));
     memset(requested_center_row_q, 0, sizeof(requested_center_row_q));
     uart_write_string(OPENART_UART_INDEX, "CENTER_REQ\n");
@@ -605,6 +806,43 @@ uint8 openart_get_requested_center_sample(uint16 *col_q, uint16 *row_q)
     }
     requested_center_read_index++;
     return sample_index;
+}
+
+const map_source_struct *openart_get_requested_center_map(void)
+{
+    return (0 != requested_center_map_valid) ? &requested_center_map_source : NULL;
+}
+
+void openart_request_observation(uint8 box_row, uint8 box_col)
+{
+    char command[24];
+    uint8 length = 0u;
+    const char *prefix = "OBSERVE_REQ ";
+
+    observation_active = 1u;
+    observation_count = 0u;
+    observation_read_index = 0u;
+    memset(observation_samples, 0, sizeof(observation_samples));
+    while('\0' != *prefix)
+    {
+        command[length++] = *prefix++;
+    }
+    append_u16(command, &length, box_row);
+    command[length++] = ',';
+    append_u16(command, &length, box_col);
+    command[length++] = '\n';
+    command[length] = '\0';
+    uart_write_string(OPENART_UART_INDEX, command);
+}
+
+uint8 openart_get_observation_sample(openart_observation_sample_struct *sample)
+{
+    if((0 == sample) || (observation_read_index >= observation_count))
+    {
+        return 0u;
+    }
+    *sample = observation_samples[observation_read_index++];
+    return 1u;
 }
 
 void openart_uart_push_byte(uint8 data)

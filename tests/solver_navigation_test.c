@@ -57,16 +57,6 @@ static uint8 expect_path(navigation_test_map_struct *map,
     {
         return 0;
     }
-    {
-        uint16 index;
-        for(index = 0; index < result.waypoint_count; index++)
-        {
-            if(0u != result.waypoints[index].center_correct_before)
-            {
-                return 0;
-            }
-        }
-    }
     return ((target_row == result.waypoints[result.waypoint_count - 1u].row) &&
             (target_col == result.waypoints[result.waypoint_count - 1u].col)) ? 1u : 0u;
 }
@@ -102,11 +92,11 @@ static uint8 each_push_action_is_a_waypoint(void)
             return 0;
         }
     }
-    return ((1u == result.waypoints[0].center_correct_before) &&
+    return ((0u == result.waypoints[0].center_correct_before) &&
             (0u == result.waypoints[1].center_correct_before)) ? 1u : 0u;
 }
 
-static uint8 first_push_is_marked_after_merged_approach(void)
+static uint8 same_direction_push_is_not_marked(void)
 {
     navigation_test_map_struct map;
     solve_result_struct result;
@@ -124,11 +114,11 @@ static uint8 first_push_is_marked_after_merged_approach(void)
             (3u == result.waypoints[0].col) &&
             (0u == result.waypoints[0].center_correct_before) &&
             ('R' == result.waypoints[1].action) &&
-            (1u == result.waypoints[1].center_correct_before) &&
+            (0u == result.waypoints[1].center_correct_before) &&
             (0u == result.waypoints[2].center_correct_before)) ? 1u : 0u;
 }
 
-static uint8 diagonal_approach_marks_first_push(void)
+static uint8 turn_into_push_is_marked(void)
 {
     navigation_test_map_struct map;
     solve_result_struct result;
@@ -147,6 +137,64 @@ static uint8 diagonal_approach_marks_first_push(void)
             (0u == result.waypoints[0].center_correct_before) &&
             ('R' == result.waypoints[1].action) &&
             (1u == result.waypoints[1].center_correct_before)) ? 1u : 0u;
+}
+
+static uint8 merged_turn_marks_next_waypoint(void)
+{
+    navigation_test_map_struct map;
+    solve_result_struct result;
+
+    init_map(&map, 1u, 1u);
+    if(0 == solve_navigation_path(&map.source, 3u, 3u, &result))
+    {
+        return 0u;
+    }
+
+    return ((0 == strcmp(result.actions, "ddrr")) &&
+            (2u == result.waypoint_count) &&
+            ('d' == result.waypoints[0].action) &&
+            (0u == result.waypoints[0].center_correct_before) &&
+            ('r' == result.waypoints[1].action) &&
+            (1u == result.waypoints[1].center_correct_before)) ? 1u : 0u;
+}
+
+static uint8 merged_straight_does_not_mark_center(void)
+{
+    navigation_test_map_struct map;
+    solve_result_struct result;
+
+    init_map(&map, 1u, 1u);
+    if(0 == solve_navigation_path(&map.source, 1u, 4u, &result))
+    {
+        return 0u;
+    }
+
+    return ((0 == strcmp(result.actions, "rrr")) &&
+            (1u == result.waypoint_count) &&
+            (0u == result.waypoints[0].center_correct_before)) ? 1u : 0u;
+}
+
+static uint8 merged_push_approach_marks_turn(void)
+{
+    navigation_test_map_struct map;
+    solve_result_struct result;
+
+    init_map(&map, 1u, 1u);
+    map.storage[3][4] = 'B';
+    map.storage[3][5] = 'T';
+    if(0 == solve_map(&map.source, &result))
+    {
+        return 0u;
+    }
+
+    return ((0 == strcmp(result.actions, "ddrrR")) &&
+            (3u == result.waypoint_count) &&
+            ('d' == result.waypoints[0].action) &&
+            (0u == result.waypoints[0].center_correct_before) &&
+            ('r' == result.waypoints[1].action) &&
+            (1u == result.waypoints[1].center_correct_before) &&
+            ('R' == result.waypoints[2].action) &&
+            (0u == result.waypoints[2].center_correct_before)) ? 1u : 0u;
 }
 
 static uint8 bound_box_uses_requested_target(void)
@@ -197,6 +245,24 @@ static uint8 bound_box_rejects_missing_cells(void)
                                       &result)) ? 1u : 0u;
 }
 
+static uint8 car_on_target_is_supported(void)
+{
+    navigation_test_map_struct map;
+    solve_result_struct result;
+
+    init_map(&map, 2u, 2u);
+    map.storage[2][2] = '+';
+    if(0 == solve_navigation_path(&map.source, 2u, 4u, &result))
+    {
+        return 0u;
+    }
+
+    init_map(&map, 2u, 2u);
+    map.storage[2][2] = '+';
+    map.storage[2][4] = 'B';
+    return solve_map(&map.source, &result);
+}
+
 int main(void)
 {
     navigation_test_map_struct map;
@@ -226,10 +292,14 @@ int main(void)
     passed &= run_case("start-equals-target", expect_path(&map, 1, 1, 1, 1));
 
     passed &= run_case("each-push-is-waypoint", each_push_action_is_a_waypoint());
-    passed &= run_case("mark-first-push", first_push_is_marked_after_merged_approach());
-    passed &= run_case("diagonal-first-push", diagonal_approach_marks_first_push());
+    passed &= run_case("same-dir-push-no-center", same_direction_push_is_not_marked());
+    passed &= run_case("turn-into-push-center", turn_into_push_is_marked());
+    passed &= run_case("merged-turn-center", merged_turn_marks_next_waypoint());
+    passed &= run_case("merged-straight-no-center", merged_straight_does_not_mark_center());
+    passed &= run_case("merged-push-turn-center", merged_push_approach_marks_turn());
     passed &= run_case("bound-requested-target", bound_box_uses_requested_target());
     passed &= run_case("bound-missing-cells", bound_box_rejects_missing_cells());
+    passed &= run_case("car-on-target", car_on_target_is_supported());
 
     return (0 != passed) ? 0 : 1;
 }

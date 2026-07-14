@@ -51,8 +51,8 @@ sensor.set_hmirror(True)       #水平
 sensor.skip_frames(time=200)
 
 # --- 加载 AI 模型和标签 ---
-net = tf.load("cartoon_V2.tflite", load_to_fb=True)
-labels = [line.rstrip() for line in open("/sd/labels.txt")]
+net = tf.load("/sd/cartoon_V3.tflite", load_to_fb=True)
+labels = [line.rstrip() for line in open("/sd/cartoon_labels.txt")]
 
 print("✅ 模型加载成功，共 %d 类" % len(labels))
 print("标签顺序：", labels)
@@ -69,11 +69,12 @@ while True:
     # 打印所有类别的置信度
     print("\n[ZOOM: x%.1f] 所有类别置信度：" % ZOOM)
     for i in range(len(labels)):
-        print("  %d. %s: %.4f" % (i+1, labels[i], outputs[i]))
+        print("  class_id=%d %s: %.4f" % (i, labels[i], outputs[i]))
 
     # 找到最高置信度
     max_idx = outputs.index(max(outputs))
-    print("\n最高置信度：第%d类 %s (%.4f)" % (max_idx+1, labels[max_idx], outputs[max_idx]))
+    print("\n最高置信度：class_id=%d %s mapped_digit=%d (%.4f)" %
+          (max_idx, labels[max_idx], max_idx, outputs[max_idx]))
     print("-" * 50)
 
     gc.collect()

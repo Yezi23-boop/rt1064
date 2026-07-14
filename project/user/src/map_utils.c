@@ -87,7 +87,7 @@ void map_scan_stats(const map_source_struct *source, map_scan_stats_struct *stat
         for(col = 0; col < MAP_COLS; col++)
         {
             value = source->rows[row][col];
-            if('C' == value)
+            if(('C' == value) || ('+' == value))
             {
                 if(0 == stats->car_count)
                 {
@@ -97,11 +97,11 @@ void map_scan_stats(const map_source_struct *source, map_scan_stats_struct *stat
                 }
                 stats->car_count++;
             }
-            else if('B' == value)
+            if('B' == value)
             {
                 stats->box_count++;
             }
-            else if('T' == value)
+            if(('T' == value) || ('+' == value))
             {
                 stats->target_count++;
             }

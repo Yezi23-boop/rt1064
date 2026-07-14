@@ -31,6 +31,7 @@ __pycache__/
 openmv*.png
 openart*.png
 *.bmp
+tools/smartcar_agent/runtime/
 
 # Large vendor/product package kept locally only
 OpenART_Plus_Product/

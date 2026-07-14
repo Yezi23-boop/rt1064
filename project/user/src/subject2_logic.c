@@ -11,6 +11,10 @@ static const uint8 observation_bits[SUBJECT2_OBSERVATION_COUNT] = {
     SUBJECT2_OBSERVE_LEFT,
     SUBJECT2_OBSERVE_RIGHT
 };
+/* 候选格依次位于对象上、下、左、右；板测绝对 yaw 0 度朝地图下方。 */
+static const float observation_target_yaw_deg[SUBJECT2_OBSERVATION_COUNT] = {
+    0.0f, 180.0f, 90.0f, 270.0f
+};
 static solve_result_struct candidate_path;
 
 static uint16 absolute_difference(uint8 left, uint8 right)
@@ -56,7 +60,8 @@ uint8 subject2_collect_objects(const map_source_struct *source,
     {
         for(col = 0u; col < MAP_COLS; col++)
         {
-            if(symbol == source->rows[row][col])
+            if((symbol == source->rows[row][col]) ||
+               (('T' == symbol) && ('+' == source->rows[row][col])))
             {
                 if(MAX_BOXES <= *count)
                 {
@@ -91,7 +96,8 @@ uint8 subject2_collect_cells(const map_source_struct *source,
     {
         for(col = 0u; col < MAP_COLS; col++)
         {
-            if(symbol == source->rows[row][col])
+            if((symbol == source->rows[row][col]) ||
+               (('T' == symbol) && ('+' == source->rows[row][col])))
             {
                 if(MAX_BOXES <= *count)
                 {
@@ -187,6 +193,7 @@ uint8 subject2_select_observation(const map_source_struct *source,
                 plan->observation_bit = observation_bits[direction];
                 plan->row = (uint8)candidate_row;
                 plan->col = (uint8)candidate_col;
+                plan->target_yaw_deg = observation_target_yaw_deg[direction];
                 memcpy(path, &candidate_path, sizeof(*path));
             }
         }

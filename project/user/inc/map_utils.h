@@ -11,11 +11,11 @@
  */
 typedef struct
 {
-    uint8 car_count;                   /**< `C` 的数量；正常可求解地图应为 1。 */
+    uint8 car_count;                   /**< `C/+` 的数量；正常可求解地图应为 1。 */
     uint8 box_count;                   /**< `B` 的数量；应与目标点数量一致。 */
-    uint8 target_count;                /**< `T` 的数量；当前求解器按一箱一目标拆解。 */
-    uint8 car_row;                     /**< 第一个 `C` 的行号；没有小车时保持 0。 */
-    uint8 car_col;                     /**< 第一个 `C` 的列号；没有小车时保持 0。 */
+    uint8 target_count;                /**< `T/+` 的数量；当前求解器按一箱一目标拆解。 */
+    uint8 car_row;                     /**< 第一个 `C/+` 的行号；没有小车时保持 0。 */
+    uint8 car_col;                     /**< 第一个 `C/+` 的列号；没有小车时保持 0。 */
 } map_scan_stats_struct;
 
 /**

@@ -1,0 +1,126 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>SmartCar 调参观察器</title>
+  <link rel="stylesheet" href="/styles.css">
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand-block">
+      <span class="brand-mark">SC</span>
+      <div>
+        <h1>SmartCar 调参观察器</h1>
+        <p id="source-path">等待状态源</p>
+      </div>
+    </div>
+    <div class="topbar-status">
+      <span id="service-status" class="status-dot status-waiting"></span>
+      <span id="service-label">正在连接</span>
+      <time id="updated-at">--:--:--</time>
+    </div>
+  </header>
+
+  <main>
+    <section class="signal-strip" aria-label="运行状态">
+      <div class="signal-cell">
+        <span class="signal-label">上位机窗口</span>
+        <strong id="window-status">未检测</strong>
+      </div>
+      <div class="signal-cell">
+        <span class="signal-label">摄像头</span>
+        <strong id="camera-status">未读取</strong>
+      </div>
+      <div class="signal-cell">
+        <span class="signal-label">地图候选</span>
+        <strong id="map-status">未读取</strong>
+      </div>
+      <div class="signal-cell signal-wide">
+        <span class="signal-label">Agent 状态文件</span>
+        <code id="state-path">--</code>
+      </div>
+    </section>
+
+    <section class="visual-grid">
+      <article class="panel game-panel">
+        <div class="panel-heading">
+          <div>
+            <span class="eyebrow">GAME WINDOW</span>
+            <h2>虚拟比赛画面</h2>
+          </div>
+          <span id="window-title" class="panel-meta">等待窗口</span>
+        </div>
+        <div class="media-stage game-stage">
+          <img id="window-image" alt="SmartCar 虚拟比赛窗口">
+          <div id="window-empty" class="media-empty">
+            <strong>未检测到 SmartCar 窗口</strong>
+          </div>
+        </div>
+      </article>
+
+      <article class="panel camera-panel">
+        <div class="panel-heading">
+          <div>
+            <span class="eyebrow">CAMERA DEBUG</span>
+            <h2>定位调试画面</h2>
+          </div>
+          <span id="debug-age" class="panel-meta">无图像</span>
+        </div>
+        <div class="media-stage debug-stage">
+          <img id="debug-image" alt="摄像头 HSV 与定位点调试画面">
+          <div id="debug-empty" class="media-empty">
+            <strong>等待 debug_save.jpg</strong>
+          </div>
+        </div>
+      </article>
+    </section>
+
+    <section class="data-grid">
+      <article class="panel map-panel">
+        <div class="panel-heading map-heading">
+          <div>
+            <span class="eyebrow">GRID STATE · 16 × 12</span>
+            <h2>地图结构</h2>
+          </div>
+          <select id="map-select" aria-label="选择地图"></select>
+        </div>
+        <div class="map-layout">
+          <div id="map-grid" class="map-grid" aria-label="SmartCar 地图网格"></div>
+          <dl class="map-legend">
+            <div><dt class="legend-swatch wall"></dt><dd>墙体 <strong id="wall-count">0</strong></dd></div>
+            <div><dt class="legend-swatch box"></dt><dd>箱子 <strong id="box-count">0</strong></dd></div>
+            <div><dt class="legend-swatch goal"></dt><dd>目标 <strong id="goal-count">0</strong></dd></div>
+            <div><dt class="legend-swatch completed"></dt><dd>完成 <strong id="completed-count">0</strong></dd></div>
+            <div class="map-mode"><dt>模式</dt><dd id="map-mode">--</dd></div>
+          </dl>
+        </div>
+      </article>
+
+      <article class="panel tuning-panel">
+        <div class="panel-heading">
+          <div>
+            <span class="eyebrow">TUNING INPUTS</span>
+            <h2>摄像头参数</h2>
+          </div>
+          <span class="panel-meta">只读</span>
+        </div>
+        <dl id="camera-settings" class="parameter-list"></dl>
+      </article>
+
+      <article class="panel alerts-panel">
+        <div class="panel-heading">
+          <div>
+            <span class="eyebrow">DIAGNOSTICS</span>
+            <h2>观察器告警</h2>
+          </div>
+          <span id="warning-count" class="warning-badge">0</span>
+        </div>
+        <ul id="warning-list" class="warning-list"></ul>
+      </article>
+    </section>
+  </main>
+
+  <script src="/app.js"></script>
+</body>
+</html>

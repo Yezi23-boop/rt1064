@@ -21,7 +21,7 @@
 /** 平移测试目标距离，单位 cm；到位后自动 stop_motion()。 */
 #define DRIVE_TRANSLATE_TEST_DISTANCE_CM (100.0f)
 /** 平移测试方向；可改为 MOTION_BACKWARD/MOTION_LEFT/MOTION_RIGHT/MOTION_FORWARD 分别测试四个基本方向。 */
-#define DRIVE_TRANSLATE_TEST_COMMAND (MOTION_RIGHT)
+#define DRIVE_TRANSLATE_TEST_COMMAND (MOTION_FORWARD)
 /** 平移测试位置环最大速度，范围 [0, 1]；越小越容易停准。 */
 #define DRIVE_TRANSLATE_TEST_SPEED (1.0f)
 /** 平移测试到点阈值，单位 cm；只影响代码层平移测试。 */

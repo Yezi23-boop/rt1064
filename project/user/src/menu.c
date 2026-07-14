@@ -83,6 +83,7 @@ static uint8 need_redraw;                                    // 页面级重绘�
 static const char *run_state = "Idle";                       // Run 页短状态文本，指向常量字符串。
 static uint8 exec_start_row = 0;                             // executor 启动时的格点行，屏幕用来把 pose 映射回地图。
 static uint8 exec_start_col = 0;                             // executor 启动时的格点列，ART 重解算成功后会更新。
+static float competition_launch_yaw_deg = 0.0f;              // 本轮首次 K3 时保存的发车航向，跨科目保持不变。
 static char last_solve_rows[MAP_ROWS][MAP_COLS + 1];         // 最近求解地图快照的行缓存，避免 OpenART 实时帧覆盖执行底图。
 static map_source_struct last_solve_source =
 {
@@ -402,6 +403,7 @@ static void build_subject2_context(subject2_context_struct *context)
     context->start_row = &exec_start_row;
     context->start_col = &exec_start_col;
     context->run_mode = run_mode;
+    context->launch_yaw_deg = competition_launch_yaw_deg;
 }
 
 static void apply_subject2_update(const subject2_update_struct *update)
@@ -785,6 +787,7 @@ static void execute_current_selection(void)
         playback_state = PLAYBACK_STATE_PAUSED;
         last_solve_source_valid = 0;
         executor_stop();
+        competition_launch_yaw_deg = get_control_status()->current_yaw;
         competition_flow_start(COMPETITION_MODE);
         action = competition_flow_take_action();
         start_competition_action(action, &update);
@@ -912,6 +915,9 @@ static void build_execute_view(screen_execute_view_struct *view)
     view->pose_x_cm = pose->x_cm;
     view->pose_y_cm = pose->y_cm;
     view->art_launch_pending = art_replan_launch_pending();
+    view->recognition_valid =
+        subject2_get_last_recognition(&view->recognition_is_target,
+                                      &view->recognition_class);
     view->art_player_enabled = (MAP_SOURCE_ART == settings_get_source()) ? 1u : 0u;
     if(0 != view->art_player_enabled)
     {

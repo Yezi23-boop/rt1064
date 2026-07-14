@@ -35,6 +35,7 @@ typedef struct
     uint8 observation_bit;
     uint8 row;
     uint8 col;
+    float target_yaw_deg;
 } subject2_observation_plan_struct;
 
 typedef struct

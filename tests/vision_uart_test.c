@@ -1,6 +1,7 @@
 #include <stdio.h>
 #include <string.h>
 #include "zf_common_headfile.h"
+#include "drive_config.h"
 #include "vision_uart.h"
 
 static char tx_text[96];
@@ -136,6 +137,7 @@ int main(void)
     clear_tx();
     vision_uart_board_test_init();
     vision_uart_board_test_get_status(&board_status);
+#if VISION_UART_BOARD_TEST_ENABLE
     passed &= run_case("board-test-mode", (0 == strcmp(tx_text, "VISION_MODE BOX\n")) &&
                        (VISION_UART_BOARD_TEST_WAIT_READY == board_status.state));
 
@@ -169,6 +171,10 @@ int main(void)
     vision_uart_board_test_poll();
     vision_uart_board_test_get_status(&board_status);
     passed &= run_case("board-test-timeout", VISION_UART_BOARD_TEST_FAIL == board_status.state);
+#else
+    passed &= run_case("board-test-disabled",
+                       VISION_UART_BOARD_TEST_DISABLED == board_status.state);
+#endif
 
     return (0u != passed) ? 0 : 1;
 }

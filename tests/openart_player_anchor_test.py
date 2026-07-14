@@ -15,8 +15,13 @@ CONSTANTS = {
     "PLAYER_BLOB_MARGIN",
     "PLAYER_GREEN_BLOB_THRESHOLD",
     "PLAYER_CYAN_BLOB_THRESHOLD",
+    "PLAYER_RECENT_C_FALLBACK_FRAMES",
 }
-FUNCTIONS = {"find_player_coarse_center", "detect_player_center"}
+FUNCTIONS = {
+    "find_player_coarse_center",
+    "select_recent_player_anchor",
+    "detect_player_center",
+}
 nodes = []
 for node in TREE.body:
     if isinstance(node, ast.Assign):
@@ -81,5 +86,15 @@ center = namespace["detect_player_center"](
 )
 assert center is None
 assert image.rois == []
+
+assert namespace["select_recent_player_anchor"](
+    None, (100, 100), 2
+) is None
+assert namespace["select_recent_player_anchor"](
+    None, (100, 100), 3
+) == (100, 100)
+assert namespace["select_recent_player_anchor"](
+    (120, 100), (100, 100), 3
+) == (120, 100)
 
 print("openart-player-anchor PASS")

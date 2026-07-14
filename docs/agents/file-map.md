@@ -54,6 +54,9 @@ This document helps future agents find the right files in this RT1064 / OpenART 
 - `project/`  
   RT1064 application project, Keil / IAR project files, linker scripts, and user code.
 
+- `tools/smartcar_agent/`
+  Read-only Windows observer for the SmartCar VR program. It publishes maps, camera settings, debug-image metadata, and a captured game window as localhost HTTP endpoints plus `runtime/latest_state.json` for Agent-assisted tuning.
+
 - `OpenART_Plus_Product/`  
   Local vendor product package. It is large and ignored by Git. Use it as local reference material only; do not commit it.
 
@@ -90,7 +93,7 @@ Important files:
 - `project/user/inc/isr.h` and `project/user/src/isr.c`  
   Interrupt declarations and handlers.
 
-Push Box user modules:
+Competition and Push Box user modules:
 
 - `project/user/inc/map_types.h`  
   Shared 16x12 map, solver result, action, and waypoint types.
@@ -111,16 +114,28 @@ Push Box user modules:
   ART-source runtime flow: launch delay and center collection, launch movement, stable-map solving, task-end synchronization, replanning, and automatic return to the left launch area.
 
 - `project/user/inc/openart_uart.h` / `project/user/src/openart_uart.c`
-  LPUART1 byte buffering and parsing for complete `MAP_BEGIN` / `MAP_END` frames plus `PLAYER_CENTER_GRID` samples.
+  LPUART1 byte buffering and parsing for complete map frames, requested center samples, and subject-two observation samples.
 
 - `project/user/inc/app.h` / `project/user/src/app.c`  
-  Non-blocking application initialization and polling for the menu, VOFA service, OpenART parser, and drive tests.
+  Non-blocking application initialization and polling for the menu, VOFA service, both OpenART UART parsers, board tests, and drive tests.
 
 - `project/user/inc/menu.h` / `project/user/src/menu.c`
   User workflow, map/source/mode selection, solving, execution-page state, and ART replanning coordination.
 
 - `project/user/inc/screen.h` / `project/user/src/screen.c`
   IPS200 rendering only; business state is assembled by `menu.c` before drawing.
+
+- `project/user/inc/competition_flow.h` / `project/user/src/competition_flow.c`
+  Stage coordinator for subject-one debug, subject-two debug, and the full subject-one -> return -> subject-two competition sequence.
+
+- `project/user/inc/subject2.h` / `project/user/src/subject2.c`
+  Subject-two runtime state machine: observation-point planning, requested center adjustment, ART #2 classification, class binding, bound pushes, map confirmation, and return requests.
+
+- `project/user/inc/subject2_logic.h` / `project/user/src/subject2_logic.c`
+  Host-testable subject-two algorithms for object collection, observation selection, classification stability, box/target binding, and active-box tracking.
+
+- `project/user/inc/vision_uart.h` / `project/user/src/vision_uart.c`
+  LPUART4 protocol for ART #2 mode selection, classification requests, samples, acknowledgements, cancellation, and optional board-level smoke testing.
 
 Control-framework planning:
 
@@ -183,10 +198,16 @@ openmv/
 Important files:
 
 - `openmv/main_see.py`
-  Current OpenART Plus map-recognition entrypoint. It recognizes the 16x12 virtual grid, filters the virtual-player center, and sends map frames plus `PLAYER_CENTER_GRID` over UART12 at 115200 baud.
+  OpenART #1 competition entrypoint. It recognizes the 16x12 virtual grid, sends periodic map/player-center frames, and responds to `CENTER_REQ` and `OBSERVE_REQ` geometry requests over UART12 at 115200 baud.
+
+- `openmv/视觉/main.py`
+  OpenART #2 competition entrypoint. It loads the cartoon and number models, switches modes on MCU commands, and returns request-scoped classification samples over UART12 at 115200 baud.
+
+- `openmv/视觉/*.tflite` and label files
+  ART #2 model assets deployed with `openmv/视觉/main.py`; keep filenames synchronized with the script constants and SD-card layout.
 
 - `openmv/main_model.py`
-  Standalone EIQ/TFLite image-classification experiment for the later classification task. It currently prints classification results and is not connected to the RT1064 task-mapping flow.
+  Earlier standalone EIQ/TFLite classification experiment. It is not the current ART #2 competition protocol entrypoint.
 
 When writing OpenMV / ART code, consult the official OpenMV library index first:
 
@@ -195,6 +216,19 @@ https://docs.openmv.io/library/index.html
 ```
 
 Then drill into modules such as `sensor`, `image`, `machine`, `display`, `ml`, `csi`, and `network` before writing new helpers.
+
+## Tests Area
+
+- `tests/run_*.ps1`
+  GCC host-test launchers for solver/navigation, executor correction, ART requested-center flow, competition flow, subject-two logic/state, and both UART protocols.
+
+- `tests/*_test.py`
+  Host-side protocol and OpenART behavior tests. These scripts execute directly with Python and print a `PASS` marker on success.
+
+- `tests/host/`
+  Minimal RT1064 typedef, interrupt, and aggregate-header stubs used only by GCC host tests.
+
+Run the relevant focused test while developing. Before integration, run all PowerShell and Python test entries using the commands in `AGENTS.md`.
 
 ## Libraries Area
 
@@ -343,9 +377,11 @@ Recommended search order:
 
 1. Read `project/user/src/main.c`.
 2. Follow the main-loop path through `app.c` and `menu.c`.
-3. For ART execution, continue through `openart_uart.c`, `art_replan.c`, `solver.c`, and `executor.c`.
-4. For physical motion, follow `isr.c` into `drive_control.c`, `drive_pose.c`, `drive_imu.c`, and `drive_output.c`.
-5. Check headers in `project/user/inc/` for public contracts, then inspect `libraries/` only if a driver or device API is involved.
+3. Follow stage changes through `competition_flow.c`.
+4. For subject one, continue through `openart_uart.c`, `art_replan.c`, `solver.c`, and `executor.c`.
+5. For subject two, continue through `subject2.c`, `subject2_logic.c`, `vision_uart.c`, `solver.c`, and `executor.c`.
+6. For physical motion, follow `isr.c` into `drive_control.c`, `drive_pose.c`, `drive_imu.c`, and `drive_output.c`.
+7. Check headers in `project/user/inc/` for public contracts, then inspect `libraries/` only if a driver or device API is involved.
 
 ### Add a new RT1064 C source file
 
@@ -359,10 +395,11 @@ D:\Keil_v5\UV4\UV4.exe -b "C:\Users\ye\Desktop\rt1064\project\mdk\rt1064.uvprojx
 
 ### Work on OpenART / OpenMV scripts
 
-1. Start in `openmv/`.
+1. Use `openmv/main_see.py` for ART #1 map/geometry work and `openmv/视觉/main.py` for ART #2 classification work.
 2. Check `docs.openmv.io/library/index.html` before creating helper functions.
-3. Keep hardware-dependent logic separate from pure logic where possible.
-4. Prefer host-checkable code for grid parsing, map normalization, and algorithm glue.
+3. Update the matching MCU protocol module and tests whenever a UART command or response changes.
+4. Keep hardware-dependent logic separate from pure logic where possible.
+5. Prefer host-checkable code for grid parsing, map normalization, classification filtering, and algorithm glue.
 
 ### Investigate build or download issues
 

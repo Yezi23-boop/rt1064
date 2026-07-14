@@ -92,6 +92,9 @@ typedef struct
     uint8 art_player_count;             /**< ART 地图中 `C` 的数量，用于诊断识别歧义。 */
     uint8 art_row;                      /**< ART 识别到的车格行号，仅 `art_player_valid` 时可信。 */
     uint8 art_col;                      /**< ART 识别到的车格列号，仅 `art_player_valid` 时可信。 */
+    uint8 recognition_valid;            /**< 非 0 表示已有科目二连续确认的分类结果。 */
+    uint8 recognition_is_target;        /**< 0 表示箱子卡通，1 表示目标数字。 */
+    uint8 recognition_class;            /**< 最近确认的统一类别编号，范围 0..9。 */
 } screen_execute_view_struct;
 
 /**

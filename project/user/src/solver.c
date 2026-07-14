@@ -37,7 +37,7 @@ static uint8 map_load(const map_source_struct *source, map_state_struct *map, so
     memset(map, 0, sizeof(*map));
     map->player = INVALID_STATE;
 
-    // 求解器和 OpenART/离线地图共用字符协议：# 墙，. 空地，B 箱子，T 目标，C 小车，X 障碍。
+    // 求解器和 OpenART/离线地图共用字符协议：+ 表示小车站在目标上。
     // 动态对象解析到 player/boxes/targets 后，grid 只保留静态障碍，便于推箱过程中更新箱子数组。
     for(row = 0; row < MAP_ROWS; row++)
     {
@@ -57,9 +57,18 @@ static uint8 map_load(const map_source_struct *source, map_state_struct *map, so
                 // X 在比赛语义里是炸弹/障碍；对 BFS 来说和墙一样不可进入。
                 map->grid[row][col] = '#';
             }
-            else if('C' == value)
+            else if(('C' == value) || ('+' == value))
             {
                 map->player = map_cell_index(row, col);
+                if('+' == value)
+                {
+                    if(MAX_BOXES <= map->target_count)
+                    {
+                        set_message(result, "Too many targets");
+                        return 0;
+                    }
+                    map->targets[map->target_count++] = map_cell_index(row, col);
+                }
             }
             else if('B' == value)
             {
@@ -311,6 +320,11 @@ static uint8 action_is_push(char action)
     return ((action >= 'A') && (action <= 'Z')) ? 1u : 0u;
 }
 
+static uint8 action_changes_direction(char previous_action, char action)
+{
+    return (waypoint_action_dir(previous_action) != waypoint_action_dir(action)) ? 1u : 0u;
+}
+
 static uint8 same_waypoint_run(char previous_action, char action)
 {
     // 大写动作保持独立 waypoint，保留虚拟推箱动作和单箱任务结束点语义。
@@ -462,9 +476,9 @@ static uint8 apply_path_to_runtime(map_state_struct *map, uint8 box_index, uint8
             box = next_box;
         }
 
-        center_correct_before = ((0 != action_is_push(action)) &&
-                                 ((0u == i) ||
-                                  (0 == action_is_push(path[i - 1u])))) ? 1u : 0u;
+        /* 标记放在转向后的下一段；执行器会在拐点停车后、启动该段前进行中心矫正。 */
+        center_correct_before = ((0u < i) &&
+                                 (0 != action_changes_direction(path[i - 1u], action))) ? 1u : 0u;
         player = next_player;
         if(0 == result_append_action(result, action))
         {
@@ -652,6 +666,7 @@ uint8 solve_navigation_path(const map_source_struct *source,
     uint8 dir;
     char value;
     char action;
+    char previous_action = '\0';
 
     if((0 == source) || (0 == result))
     {
@@ -674,13 +689,13 @@ uint8 solve_navigation_path(const map_source_struct *source,
         for(col = 0; col < MAP_COLS; col++)
         {
             value = source->rows[row][col];
-            if('C' == value)
+            if(('C' == value) || ('+' == value))
             {
                 start_cell = map_cell_index(row, col);
                 car_count++;
             }
             else if(('#' != value) && ('.' != value) && ('B' != value) &&
-                    ('T' != value) && ('X' != value))
+                    ('T' != value) && ('+' != value) && ('X' != value))
             {
                 set_message(result, "Bad map char");
                 return 0;
@@ -764,11 +779,15 @@ uint8 solve_navigation_path(const map_source_struct *source,
         if((dir >= 4u) ||
            (0 == step_cell(current_cell, dr[dir], dc[dir], &next_cell)) ||
            (0 == result_append_action(result, action)) ||
-           (0 == result_append_waypoint(result, next_cell, action, 0u)))
+           (0 == result_append_waypoint(
+               result, next_cell, action,
+               ((0u < path_index) &&
+                (0 != action_changes_direction(previous_action, action))) ? 1u : 0u)))
         {
             set_message(result, "Navigation output failed");
             return 0;
         }
+        previous_action = action;
         current_cell = next_cell;
     }
 

@@ -219,6 +219,11 @@ static void parse_source(const map_source_struct *source, char grid[MAP_ROWS][MA
             {
                 *car = map_cell_index(row, col);
             }
+            else if('+' == value)
+            {
+                *car = map_cell_index(row, col);
+                add_cell(targets, target_count, row, col);
+            }
             else if('B' == value)
             {
                 add_cell(boxes, box_count, row, col);
@@ -736,6 +741,8 @@ static const char *executor_error_text(executor_error_enum error)
         case EXEC_ERROR_ART_SYNC:   return "E:SYN";
         case EXEC_ERROR_ART_PLAN:   return "E:PLN";
         case EXEC_ERROR_ART_CENTER: return "E:Ctr";
+        case EXEC_ERROR_SUBJECT2_CLASS:return "E:S2C";
+        case EXEC_ERROR_SUBJECT2_YAW:return "E:Yaw";
         case EXEC_ERROR_NONE:       return "E:OK";
         default:                    return "E:?";
     }
@@ -1005,6 +1012,14 @@ void screen_draw_execute(const screen_execute_view_struct *view)
         }
         ips200_show_string(80, LINE_H * 5, "N:");
         ips200_show_uint(96, LINE_H * 5, view->art_player_count, 2);
+    }
+    clear_text_area(128, LINE_H * 5, 6);
+    if(0 != view->recognition_valid)
+    {
+        ips200_show_string(128, LINE_H * 5, "R:");
+        ips200_show_char(144, LINE_H * 5,
+                         (0 != view->recognition_is_target) ? 'T' : 'B');
+        ips200_show_uint(152, LINE_H * 5, view->recognition_class, 1);
     }
 
     if(0 != view->art_launch_pending)

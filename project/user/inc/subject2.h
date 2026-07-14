@@ -11,14 +11,23 @@ typedef enum
     SUBJECT2_SCAN_BOX_MODE,
     SUBJECT2_SCAN_BOX_PLAN,
     SUBJECT2_SCAN_BOX_MOVE,
+    SUBJECT2_SCAN_BOX_TURN,
     SUBJECT2_SCAN_BOX_CENTER,
+    SUBJECT2_SCAN_BOX_ADJUST,
     SUBJECT2_SCAN_BOX_CLASSIFY,
+    SUBJECT2_SCAN_BOX_BACKOFF,
+    SUBJECT2_SCAN_BOX_BACKOFF_RETURN,
     SUBJECT2_SCAN_TARGET_MODE,
     SUBJECT2_SCAN_TARGET_PLAN,
     SUBJECT2_SCAN_TARGET_MOVE,
+    SUBJECT2_SCAN_TARGET_TURN,
     SUBJECT2_SCAN_TARGET_CENTER,
+    SUBJECT2_SCAN_TARGET_ADJUST,
     SUBJECT2_SCAN_TARGET_CLASSIFY,
+    SUBJECT2_SCAN_TARGET_BACKOFF,
+    SUBJECT2_SCAN_TARGET_BACKOFF_RETURN,
     SUBJECT2_VALIDATE_BINDINGS,
+    SUBJECT2_RESTORE_HEADING,
     SUBJECT2_SELECT_PUSH,
     SUBJECT2_EXECUTE_PUSH,
     SUBJECT2_PRE_PUSH_CENTER,
@@ -39,6 +48,7 @@ typedef struct
     uint8 *start_row;
     uint8 *start_col;
     run_mode_enum run_mode;
+    float launch_yaw_deg;
 } subject2_context_struct;
 
 typedef struct
@@ -60,5 +70,6 @@ void subject2_tick(const subject2_context_struct *context,
 void subject2_cancel(void);
 subject2_state_enum subject2_get_state(void);
 uint8 subject2_get_active_class(void);
+uint8 subject2_get_last_recognition(uint8 *is_target, uint8 *class_id);
 
 #endif
