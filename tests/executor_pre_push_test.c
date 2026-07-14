@@ -72,6 +72,7 @@ void stop_motion(void)
 static void reset_fixture(void)
 {
     executor_stop();
+    executor_reset_art_player_center_samples();
     memset(&test_pose, 0, sizeof(test_pose));
     motion_call_count = 0;
     last_motion_vx = 0.0f;
@@ -369,6 +370,59 @@ static uint8 art_center_uses_configured_fusion(void)
             (fabsf(test_pose.y_cm) < 0.01f)) ? 1u : 0u;
 }
 
+static uint8 art_center_uses_axis_deadband(void)
+{
+    waypoint_struct waypoint = {5u, 6u, 'r', 0u, 1u, 0u, 0u};
+    uint8 sample;
+
+    reset_fixture();
+    executor_start(&waypoint, 1u, 5u, 5u, 0.0f, 0.0f, 0u, 1u);
+    for(sample = 1u; sample <= ART_CENTER_SAMPLE_COUNT; sample++)
+    {
+        (void)executor_apply_art_player_center(552u, 548u, sample);
+    }
+
+    return ((EXEC_ART_CENTER_IGNORED ==
+             executor_commit_art_player_center(5u, 5u)) &&
+            (fabsf(test_pose.x_cm) < 0.01f) &&
+            (fabsf(test_pose.y_cm) < 0.01f)) ? 1u : 0u;
+}
+
+static uint8 art_center_accepts_offset_below_abnormal_limit(void)
+{
+    waypoint_struct waypoint = {5u, 6u, 'r', 0u, 1u, 0u, 0u};
+    uint8 sample;
+
+    reset_fixture();
+    executor_start(&waypoint, 1u, 5u, 5u, 0.0f, 0.0f, 0u, 1u);
+    for(sample = 1u; sample <= ART_CENTER_SAMPLE_COUNT; sample++)
+    {
+        (void)executor_apply_art_player_center(675u, 550u, sample);
+    }
+
+    return ((EXEC_ART_CENTER_APPLIED ==
+             executor_commit_art_player_center(5u, 5u)) &&
+            (fabsf(test_pose.x_cm -
+                   (25.0f * EXEC_ART_CENTER_FUSE_ALPHA)) < 0.01f)) ? 1u : 0u;
+}
+
+static uint8 art_center_rejects_axis_above_abnormal_limit(void)
+{
+    waypoint_struct waypoint = {5u, 6u, 'r', 0u, 1u, 0u, 0u};
+    uint8 sample;
+
+    reset_fixture();
+    executor_start(&waypoint, 1u, 5u, 5u, -31.0f, 0.0f, 0u, 1u);
+    for(sample = 1u; sample <= ART_CENTER_SAMPLE_COUNT; sample++)
+    {
+        (void)executor_apply_art_player_center(550u, 550u, sample);
+    }
+
+    return ((EXEC_ART_CENTER_ABNORMAL ==
+             executor_commit_art_player_center(5u, 5u)) &&
+            (fabsf(test_pose.x_cm + 31.0f) < 0.01f)) ? 1u : 0u;
+}
+
 static uint8 art_center_samples_can_be_reset(void)
 {
     waypoint_struct waypoint = {5u, 6u, 'r', 0u, 1u, 0u, 0u};
@@ -380,6 +434,30 @@ static uint8 art_center_samples_can_be_reset(void)
     executor_reset_art_player_center_samples();
 
     return (0u == executor_apply_art_player_center(572u, 550u, 3u)) ? 1u : 0u;
+}
+
+static uint8 art_center_median_read_does_not_consume_commit(void)
+{
+    waypoint_struct waypoint = {5u, 6u, 'r', 0u, 1u, 0u, 0u};
+    uint16 col_q = 0u;
+    uint16 row_q = 0u;
+    executor_art_center_result_enum result;
+
+    reset_fixture();
+    executor_start(&waypoint, 1u, 5u, 5u, 0.0f, 0.0f, 0u, 1u);
+    (void)executor_apply_art_player_center(568u, 550u, 1u);
+    (void)executor_apply_art_player_center(570u, 550u, 2u);
+    (void)executor_apply_art_player_center(572u, 550u, 3u);
+    (void)executor_apply_art_player_center(570u, 550u, 4u);
+    (void)executor_apply_art_player_center(570u, 550u, 5u);
+
+    if((0u == executor_get_art_player_center_median(&col_q, &row_q)) ||
+       (570u != col_q) || (550u != row_q))
+    {
+        return 0u;
+    }
+    result = executor_commit_art_player_center(5u, 5u);
+    return (EXEC_ART_CENTER_APPLIED == result) ? 1u : 0u;
 }
 
 static uint8 collect_box_observation(uint16 car_col_q, uint16 car_row_q,
@@ -580,6 +658,22 @@ static uint8 box_center_crossing_cell_boundary_is_accepted(void)
     executor_start(&waypoint, 1u, 5u, 5u, 0.0f, 0.0f, 0u, 1u);
     executor_update_20ms();
     if(0u == collect_box_observation(550u, 550u, 705u, 550u))
+    {
+        return 0u;
+    }
+
+    return (EXEC_ART_BOX_PREP_STARTED ==
+            executor_start_pre_push_box_preparation()) ? 1u : 0u;
+}
+
+static uint8 same_cell_diagonal_car_offset_is_accepted(void)
+{
+    waypoint_struct waypoint = {5u, 6u, 'R', 0u, 1u, 1u, 1u};
+
+    reset_fixture();
+    executor_start(&waypoint, 1u, 5u, 5u, -9.0f, -9.0f, 0u, 1u);
+    executor_update_20ms();
+    if(0u == collect_box_observation(590u, 510u, 650u, 550u))
     {
         return 0u;
     }
@@ -882,7 +976,11 @@ int main(void)
     passed &= run_case("lowercase-offline-skip", lowercase_and_offline_push_do_not_wait());
     passed &= run_case("center-error-stops", center_error_stops_on_same_waypoint());
     passed &= run_case("art-fusion-configured", art_center_uses_configured_fusion());
+    passed &= run_case("art-axis-deadband", art_center_uses_axis_deadband());
+    passed &= run_case("art-offset-under-30", art_center_accepts_offset_below_abnormal_limit());
+    passed &= run_case("art-offset-over-30", art_center_rejects_axis_above_abnormal_limit());
     passed &= run_case("art-samples-reset", art_center_samples_can_be_reset());
+    passed &= run_case("art-median-read", art_center_median_read_does_not_consume_commit());
     passed &= run_case("box-request-next-waypoint", final_approach_requests_next_box());
     passed &= run_case("box-prefetch-previous", previous_waypoint_prefetches_next_box());
     passed &= run_case("box-retry-nudge", retry_nudge_moves_away_in_all_directions());
@@ -891,6 +989,7 @@ int main(void)
     passed &= run_case("box-wrong-side-rejected", wrong_side_box_is_rejected());
     passed &= run_case("box-adjacent-cell-rejected", adjacent_box_cell_is_rejected());
     passed &= run_case("box-boundary-offset", box_center_crossing_cell_boundary_is_accepted());
+    passed &= run_case("box-same-cell-diagonal", same_cell_diagonal_car_offset_is_accepted());
     passed &= run_case("box-all-directions", box_preparation_targets_all_directions());
     passed &= run_case("box-step-pauses", step_box_preparation_pauses_before_push());
     passed &= run_case("run-push-chain-continuous", run_push_chain_switches_without_stop());

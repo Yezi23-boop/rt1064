@@ -48,7 +48,7 @@
 /** 平移/路径执行时姿态保持允许叠加的最大旋转修正，避免横移被 yaw 环抢占。 */
 #define YAW_TRANSLATION_MAX_VZ (0.3f)
 /** 离散原地转向每次命令对应的最大目标角步进，单位为 degree。 */
-#define TURN_STEP_DEG (10.0f)
+#define TURN_STEP_DEG (5.0f)
 
 /** IMU 原始 yaw 到底盘控制 yaw 的方向符号。
  * 当前板测为顺时针 raw yaw 增大，因此取 -1，使控制层保持逆时针为正。
@@ -166,11 +166,9 @@
 #define EXEC_ART_CENTER_CORRECT_ENABLE (0)
 /** ART 中心点小于该偏差不修正，单位 cm，避免原地小抖动反复写 pose。 */
 #define EXEC_ART_CENTER_IGNORE_CM (0.5f)
-/** ART 中心点允许直接融合的最大偏差，单位 cm；当前允许最多一个 20cm 格子。 */
-#define EXEC_ART_CENTER_FUSE_MAX_CM (20.0f)
-/** ART 中心点超过一个 20cm 格子认为异常。 */
-#define EXEC_ART_CENTER_ABNORMAL_CM (20.0f)
-/** ART 中心点融合比例；0.90 表示本地 pose 保留 10%，ART 观测占 90%。 */
+/** ART 中心点任一轴超过该距离认为异常，单位 cm。 */
+#define EXEC_ART_CENTER_ABNORMAL_CM (30.0f)
+/** ART 中心点融合比例；1.00 表示直接采用 ART 观测。 */
 #define EXEC_ART_CENTER_FUSE_ALPHA (1.00f)
 /** ART 中心格匹配范围；1=接受当前 C 格及八邻域，0=只接受当前 C 格。 */
 #define EXEC_ART_CENTER_ALLOW_NEIGHBOR_CELL (1)

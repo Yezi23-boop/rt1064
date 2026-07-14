@@ -743,6 +743,7 @@ static const char *executor_error_text(executor_error_enum error)
         case EXEC_ERROR_ART_CENTER: return "E:Ctr";
         case EXEC_ERROR_SUBJECT2_CLASS:return "E:S2C";
         case EXEC_ERROR_SUBJECT2_YAW:return "E:Yaw";
+        case EXEC_ERROR_SUBJECT2_TRACK:return "E:Trk";
         case EXEC_ERROR_NONE:       return "E:OK";
         default:                    return "E:?";
     }

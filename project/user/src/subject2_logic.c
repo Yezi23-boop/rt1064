@@ -511,24 +511,6 @@ static int8 object_index_for_class(const subject2_object_struct *objects,
     return -1;
 }
 
-static int8 binding_class_for_box_cell(
-    const subject2_binding_struct bindings[SUBJECT2_CLASS_COUNT],
-    uint16 cell)
-{
-    uint8 class_id;
-
-    for(class_id = 0u; class_id < SUBJECT2_CLASS_COUNT; class_id++)
-    {
-        if((0u != bindings[class_id].box_valid) &&
-           (0u == bindings[class_id].completed) &&
-           (cell == bindings[class_id].box_cell))
-        {
-            return (int8)class_id;
-        }
-    }
-    return -1;
-}
-
 subject2_sync_result_enum subject2_reconcile_objects(
     const map_source_struct *source,
     subject2_object_struct box_objects[MAX_BOXES],
@@ -546,6 +528,7 @@ subject2_sync_result_enum subject2_reconcile_objects(
     uint16 new_boxes[MAX_BOXES];
     uint16 new_targets[MAX_BOXES];
     uint16 remaining_old_boxes[MAX_BOXES];
+    uint8 remaining_old_classes[MAX_BOXES];
     uint8 old_box_matched[MAX_BOXES] = {0};
     uint8 new_box_matched[MAX_BOXES] = {0};
     uint8 new_box_count = 0u;
@@ -563,10 +546,10 @@ subject2_sync_result_enum subject2_reconcile_objects(
     uint8 class_id;
     uint8 index;
     int8 old_index;
-    int8 bound_class;
     subject2_sync_update_struct next_update;
     subject2_sync_result_enum result = SUBJECT2_SYNC_OK;
 
+    (void)active_class;
     if(0 != update)
     {
         memset(update, 0, sizeof(*update));
@@ -609,11 +592,6 @@ subject2_sync_result_enum subject2_reconcile_objects(
         {
             continue;
         }
-        if(0u != cell_in_list(next_bindings[class_id].box_cell,
-                             new_boxes, new_box_count))
-        {
-            return SUBJECT2_SYNC_AMBIGUOUS;
-        }
         next_bindings[class_id].completed = 1u;
         next_update.completed_count++;
     }
@@ -629,56 +607,98 @@ subject2_sync_result_enum subject2_reconcile_objects(
                 {
                     return SUBJECT2_SYNC_AMBIGUOUS;
                 }
-                remaining_old_boxes[remaining_old_count++] =
+                remaining_old_boxes[remaining_old_count] =
                     next_bindings[class_id].box_cell;
+                remaining_old_classes[remaining_old_count] = class_id;
+                remaining_old_count++;
             }
         }
         if(remaining_old_count != new_box_count)
         {
             return SUBJECT2_SYNC_AMBIGUOUS;
         }
-        if((active_class < SUBJECT2_CLASS_COUNT) &&
-           (0u != next_bindings[active_class].box_valid) &&
-           (0u == next_bindings[active_class].completed))
-        {
-            if(SUBJECT2_TRACK_AMBIGUOUS == subject2_track_active_box(
-                    next_bindings, active_class,
-                    remaining_old_boxes, remaining_old_count,
-                    new_boxes, new_box_count))
-            {
-                return SUBJECT2_SYNC_AMBIGUOUS;
-            }
-        }
-        else
-        {
-            for(index = 0u; index < remaining_old_count; index++)
-            {
-                if(0u == cell_in_list(remaining_old_boxes[index],
-                                     new_boxes, new_box_count))
-                {
-                    return SUBJECT2_SYNC_AMBIGUOUS;
-                }
-            }
-        }
 
-        for(index = 0u; index < new_box_count; index++)
+        for(index = 0u; index < remaining_old_count; index++)
         {
-            bound_class = binding_class_for_box_cell(next_bindings,
-                                                     new_boxes[index]);
-            if(bound_class < 0)
-            {
-                return SUBJECT2_SYNC_AMBIGUOUS;
-            }
+            uint8 new_index;
+
             old_index = object_index_for_class(box_objects, *box_count,
-                                               (uint8)bound_class);
+                                               remaining_old_classes[index]);
             if(old_index < 0)
             {
                 return SUBJECT2_SYNC_AMBIGUOUS;
             }
-            next_boxes[next_box_count] = box_objects[(uint8)old_index];
-            next_boxes[next_box_count].cell = new_boxes[index];
-            next_box_count++;
+            for(new_index = 0u; new_index < new_box_count; new_index++)
+            {
+                if((0u == new_box_matched[new_index]) &&
+                   (remaining_old_boxes[index] == new_boxes[new_index]))
+                {
+                    next_boxes[new_index] = box_objects[(uint8)old_index];
+                    next_boxes[new_index].cell = new_boxes[new_index];
+                    old_box_matched[index] = 1u;
+                    new_box_matched[new_index] = 1u;
+                    break;
+                }
+            }
         }
+
+        for(index = 0u; index < remaining_old_count; index++)
+        {
+            if(0u == old_box_matched[index])
+            {
+                unmatched_old_count++;
+                unmatched_old_index = index;
+            }
+        }
+        for(index = 0u; index < new_box_count; index++)
+        {
+            if(0u == new_box_matched[index])
+            {
+                unmatched_new_count++;
+                unmatched_new_index = index;
+            }
+        }
+        if(unmatched_old_count != unmatched_new_count)
+        {
+            return SUBJECT2_SYNC_AMBIGUOUS;
+        }
+        if(1u == unmatched_old_count)
+        {
+            class_id = remaining_old_classes[unmatched_old_index];
+            old_index = object_index_for_class(box_objects, *box_count, class_id);
+            if(old_index < 0)
+            {
+                return SUBJECT2_SYNC_AMBIGUOUS;
+            }
+            next_boxes[unmatched_new_index] = box_objects[(uint8)old_index];
+            next_boxes[unmatched_new_index].cell = new_boxes[unmatched_new_index];
+            next_bindings[class_id].box_cell = new_boxes[unmatched_new_index];
+        }
+        else if(unmatched_old_count > 1u)
+        {
+            for(index = 0u; index < remaining_old_count; index++)
+            {
+                if(0u == old_box_matched[index])
+                {
+                    class_id = remaining_old_classes[index];
+                    next_bindings[class_id].box_valid = 0u;
+                    next_bindings[class_id].box_cell = INVALID_STATE;
+                }
+            }
+            for(index = 0u; index < new_box_count; index++)
+            {
+                if(0u == new_box_matched[index])
+                {
+                    next_boxes[index].cell = new_boxes[index];
+                    next_boxes[index].class_id = SUBJECT2_INVALID_CLASS;
+                    next_boxes[index].recognized = 0u;
+                    next_boxes[index].tried_observation_mask = 0u;
+                }
+            }
+            next_update.need_box_scan = 1u;
+            result = SUBJECT2_SYNC_RESCAN;
+        }
+        next_box_count = new_box_count;
     }
     else
     {
@@ -688,6 +708,12 @@ subject2_sync_result_enum subject2_reconcile_objects(
                                               new_boxes[index]);
             if(old_index >= 0)
             {
+                if((0u != box_objects[(uint8)old_index].recognized) &&
+                   (box_objects[(uint8)old_index].class_id < SUBJECT2_CLASS_COUNT) &&
+                   (0u != next_bindings[box_objects[(uint8)old_index].class_id].completed))
+                {
+                    continue;
+                }
                 next_boxes[index] = box_objects[(uint8)old_index];
                 old_box_matched[(uint8)old_index] = 1u;
                 new_box_matched[index] = 1u;

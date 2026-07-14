@@ -407,11 +407,12 @@ static uint8 pre_push_box_prefetch_freshness(void)
             (0 == strcmp(update.run_state, "BCtr"))) ? 1u : 0u;
 }
 
-static uint8 pre_push_box_failures_stop(void)
+static uint8 pre_push_box_failures_follow_policy(void)
 {
     art_replan_context_struct context;
     art_replan_update_struct update;
     uint16 errors_before;
+    uint16 continues_before;
 
     init_pre_push_box_test(&context);
     errors_before = executor_error_count;
@@ -433,12 +434,14 @@ static uint8 pre_push_box_failures_stop(void)
 
     init_pre_push_box_test(&context);
     errors_before = executor_error_count;
+    continues_before = continue_pre_push_count;
     fake_pre_push_box_result = EXEC_ART_BOX_PREP_GEOMETRY_ERROR;
     art_replan_tick(&context, 1u, &update);
     feed_observation(450u, 550u, 550u, 550u);
     art_replan_tick(&context, 1u, &update);
-    if((errors_before + 1u != executor_error_count) ||
-       (0 != strcmp(update.run_state, "E:BGeo"))) return 0u;
+    if((errors_before != executor_error_count) ||
+       (continues_before + 1u != continue_pre_push_count) ||
+       (0 != strcmp(update.run_state, "Running"))) return 0u;
 
     init_pre_push_box_test(&context);
     errors_before = executor_error_count;
@@ -808,7 +811,7 @@ int main(void)
     printf("pre-push-box-observation      %s\n", (0 != passed) ? "PASS" : "FAIL");
     passed &= pre_push_box_prefetch_freshness();
     printf("pre-push-box-prefetch         %s\n", (0 != passed) ? "PASS" : "FAIL");
-    passed &= pre_push_box_failures_stop();
+    passed &= pre_push_box_failures_follow_policy();
     printf("pre-push-box-failures         %s\n", (0 != passed) ? "PASS" : "FAIL");
     return (0 != passed) ? 0 : 1;
 }

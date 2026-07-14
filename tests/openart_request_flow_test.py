@@ -176,7 +176,8 @@ assert "art_box_observation_collect" in pre_push_box_body
 assert "openart_get_observation_sample" in ART_REPLAN_SOURCE
 assert "executor_start_pre_push_box_preparation" in pre_push_box_body
 assert '"E:BObs"' in pre_push_box_body
-assert '"E:BGeo"' in pre_push_box_body
+assert '"E:BGeo"' not in pre_push_box_body
+assert "executor_continue_after_pre_push_center()" in pre_push_box_body
 assert '"E:BTim"' in pre_push_box_body
 assert "ART_REPLAN_INITIAL_CENTER" in ART_REPLAN_SOURCE
 assert "ART_REPLAN_SEGMENT_CENTER" in ART_REPLAN_SOURCE

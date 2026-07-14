@@ -222,13 +222,16 @@ void executor_set_error(executor_error_enum error);
  * @param[in] center_col_q OpenART 视觉中心列坐标，单位 1/100 格。
  * @param[in] center_row_q OpenART 视觉中心行坐标，单位 1/100 格。
  * @param[in] sample_count OpenART 中心点样本序号，用于过滤重复读取。
- * @return 1 表示已经收满 3 个有效样本并得到中值；0 表示样本不足或重复。
+ * @return 1 表示已经收满配置数量的有效样本并得到中值；0 表示样本不足或重复。
  * @note 这里只缓存中值，不立刻重置 pose；段末或 waypoint 前流程随后决定是否提交。
  */
 uint8 executor_apply_art_player_center(uint16 center_col_q, uint16 center_row_q, uint32 sample_count);
 
 /** 清空尚未提交的 ART 中心样本，开始一次独立的多帧请求。 */
 void executor_reset_art_player_center_samples(void);
+
+/** @brief 读取已收满样本的 ART 中心中值，不消费待提交状态。 */
+uint8 executor_get_art_player_center_median(uint16 *col_q, uint16 *row_q);
 
 /**
  * @brief 把已缓存的 ART 视觉中心中值应用到当前 executor 局部位姿。

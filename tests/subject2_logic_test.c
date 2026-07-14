@@ -542,7 +542,7 @@ static uint8 ambiguous_sync_does_not_publish_partial_update(void)
 
     init_map(&new_map, 5u, 5u);
     new_map.rows[6][5] = 'B';
-    new_map.rows[8][6] = 'T';
+    new_map.rows[8][7] = 'T';
     memset(&update, 0xA5, sizeof(update));
     if(SUBJECT2_SYNC_AMBIGUOUS != subject2_reconcile_objects(
             &new_map.source, boxes, &box_count, targets, &target_count,
@@ -553,6 +553,162 @@ static uint8 ambiguous_sync_does_not_publish_partial_update(void)
     return ((0u == update.need_box_scan) &&
             (0u == update.need_target_scan) &&
             (0u == update.completed_count)) ? 1u : 0u;
+}
+
+static uint8 completed_task_accepts_unique_remaining_box_move(void)
+{
+    test_map_struct old_map;
+    test_map_struct new_map;
+    subject2_object_struct boxes[MAX_BOXES];
+    subject2_object_struct targets[MAX_BOXES];
+    subject2_binding_struct bindings[SUBJECT2_CLASS_COUNT];
+    subject2_sync_update_struct update;
+    uint16 moved_cell = map_cell_index(4u, 4u);
+    uint8 box_count = 0u;
+    uint8 target_count = 0u;
+
+    init_map(&old_map, 5u, 5u);
+    old_map.rows[4][4] = 'B';
+    old_map.rows[6][6] = 'B';
+    old_map.rows[8][4] = 'T';
+    old_map.rows[8][6] = 'T';
+    subject2_collect_objects(&old_map.source, 'B', boxes, &box_count);
+    subject2_collect_objects(&old_map.source, 'T', targets, &target_count);
+    recognize_object(&boxes[0], 1u);
+    recognize_object(&boxes[1], 2u);
+    recognize_object(&targets[0], 1u);
+    recognize_object(&targets[1], 2u);
+    subject2_bindings_clear(bindings);
+    subject2_bind_box(bindings, 1u, boxes[0].cell);
+    subject2_bind_box(bindings, 2u, boxes[1].cell);
+    subject2_bind_target(bindings, 1u, targets[0].cell);
+    subject2_bind_target(bindings, 2u, targets[1].cell);
+
+    init_map(&new_map, 5u, 5u);
+    new_map.rows[4][4] = 'B';
+    new_map.rows[8][6] = 'T';
+    if(SUBJECT2_SYNC_OK != subject2_reconcile_objects(
+            &new_map.source, boxes, &box_count, targets, &target_count,
+            bindings, 1u, 1u, &update))
+    {
+        return 0u;
+    }
+    return ((1u == box_count) && (1u == target_count) &&
+            (1u == bindings[1].completed) &&
+            (1u == bindings[2].box_valid) &&
+            (moved_cell == bindings[2].box_cell) &&
+            (1u == boxes[0].recognized) &&
+            (2u == boxes[0].class_id) &&
+            (moved_cell == boxes[0].cell) &&
+            (0u == update.need_box_scan)) ? 1u : 0u;
+}
+
+static uint8 completed_task_rescans_ambiguous_remaining_boxes(void)
+{
+    test_map_struct old_map;
+    test_map_struct new_map;
+    subject2_object_struct boxes[MAX_BOXES];
+    subject2_object_struct targets[MAX_BOXES];
+    subject2_binding_struct bindings[SUBJECT2_CLASS_COUNT];
+    subject2_sync_update_struct update;
+    uint8 box_count = 0u;
+    uint8 target_count = 0u;
+
+    init_map(&old_map, 5u, 5u);
+    old_map.rows[4][4] = 'B';
+    old_map.rows[6][4] = 'B';
+    old_map.rows[6][8] = 'B';
+    old_map.rows[8][4] = 'T';
+    old_map.rows[8][6] = 'T';
+    old_map.rows[8][8] = 'T';
+    subject2_collect_objects(&old_map.source, 'B', boxes, &box_count);
+    subject2_collect_objects(&old_map.source, 'T', targets, &target_count);
+    recognize_object(&boxes[0], 1u);
+    recognize_object(&boxes[1], 2u);
+    recognize_object(&boxes[2], 3u);
+    recognize_object(&targets[0], 1u);
+    recognize_object(&targets[1], 2u);
+    recognize_object(&targets[2], 3u);
+    subject2_bindings_clear(bindings);
+    subject2_bind_box(bindings, 1u, boxes[0].cell);
+    subject2_bind_box(bindings, 2u, boxes[1].cell);
+    subject2_bind_box(bindings, 3u, boxes[2].cell);
+    subject2_bind_target(bindings, 1u, targets[0].cell);
+    subject2_bind_target(bindings, 2u, targets[1].cell);
+    subject2_bind_target(bindings, 3u, targets[2].cell);
+
+    init_map(&new_map, 5u, 5u);
+    new_map.rows[5][3] = 'B';
+    new_map.rows[5][9] = 'B';
+    new_map.rows[8][6] = 'T';
+    new_map.rows[8][8] = 'T';
+    if(SUBJECT2_SYNC_RESCAN != subject2_reconcile_objects(
+            &new_map.source, boxes, &box_count, targets, &target_count,
+            bindings, 1u, 1u, &update))
+    {
+        return 0u;
+    }
+    return ((2u == box_count) && (2u == target_count) &&
+            (1u == bindings[1].completed) &&
+            (0u == bindings[2].box_valid) &&
+            (0u == bindings[3].box_valid) &&
+            (1u == bindings[2].target_valid) &&
+            (1u == bindings[3].target_valid) &&
+            (0u == boxes[0].recognized) &&
+            (0u == boxes[1].recognized) &&
+            (1u == update.need_box_scan)) ? 1u : 0u;
+}
+
+static uint8 nonstrict_rescan_does_not_reuse_completed_box_identity(void)
+{
+    test_map_struct old_map;
+    test_map_struct new_map;
+    subject2_object_struct boxes[MAX_BOXES];
+    subject2_object_struct targets[MAX_BOXES];
+    subject2_binding_struct bindings[SUBJECT2_CLASS_COUNT];
+    subject2_sync_update_struct update;
+    uint8 box_count = 0u;
+    uint8 target_count = 0u;
+
+    init_map(&old_map, 5u, 5u);
+    old_map.rows[4][4] = 'B';
+    old_map.rows[6][4] = 'B';
+    old_map.rows[6][8] = 'B';
+    old_map.rows[8][4] = 'T';
+    old_map.rows[8][6] = 'T';
+    old_map.rows[8][8] = 'T';
+    subject2_collect_objects(&old_map.source, 'B', boxes, &box_count);
+    subject2_collect_objects(&old_map.source, 'T', targets, &target_count);
+    recognize_object(&boxes[0], 1u);
+    recognize_object(&boxes[1], 2u);
+    recognize_object(&boxes[2], 3u);
+    recognize_object(&targets[0], 1u);
+    recognize_object(&targets[1], 2u);
+    recognize_object(&targets[2], 3u);
+    subject2_bindings_clear(bindings);
+    subject2_bind_box(bindings, 1u, boxes[0].cell);
+    subject2_bind_box(bindings, 2u, boxes[1].cell);
+    subject2_bind_box(bindings, 3u, boxes[2].cell);
+    subject2_bind_target(bindings, 1u, targets[0].cell);
+    subject2_bind_target(bindings, 2u, targets[1].cell);
+    subject2_bind_target(bindings, 3u, targets[2].cell);
+
+    init_map(&new_map, 5u, 5u);
+    new_map.rows[4][4] = 'B';
+    new_map.rows[5][9] = 'B';
+    new_map.rows[8][6] = 'T';
+    new_map.rows[8][8] = 'T';
+    if(SUBJECT2_SYNC_RESCAN != subject2_reconcile_objects(
+            &new_map.source, boxes, &box_count, targets, &target_count,
+            bindings, 0u, 1u, &update))
+    {
+        return 0u;
+    }
+    return ((2u == box_count) && (2u == target_count) &&
+            (1u == bindings[1].completed) &&
+            (0u == boxes[0].recognized) &&
+            (0u == boxes[1].recognized) &&
+            (1u == update.need_box_scan)) ? 1u : 0u;
 }
 
 int main(void)
@@ -575,6 +731,9 @@ int main(void)
     passed &= run_case("sync-ambiguous-moves", reconcile_ambiguous_moves_only_invalidates_boxes());
     passed &= run_case("sync-multi-complete", reconcile_multiple_completions_preserves_bindings());
     passed &= run_case("sync-ambiguous-update", ambiguous_sync_does_not_publish_partial_update());
+    passed &= run_case("sync-complete-unique-move", completed_task_accepts_unique_remaining_box_move());
+    passed &= run_case("sync-complete-rescan", completed_task_rescans_ambiguous_remaining_boxes());
+    passed &= run_case("sync-complete-rescan-nonstrict", nonstrict_rescan_does_not_reuse_completed_box_identity());
 
     return (0u != passed) ? 0 : 1;
 }

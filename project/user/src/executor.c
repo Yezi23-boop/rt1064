@@ -720,6 +720,21 @@ void executor_reset_art_player_center_samples(void)
     interrupt_global_enable(primask);
 }
 
+uint8 executor_get_art_player_center_median(uint16 *col_q, uint16 *row_q)
+{
+    uint8 valid;
+    uint32 primask = interrupt_global_disable();
+
+    valid = art_player_center_median_valid;
+    if((0u != valid) && (0 != col_q) && (0 != row_q))
+    {
+        *col_q = art_player_center_median_col_q;
+        *row_q = art_player_center_median_row_q;
+    }
+    interrupt_global_enable(primask);
+    return valid;
+}
+
 static executor_art_center_result_enum executor_commit_art_center_values(
     uint16 center_col_q, uint16 center_row_q,
     uint8 current_car_row, uint8 current_car_col)
@@ -751,22 +766,18 @@ static executor_art_center_result_enum executor_commit_art_center_values(
         float dy = corrected_y_cm - pose->y_cm;
         float diff_cm = sqrt_distance_cm(dx, dy);
 
-        if(diff_cm < EXEC_ART_CENTER_IGNORE_CM)
+        if((abs_float(dx) < EXEC_ART_CENTER_IGNORE_CM) &&
+           (abs_float(dy) < EXEC_ART_CENTER_IGNORE_CM))
         {
             set_art_center_debug(EXEC_ART_CENTER_IGNORED, dx, dy, diff_cm);
             return EXEC_ART_CENTER_IGNORED;
         }
 
-        if(diff_cm > EXEC_ART_CENTER_ABNORMAL_CM)
+        if((abs_float(dx) > EXEC_ART_CENTER_ABNORMAL_CM) ||
+           (abs_float(dy) > EXEC_ART_CENTER_ABNORMAL_CM))
         {
             set_art_center_debug(EXEC_ART_CENTER_ABNORMAL, dx, dy, diff_cm);
             return EXEC_ART_CENTER_ABNORMAL;
-        }
-
-        if(diff_cm > EXEC_ART_CENTER_FUSE_MAX_CM)
-        {
-            set_art_center_debug(EXEC_ART_CENTER_REJECTED, dx, dy, diff_cm);
-            return EXEC_ART_CENTER_REJECTED;
         }
 
         corrected_x_cm = pose->x_cm + (dx * EXEC_ART_CENTER_FUSE_ALPHA);

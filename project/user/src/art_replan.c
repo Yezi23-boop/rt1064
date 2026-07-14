@@ -717,7 +717,17 @@ static void art_replan_tick_pre_push_box(art_replan_update_struct *update)
     prep_result = executor_start_pre_push_box_preparation();
     if(EXEC_ART_BOX_PREP_STARTED != prep_result)
     {
-        art_replan_fail_pre_push_box("E:BGeo", update);
+        if(0 == executor_continue_after_pre_push_center())
+        {
+            art_replan_fail_pre_push_center(update);
+            return;
+        }
+        art_replan_cancel();
+        if(0 != update)
+        {
+            update->run_state = executor_state_name();
+            update->redraw = 1u;
+        }
         return;
     }
 
