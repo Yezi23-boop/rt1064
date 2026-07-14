@@ -564,8 +564,13 @@ subject2_sync_result_enum subject2_reconcile_objects(
     uint8 index;
     int8 old_index;
     int8 bound_class;
+    subject2_sync_update_struct next_update;
     subject2_sync_result_enum result = SUBJECT2_SYNC_OK;
 
+    if(0 != update)
+    {
+        memset(update, 0, sizeof(*update));
+    }
     if((0 == source) || (0 == box_objects) || (0 == box_count) ||
        (0 == target_objects) || (0 == target_count) ||
        (0 == bindings) || (0 == update) ||
@@ -578,7 +583,7 @@ subject2_sync_result_enum subject2_reconcile_objects(
         return SUBJECT2_SYNC_AMBIGUOUS;
     }
 
-    memset(update, 0, sizeof(*update));
+    memset(&next_update, 0, sizeof(next_update));
     memset(next_boxes, 0, sizeof(next_boxes));
     memset(next_targets, 0, sizeof(next_targets));
     memcpy(next_bindings, bindings, sizeof(next_bindings));
@@ -610,7 +615,7 @@ subject2_sync_result_enum subject2_reconcile_objects(
             return SUBJECT2_SYNC_AMBIGUOUS;
         }
         next_bindings[class_id].completed = 1u;
-        update->completed_count++;
+        next_update.completed_count++;
     }
 
     if(0u != strict_push_tracking)
@@ -620,6 +625,10 @@ subject2_sync_result_enum subject2_reconcile_objects(
             if((0u != next_bindings[class_id].box_valid) &&
                (0u == next_bindings[class_id].completed))
             {
+                if(remaining_old_count >= MAX_BOXES)
+                {
+                    return SUBJECT2_SYNC_AMBIGUOUS;
+                }
                 remaining_old_boxes[remaining_old_count++] =
                     next_bindings[class_id].box_cell;
             }
@@ -679,7 +688,7 @@ subject2_sync_result_enum subject2_reconcile_objects(
                                               new_boxes[index]);
             if(old_index >= 0)
             {
-                next_boxes[next_box_count++] = box_objects[(uint8)old_index];
+                next_boxes[index] = box_objects[(uint8)old_index];
                 old_box_matched[(uint8)old_index] = 1u;
                 new_box_matched[index] = 1u;
             }
@@ -721,16 +730,15 @@ subject2_sync_result_enum subject2_reconcile_objects(
            (1u == unmatched_new_count) &&
            (0u == unknown_removed))
         {
-            next_boxes[next_box_count] = box_objects[unmatched_old_index];
-            next_boxes[next_box_count].cell = new_boxes[unmatched_new_index];
-            if((0u != next_boxes[next_box_count].recognized) &&
-               (next_boxes[next_box_count].class_id < SUBJECT2_CLASS_COUNT) &&
-               (0u != next_bindings[next_boxes[next_box_count].class_id].box_valid))
+            next_boxes[unmatched_new_index] = box_objects[unmatched_old_index];
+            next_boxes[unmatched_new_index].cell = new_boxes[unmatched_new_index];
+            if((0u != next_boxes[unmatched_new_index].recognized) &&
+               (next_boxes[unmatched_new_index].class_id < SUBJECT2_CLASS_COUNT) &&
+               (0u != next_bindings[next_boxes[unmatched_new_index].class_id].box_valid))
             {
-                next_bindings[next_boxes[next_box_count].class_id].box_cell =
+                next_bindings[next_boxes[unmatched_new_index].class_id].box_cell =
                     new_boxes[unmatched_new_index];
             }
-            next_box_count++;
         }
         else if((0u != unmatched_old_count) || (0u != unmatched_new_count))
         {
@@ -749,23 +757,23 @@ subject2_sync_result_enum subject2_reconcile_objects(
             {
                 if(0u == new_box_matched[index])
                 {
-                    next_boxes[next_box_count].cell = new_boxes[index];
-                    next_boxes[next_box_count].class_id = SUBJECT2_INVALID_CLASS;
-                    next_boxes[next_box_count].recognized = 0u;
-                    next_boxes[next_box_count].tried_observation_mask = 0u;
-                    next_box_count++;
+                    next_boxes[index].cell = new_boxes[index];
+                    next_boxes[index].class_id = SUBJECT2_INVALID_CLASS;
+                    next_boxes[index].recognized = 0u;
+                    next_boxes[index].tried_observation_mask = 0u;
                 }
             }
-            update->need_box_scan = (0u != unmatched_new_count) ? 1u : 0u;
+            next_update.need_box_scan = (0u != unmatched_new_count) ? 1u : 0u;
             result = SUBJECT2_SYNC_RESCAN;
         }
+        next_box_count = new_box_count;
     }
 
     for(index = 0u; index < next_box_count; index++)
     {
         if(0u == next_boxes[index].recognized)
         {
-            update->need_box_scan = 1u;
+            next_update.need_box_scan = 1u;
             result = SUBJECT2_SYNC_RESCAN;
         }
     }
@@ -773,7 +781,7 @@ subject2_sync_result_enum subject2_reconcile_objects(
     {
         if(0u == next_targets[index].recognized)
         {
-            update->need_target_scan = 1u;
+            next_update.need_target_scan = 1u;
             result = SUBJECT2_SYNC_RESCAN;
         }
     }
@@ -783,5 +791,6 @@ subject2_sync_result_enum subject2_reconcile_objects(
     memcpy(bindings, next_bindings, sizeof(next_bindings));
     *box_count = next_box_count;
     *target_count = next_target_count;
+    *update = next_update;
     return result;
 }

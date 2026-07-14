@@ -379,6 +379,49 @@ static uint8 reconcile_one_box_move_preserves_identity(void)
             (0u == update.need_box_scan)) ? 1u : 0u;
 }
 
+static uint8 reconcile_box_move_keeps_map_order(void)
+{
+    test_map_struct old_map;
+    test_map_struct new_map;
+    subject2_object_struct boxes[MAX_BOXES];
+    subject2_object_struct targets[MAX_BOXES];
+    subject2_binding_struct bindings[SUBJECT2_CLASS_COUNT];
+    subject2_sync_update_struct update;
+    uint8 box_count = 0u;
+    uint8 target_count = 0u;
+
+    init_map(&old_map, 5u, 5u);
+    old_map.rows[4][4] = 'B';
+    old_map.rows[6][6] = 'B';
+    old_map.rows[8][4] = 'T';
+    old_map.rows[8][6] = 'T';
+    subject2_collect_objects(&old_map.source, 'B', boxes, &box_count);
+    subject2_collect_objects(&old_map.source, 'T', targets, &target_count);
+    recognize_object(&boxes[0], 1u);
+    recognize_object(&boxes[1], 2u);
+    recognize_object(&targets[0], 1u);
+    recognize_object(&targets[1], 2u);
+    subject2_bindings_clear(bindings);
+    subject2_bind_box(bindings, 1u, boxes[0].cell);
+    subject2_bind_box(bindings, 2u, boxes[1].cell);
+    subject2_bind_target(bindings, 1u, targets[0].cell);
+    subject2_bind_target(bindings, 2u, targets[1].cell);
+
+    init_map(&new_map, 5u, 5u);
+    new_map.rows[3][3] = 'B';
+    new_map.rows[6][6] = 'B';
+    new_map.rows[8][4] = 'T';
+    new_map.rows[8][6] = 'T';
+    if(SUBJECT2_SYNC_OK != subject2_reconcile_objects(
+            &new_map.source, boxes, &box_count, targets, &target_count,
+            bindings, 0u, SUBJECT2_INVALID_CLASS, &update))
+    {
+        return 0u;
+    }
+    return ((map_cell_index(3u, 3u) == boxes[0].cell) &&
+            (map_cell_index(6u, 6u) == boxes[1].cell)) ? 1u : 0u;
+}
+
 static uint8 reconcile_ambiguous_moves_only_invalidates_boxes(void)
 {
     test_map_struct old_map;
@@ -469,6 +512,49 @@ static uint8 reconcile_multiple_completions_preserves_bindings(void)
             (2u == update.completed_count)) ? 1u : 0u;
 }
 
+static uint8 ambiguous_sync_does_not_publish_partial_update(void)
+{
+    test_map_struct old_map;
+    test_map_struct new_map;
+    subject2_object_struct boxes[MAX_BOXES];
+    subject2_object_struct targets[MAX_BOXES];
+    subject2_binding_struct bindings[SUBJECT2_CLASS_COUNT];
+    subject2_sync_update_struct update;
+    uint8 box_count = 0u;
+    uint8 target_count = 0u;
+
+    init_map(&old_map, 5u, 5u);
+    old_map.rows[4][4] = 'B';
+    old_map.rows[6][6] = 'B';
+    old_map.rows[8][4] = 'T';
+    old_map.rows[8][6] = 'T';
+    subject2_collect_objects(&old_map.source, 'B', boxes, &box_count);
+    subject2_collect_objects(&old_map.source, 'T', targets, &target_count);
+    recognize_object(&boxes[0], 1u);
+    recognize_object(&boxes[1], 2u);
+    recognize_object(&targets[0], 1u);
+    recognize_object(&targets[1], 2u);
+    subject2_bindings_clear(bindings);
+    subject2_bind_box(bindings, 1u, boxes[0].cell);
+    subject2_bind_box(bindings, 2u, boxes[1].cell);
+    subject2_bind_target(bindings, 1u, targets[0].cell);
+    subject2_bind_target(bindings, 2u, targets[1].cell);
+
+    init_map(&new_map, 5u, 5u);
+    new_map.rows[6][5] = 'B';
+    new_map.rows[8][6] = 'T';
+    memset(&update, 0xA5, sizeof(update));
+    if(SUBJECT2_SYNC_AMBIGUOUS != subject2_reconcile_objects(
+            &new_map.source, boxes, &box_count, targets, &target_count,
+            bindings, 1u, 1u, &update))
+    {
+        return 0u;
+    }
+    return ((0u == update.need_box_scan) &&
+            (0u == update.need_target_scan) &&
+            (0u == update.completed_count)) ? 1u : 0u;
+}
+
 int main(void)
 {
     uint8 passed = 1u;
@@ -485,8 +571,10 @@ int main(void)
     passed &= run_case("center-map-neighbor", center_map_neighbor_preserves_targets());
     passed &= run_case("center-map-invalid", center_map_invalid_reference_is_rejected());
     passed &= run_case("sync-one-box-move", reconcile_one_box_move_preserves_identity());
+    passed &= run_case("sync-box-map-order", reconcile_box_move_keeps_map_order());
     passed &= run_case("sync-ambiguous-moves", reconcile_ambiguous_moves_only_invalidates_boxes());
     passed &= run_case("sync-multi-complete", reconcile_multiple_completions_preserves_bindings());
+    passed &= run_case("sync-ambiguous-update", ambiguous_sync_does_not_publish_partial_update());
 
     return (0u != passed) ? 0 : 1;
 }
