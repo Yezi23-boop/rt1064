@@ -51,6 +51,20 @@ typedef enum
     SUBJECT2_TRACK_AMBIGUOUS
 } subject2_track_result_enum;
 
+typedef enum
+{
+    SUBJECT2_SYNC_OK = 0,
+    SUBJECT2_SYNC_RESCAN,
+    SUBJECT2_SYNC_AMBIGUOUS
+} subject2_sync_result_enum;
+
+typedef struct
+{
+    uint8 need_box_scan;
+    uint8 need_target_scan;
+    uint8 completed_count;
+} subject2_sync_update_struct;
+
 uint8 subject2_collect_objects(const map_source_struct *source,
                                char symbol,
                                subject2_object_struct *objects,
@@ -103,5 +117,16 @@ uint8 subject2_normalize_center_map(
     char normalized_rows[MAP_ROWS][MAP_COLS + 1],
     uint8 *car_row,
     uint8 *car_col);
+
+subject2_sync_result_enum subject2_reconcile_objects(
+    const map_source_struct *source,
+    subject2_object_struct box_objects[MAX_BOXES],
+    uint8 *box_count,
+    subject2_object_struct target_objects[MAX_BOXES],
+    uint8 *target_count,
+    subject2_binding_struct bindings[SUBJECT2_CLASS_COUNT],
+    uint8 strict_push_tracking,
+    uint8 active_class,
+    subject2_sync_update_struct *update);
 
 #endif

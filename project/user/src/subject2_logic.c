@@ -446,3 +446,342 @@ uint8 subject2_normalize_center_map(
     *car_col = median_col;
     return 1u;
 }
+
+static uint8 collect_cells_allow_empty(const map_source_struct *source,
+                                       char symbol,
+                                       uint16 cells[MAX_BOXES],
+                                       uint8 *count)
+{
+    uint8 row;
+    uint8 col;
+
+    if((0 == source) || (0 == cells) || (0 == count))
+    {
+        return 0u;
+    }
+    *count = 0u;
+    for(row = 0u; row < MAP_ROWS; row++)
+    {
+        for(col = 0u; col < MAP_COLS; col++)
+        {
+            if((symbol == source->rows[row][col]) ||
+               (('T' == symbol) && ('+' == source->rows[row][col])))
+            {
+                if(*count >= MAX_BOXES)
+                {
+                    return 0u;
+                }
+                cells[(*count)++] = map_cell_index(row, col);
+            }
+        }
+    }
+    return 1u;
+}
+
+static int8 object_index_for_cell(const subject2_object_struct *objects,
+                                  uint8 count,
+                                  uint16 cell)
+{
+    uint8 index;
+
+    for(index = 0u; index < count; index++)
+    {
+        if(cell == objects[index].cell)
+        {
+            return (int8)index;
+        }
+    }
+    return -1;
+}
+
+static int8 object_index_for_class(const subject2_object_struct *objects,
+                                   uint8 count,
+                                   uint8 class_id)
+{
+    uint8 index;
+
+    for(index = 0u; index < count; index++)
+    {
+        if((0u != objects[index].recognized) &&
+           (class_id == objects[index].class_id))
+        {
+            return (int8)index;
+        }
+    }
+    return -1;
+}
+
+static int8 binding_class_for_box_cell(
+    const subject2_binding_struct bindings[SUBJECT2_CLASS_COUNT],
+    uint16 cell)
+{
+    uint8 class_id;
+
+    for(class_id = 0u; class_id < SUBJECT2_CLASS_COUNT; class_id++)
+    {
+        if((0u != bindings[class_id].box_valid) &&
+           (0u == bindings[class_id].completed) &&
+           (cell == bindings[class_id].box_cell))
+        {
+            return (int8)class_id;
+        }
+    }
+    return -1;
+}
+
+subject2_sync_result_enum subject2_reconcile_objects(
+    const map_source_struct *source,
+    subject2_object_struct box_objects[MAX_BOXES],
+    uint8 *box_count,
+    subject2_object_struct target_objects[MAX_BOXES],
+    uint8 *target_count,
+    subject2_binding_struct bindings[SUBJECT2_CLASS_COUNT],
+    uint8 strict_push_tracking,
+    uint8 active_class,
+    subject2_sync_update_struct *update)
+{
+    subject2_object_struct next_boxes[MAX_BOXES];
+    subject2_object_struct next_targets[MAX_BOXES];
+    subject2_binding_struct next_bindings[SUBJECT2_CLASS_COUNT];
+    uint16 new_boxes[MAX_BOXES];
+    uint16 new_targets[MAX_BOXES];
+    uint16 remaining_old_boxes[MAX_BOXES];
+    uint8 old_box_matched[MAX_BOXES] = {0};
+    uint8 new_box_matched[MAX_BOXES] = {0};
+    uint8 new_box_count = 0u;
+    uint8 new_target_count = 0u;
+    uint8 remaining_old_count = 0u;
+    uint8 next_box_count = 0u;
+    uint8 next_target_count = 0u;
+    uint8 unmatched_old_count = 0u;
+    uint8 unmatched_new_count = 0u;
+    uint8 unmatched_old_index = 0u;
+    uint8 unmatched_new_index = 0u;
+    uint8 known_completed_removed = 0u;
+    uint8 reduction;
+    uint8 unknown_removed;
+    uint8 class_id;
+    uint8 index;
+    int8 old_index;
+    int8 bound_class;
+    subject2_sync_result_enum result = SUBJECT2_SYNC_OK;
+
+    if((0 == source) || (0 == box_objects) || (0 == box_count) ||
+       (0 == target_objects) || (0 == target_count) ||
+       (0 == bindings) || (0 == update) ||
+       (*box_count > MAX_BOXES) || (*target_count > MAX_BOXES) ||
+       (0u == collect_cells_allow_empty(source, 'B', new_boxes, &new_box_count)) ||
+       (0u == collect_cells_allow_empty(source, 'T', new_targets, &new_target_count)) ||
+       (new_box_count != new_target_count) ||
+       (new_box_count > *box_count) || (new_target_count > *target_count))
+    {
+        return SUBJECT2_SYNC_AMBIGUOUS;
+    }
+
+    memset(update, 0, sizeof(*update));
+    memset(next_boxes, 0, sizeof(next_boxes));
+    memset(next_targets, 0, sizeof(next_targets));
+    memcpy(next_bindings, bindings, sizeof(next_bindings));
+
+    for(index = 0u; index < new_target_count; index++)
+    {
+        old_index = object_index_for_cell(target_objects, *target_count,
+                                          new_targets[index]);
+        if(old_index < 0)
+        {
+            return SUBJECT2_SYNC_AMBIGUOUS;
+        }
+        next_targets[next_target_count++] = target_objects[(uint8)old_index];
+    }
+
+    for(class_id = 0u; class_id < SUBJECT2_CLASS_COUNT; class_id++)
+    {
+        if((0u == next_bindings[class_id].box_valid) ||
+           (0u == next_bindings[class_id].target_valid) ||
+           (0u != next_bindings[class_id].completed) ||
+           (0u != cell_in_list(next_bindings[class_id].target_cell,
+                               new_targets, new_target_count)))
+        {
+            continue;
+        }
+        if(0u != cell_in_list(next_bindings[class_id].box_cell,
+                             new_boxes, new_box_count))
+        {
+            return SUBJECT2_SYNC_AMBIGUOUS;
+        }
+        next_bindings[class_id].completed = 1u;
+        update->completed_count++;
+    }
+
+    if(0u != strict_push_tracking)
+    {
+        for(class_id = 0u; class_id < SUBJECT2_CLASS_COUNT; class_id++)
+        {
+            if((0u != next_bindings[class_id].box_valid) &&
+               (0u == next_bindings[class_id].completed))
+            {
+                remaining_old_boxes[remaining_old_count++] =
+                    next_bindings[class_id].box_cell;
+            }
+        }
+        if(remaining_old_count != new_box_count)
+        {
+            return SUBJECT2_SYNC_AMBIGUOUS;
+        }
+        if((active_class < SUBJECT2_CLASS_COUNT) &&
+           (0u != next_bindings[active_class].box_valid) &&
+           (0u == next_bindings[active_class].completed))
+        {
+            if(SUBJECT2_TRACK_AMBIGUOUS == subject2_track_active_box(
+                    next_bindings, active_class,
+                    remaining_old_boxes, remaining_old_count,
+                    new_boxes, new_box_count))
+            {
+                return SUBJECT2_SYNC_AMBIGUOUS;
+            }
+        }
+        else
+        {
+            for(index = 0u; index < remaining_old_count; index++)
+            {
+                if(0u == cell_in_list(remaining_old_boxes[index],
+                                     new_boxes, new_box_count))
+                {
+                    return SUBJECT2_SYNC_AMBIGUOUS;
+                }
+            }
+        }
+
+        for(index = 0u; index < new_box_count; index++)
+        {
+            bound_class = binding_class_for_box_cell(next_bindings,
+                                                     new_boxes[index]);
+            if(bound_class < 0)
+            {
+                return SUBJECT2_SYNC_AMBIGUOUS;
+            }
+            old_index = object_index_for_class(box_objects, *box_count,
+                                               (uint8)bound_class);
+            if(old_index < 0)
+            {
+                return SUBJECT2_SYNC_AMBIGUOUS;
+            }
+            next_boxes[next_box_count] = box_objects[(uint8)old_index];
+            next_boxes[next_box_count].cell = new_boxes[index];
+            next_box_count++;
+        }
+    }
+    else
+    {
+        for(index = 0u; index < new_box_count; index++)
+        {
+            old_index = object_index_for_cell(box_objects, *box_count,
+                                              new_boxes[index]);
+            if(old_index >= 0)
+            {
+                next_boxes[next_box_count++] = box_objects[(uint8)old_index];
+                old_box_matched[(uint8)old_index] = 1u;
+                new_box_matched[index] = 1u;
+            }
+        }
+
+        for(index = 0u; index < *box_count; index++)
+        {
+            if(0u != old_box_matched[index])
+            {
+                continue;
+            }
+            if((0u != box_objects[index].recognized) &&
+               (box_objects[index].class_id < SUBJECT2_CLASS_COUNT) &&
+               (0u != next_bindings[box_objects[index].class_id].completed))
+            {
+                old_box_matched[index] = 1u;
+                known_completed_removed++;
+                continue;
+            }
+            unmatched_old_count++;
+            unmatched_old_index = index;
+        }
+        for(index = 0u; index < new_box_count; index++)
+        {
+            if(0u == new_box_matched[index])
+            {
+                unmatched_new_count++;
+                unmatched_new_index = index;
+            }
+        }
+
+        reduction = (uint8)(*box_count - new_box_count);
+        if(known_completed_removed > reduction)
+        {
+            return SUBJECT2_SYNC_AMBIGUOUS;
+        }
+        unknown_removed = (uint8)(reduction - known_completed_removed);
+        if((1u == unmatched_old_count) &&
+           (1u == unmatched_new_count) &&
+           (0u == unknown_removed))
+        {
+            next_boxes[next_box_count] = box_objects[unmatched_old_index];
+            next_boxes[next_box_count].cell = new_boxes[unmatched_new_index];
+            if((0u != next_boxes[next_box_count].recognized) &&
+               (next_boxes[next_box_count].class_id < SUBJECT2_CLASS_COUNT) &&
+               (0u != next_bindings[next_boxes[next_box_count].class_id].box_valid))
+            {
+                next_bindings[next_boxes[next_box_count].class_id].box_cell =
+                    new_boxes[unmatched_new_index];
+            }
+            next_box_count++;
+        }
+        else if((0u != unmatched_old_count) || (0u != unmatched_new_count))
+        {
+            for(index = 0u; index < *box_count; index++)
+            {
+                if((0u == old_box_matched[index]) &&
+                   (0u != box_objects[index].recognized) &&
+                   (box_objects[index].class_id < SUBJECT2_CLASS_COUNT) &&
+                   (0u == next_bindings[box_objects[index].class_id].completed))
+                {
+                    next_bindings[box_objects[index].class_id].box_valid = 0u;
+                    next_bindings[box_objects[index].class_id].box_cell = INVALID_STATE;
+                }
+            }
+            for(index = 0u; index < new_box_count; index++)
+            {
+                if(0u == new_box_matched[index])
+                {
+                    next_boxes[next_box_count].cell = new_boxes[index];
+                    next_boxes[next_box_count].class_id = SUBJECT2_INVALID_CLASS;
+                    next_boxes[next_box_count].recognized = 0u;
+                    next_boxes[next_box_count].tried_observation_mask = 0u;
+                    next_box_count++;
+                }
+            }
+            update->need_box_scan = (0u != unmatched_new_count) ? 1u : 0u;
+            result = SUBJECT2_SYNC_RESCAN;
+        }
+    }
+
+    for(index = 0u; index < next_box_count; index++)
+    {
+        if(0u == next_boxes[index].recognized)
+        {
+            update->need_box_scan = 1u;
+            result = SUBJECT2_SYNC_RESCAN;
+        }
+    }
+    for(index = 0u; index < next_target_count; index++)
+    {
+        if(0u == next_targets[index].recognized)
+        {
+            update->need_target_scan = 1u;
+            result = SUBJECT2_SYNC_RESCAN;
+        }
+    }
+
+    memcpy(box_objects, next_boxes, sizeof(next_boxes));
+    memcpy(target_objects, next_targets, sizeof(next_targets));
+    memcpy(bindings, next_bindings, sizeof(next_bindings));
+    *box_count = next_box_count;
+    *target_count = next_target_count;
+    return result;
+}
