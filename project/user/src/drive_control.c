@@ -16,15 +16,16 @@ static uint8 motion_is_translating(void)
     return ((control_status.vx != 0.0f) || (control_status.vy != 0.0f)) ? 1u : 0u;
 }
 
-static void limit_translation_attitude_output(void)
+static void limit_attitude_output(void)
 {
+    float max_vz = YAW_TURN_MAX_VZ;
+
     if(0 != motion_is_translating())
     {
         // 平移时限制姿态修正占比，避免 yaw 环为抢角度把横移/前进目标完全压扁。
-        control_status.vzt = limit_float(control_status.vzt,
-                                         -YAW_TRANSLATION_MAX_VZ,
-                                         YAW_TRANSLATION_MAX_VZ);
+        max_vz = YAW_TRANSLATION_MAX_VZ;
     }
+    control_status.vzt = limit_float(control_status.vzt, -max_vz, max_vz);
 }
 
 static uint8 update_startup_guard_20ms(void)
@@ -115,7 +116,7 @@ void control_output_update_20ms(void)
     }
 
     drive_imu_update_attitude_20ms(&control_status);
-    limit_translation_attitude_output();
+    limit_attitude_output();
 
     mecanum_mix(control_status.vx,
                 control_status.vy,
@@ -163,6 +164,32 @@ void set_target_yaw(float yaw)
 {
     drive_test_clear_manual_pwm();
     drive_imu_set_target_yaw(&control_status, yaw);
+}
+
+void drive_control_start_relative_yaw_correction(float delta_deg)
+{
+    uint32 primask = interrupt_global_disable();
+
+    drive_test_clear_manual_pwm();
+    drive_imu_sync_status(&control_status);
+    drive_output_clear_motion_outputs(&control_status);
+    drive_output_reset_and_stop(&control_status);
+    drive_imu_set_target_yaw(&control_status,
+                             control_status.current_yaw + delta_deg);
+    interrupt_global_enable(primask);
+}
+
+void drive_control_lock_yaw_and_reset_pose(void)
+{
+    uint32 primask = interrupt_global_disable();
+
+    drive_test_clear_manual_pwm();
+    drive_imu_sync_status(&control_status);
+    drive_imu_lock_current_yaw(&control_status);
+    drive_output_clear_motion_outputs(&control_status);
+    drive_output_reset_and_stop(&control_status);
+    drive_pose_reset_origin(control_status.current_yaw);
+    interrupt_global_enable(primask);
 }
 
 void set_motion_target(float vx, float vy, float yaw_target)

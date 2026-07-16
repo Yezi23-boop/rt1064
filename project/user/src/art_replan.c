@@ -6,6 +6,7 @@
 #include "drive_pose.h"
 #include "executor.h"
 #include "map_utils.h"
+#include "motion_math.h"
 #include "openart_uart.h"
 #include "solver.h"
 #include "timebase.h"
@@ -17,6 +18,8 @@ typedef enum
     ART_REPLAN_IDLE = 0,         /**< 空闲态：不主动等待 ART，只响应 executor 触发的同步请求。 */
     ART_REPLAN_WAIT_LAUNCH,      /**< 发车前等待态：持续收图，但只计时不求解。 */
     ART_REPLAN_WAIT_CENTER,      /**< 发车区中心等待态：等待 CENTER_REQ 的5个精确中心样本。 */
+    ART_REPLAN_YAW_RECHECK,      /**< 发车 yaw 偏差较大，等待第二批样本确认。 */
+    ART_REPLAN_YAW_FIX,          /**< 科目二发车前按视觉差值实际回正。 */
     ART_REPLAN_LAUNCH_MOVE,      /**< 按 ART 中心计算距离，移动到外面第一可走格中心。 */
     ART_REPLAN_INITIAL,          /**< 出发车区后等待真实推箱地图并首次求解。 */
     ART_REPLAN_INITIAL_CENTER,   /**< 初次稳定地图已冻结，等待请求式精确中心后再求解。 */
@@ -53,6 +56,17 @@ static uint8 art_pre_push_box_retry_moving = 0u;
 static uint8 art_pre_push_box_retry_settling = 0u;
 static uint32 art_pre_push_box_retry_settle_start_ms = 0u;
 static uint32 art_launch_move_start_ms = 0;                         // 发车移动开始时间。
+static float art_launch_pending_move_cm = 0.0f;                    // yaw 校准完成后待执行的发车 X 距离。
+static uint8 art_launch_yaw_reference_valid = 0u;                  // 1 表示本轮首个科目已建立发车区视觉参考。
+static float art_launch_yaw_bias_deg = 0.0f;                       // 已知180度与首个科目 ART 观测间的固定偏差。
+static uint16 art_launch_yaw_reference_col_q = 0u;
+static uint16 art_launch_yaw_reference_row_q = 0u;
+static uint8 art_launch_subject1_yaw_done = 0u;
+static uint8 art_launch_subject2_yaw_done = 0u;
+static float art_launch_yaw_first_deg = 0.0f;                      // 大偏差复采前第一批圆周平均值。
+static uint32 art_launch_yaw_phase_start_ms = 0u;
+static uint32 art_launch_yaw_stable_start_ms = 0u;
+static uint8 art_launch_yaw_stable_started = 0u;
 static uint16 art_home_center_col_q = 0;                            // 本轮启动时发车中心列，单位 1/100 格。
 static uint16 art_home_center_row_q = 0;                            // 本轮启动时发车中心行，单位 1/100 格。
 static uint8 art_home_center_valid = 0;                             // 1 表示本轮已保存发车中心，可执行自动返航。
@@ -110,6 +124,8 @@ static float art_grid_q_to_x_cm(uint16 col_q)
 {
     return ((float)col_q * GRID_SIZE_CM) / 100.0f;
 }
+
+static uint16 art_u16_difference(uint16 left, uint16 right);
 
 static uint8 art_replan_calculate_pose_offset(const map_source_struct *source,
                                                uint16 center_col_q,
@@ -723,6 +739,143 @@ static void art_replan_begin_launch_move(float move_cm, art_replan_update_struct
     }
 }
 
+static uint8 art_launch_center_is_in_window(uint16 col_q, uint16 row_q)
+{
+    uint8 col = (uint8)(col_q / 100u);
+    uint8 row = (uint8)(row_q / 100u);
+
+    return (((ART_RETURN_GATE_ROW_MIN == row) ||
+             (ART_RETURN_GATE_ROW_MAX == row)) &&
+            (col <= 1u)) ? 1u : 0u;
+}
+
+static void art_launch_mark_yaw_done(void)
+{
+    if(0u != art_launch_subject2)
+    {
+        art_launch_subject2_yaw_done = 1u;
+    }
+    else
+    {
+        art_launch_subject1_yaw_done = 1u;
+    }
+}
+
+static uint8 art_launch_yaw_already_done(void)
+{
+    return (0u != art_launch_subject2) ?
+           art_launch_subject2_yaw_done : art_launch_subject1_yaw_done;
+}
+
+static void art_replan_continue_after_launch_yaw(art_replan_update_struct *update)
+{
+    if(art_launch_pending_move_cm <= 0.0f)
+    {
+        art_replan_begin(ART_REPLAN_INITIAL, update);
+    }
+    else
+    {
+        art_replan_begin_launch_move(art_launch_pending_move_cm, update);
+    }
+}
+
+static void art_replan_finish_launch_yaw(art_replan_update_struct *update)
+{
+    art_launch_mark_yaw_done();
+    drive_control_lock_yaw_and_reset_pose();
+    art_replan_continue_after_launch_yaw(update);
+}
+
+static float art_launch_yaw_correction(float measured_yaw_deg)
+{
+    float corrected_yaw = measured_yaw_deg + art_launch_yaw_bias_deg;
+
+    return shortest_angle_error(ART_LAUNCH_EXPECTED_YAW_DEG,
+                                corrected_yaw);
+}
+
+static void art_replan_start_launch_yaw_fix(float correction_deg,
+                                            art_replan_update_struct *update)
+{
+    drive_control_start_relative_yaw_correction(correction_deg);
+    art_launch_yaw_phase_start_ms = time_ms();
+    art_launch_yaw_stable_start_ms = 0u;
+    art_launch_yaw_stable_started = 0u;
+    art_replan_phase = ART_REPLAN_YAW_FIX;
+    if(0 != update)
+    {
+        update->run_state = "YawFix";
+        update->redraw = 1u;
+    }
+}
+
+static void art_replan_process_launch_yaw(art_replan_update_struct *update)
+{
+    float yaw_deg;
+    float correction_deg;
+
+    if(0u != art_launch_yaw_already_done())
+    {
+        art_replan_continue_after_launch_yaw(update);
+        return;
+    }
+    if(((time_ms() - art_wait_start_ms) > ART_LAUNCH_YAW_TIMEOUT_MS) ||
+       (0u == art_launch_center_is_in_window(art_home_center_col_q,
+                                             art_home_center_row_q)) ||
+       (0u == art_center_batch_get_yaw_deg(&art_center_batch,
+                                            &yaw_deg, 0)))
+    {
+        art_replan_finish_launch_yaw(update);
+        return;
+    }
+
+    if(0u == art_launch_yaw_reference_valid)
+    {
+        art_launch_yaw_bias_deg = shortest_angle_error(
+            ART_LAUNCH_EXPECTED_YAW_DEG, yaw_deg);
+        art_launch_yaw_reference_col_q = art_home_center_col_q;
+        art_launch_yaw_reference_row_q = art_home_center_row_q;
+        art_launch_yaw_reference_valid = 1u;
+        art_replan_finish_launch_yaw(update);
+        return;
+    }
+
+    if((0u == art_launch_subject2) ||
+       (art_u16_difference(art_home_center_col_q,
+                           art_launch_yaw_reference_col_q) >
+        ART_RETURN_HOME_TOLERANCE_Q) ||
+       (art_u16_difference(art_home_center_row_q,
+                           art_launch_yaw_reference_row_q) >
+        ART_RETURN_HOME_TOLERANCE_Q))
+    {
+        art_replan_finish_launch_yaw(update);
+        return;
+    }
+
+    correction_deg = art_launch_yaw_correction(yaw_deg);
+    if(art_abs_float(correction_deg) <= ART_LAUNCH_YAW_IGNORE_DEG)
+    {
+        art_replan_finish_launch_yaw(update);
+        return;
+    }
+    if(art_abs_float(correction_deg) <= ART_LAUNCH_YAW_RECHECK_DEG)
+    {
+        art_replan_start_launch_yaw_fix(correction_deg, update);
+        return;
+    }
+
+    art_launch_yaw_first_deg = yaw_deg;
+    art_center_batch_reset(&art_center_batch);
+    openart_request_player_center();
+    art_launch_yaw_phase_start_ms = time_ms();
+    art_replan_phase = ART_REPLAN_YAW_RECHECK;
+    if(0 != update)
+    {
+        update->run_state = "YawChk";
+        update->redraw = 1u;
+    }
+}
+
 static void art_replan_tick_wait_center(art_replan_update_struct *update)
 {
     if(0 != art_replan_collect_requested_center())
@@ -733,14 +886,20 @@ static void art_replan_tick_wait_center(art_replan_update_struct *update)
         art_home_center_col_q = art_requested_center_col_q;
         art_home_center_row_q = art_requested_center_row_q;
         art_home_center_valid = 1;
+        art_launch_pending_move_cm = move_cm;
 
+#if ART_LAUNCH_YAW_ENABLE
+        art_replan_process_launch_yaw(update);
+#else
         if(move_cm <= 0.0f)
         {
             art_replan_begin(ART_REPLAN_INITIAL, update);
-            return;
         }
-
-        art_replan_begin_launch_move(move_cm, update);
+        else
+        {
+            art_replan_begin_launch_move(move_cm, update);
+        }
+#endif
         return;
     }
 
@@ -762,6 +921,83 @@ static void art_replan_tick_wait_center(art_replan_update_struct *update)
     if(0 != update)
     {
         update->run_state = "WCTR";
+    }
+}
+
+static void art_replan_tick_launch_yaw_recheck(art_replan_update_struct *update)
+{
+    uint16 col_q;
+    uint16 row_q;
+    float yaw_deg;
+    float correction_deg;
+
+    if((time_ms() - art_launch_yaw_phase_start_ms) >=
+       ART_LAUNCH_YAW_TIMEOUT_MS)
+    {
+        art_replan_finish_launch_yaw(update);
+        return;
+    }
+    if(0u == art_center_batch_collect(&art_center_batch))
+    {
+        if(0 != update)
+        {
+            update->run_state = "YawChk";
+        }
+        return;
+    }
+    if((0u == art_center_batch_get_median(&art_center_batch, &col_q, &row_q)) ||
+       (0u == art_center_batch_get_yaw_deg(&art_center_batch, &yaw_deg, 0)) ||
+       (0u == art_launch_center_is_in_window(col_q, row_q)) ||
+       (art_u16_difference(col_q, art_home_center_col_q) >
+        ART_RETURN_HOME_TOLERANCE_Q) ||
+       (art_u16_difference(row_q, art_home_center_row_q) >
+        ART_RETURN_HOME_TOLERANCE_Q) ||
+       (art_abs_float(shortest_angle_error(yaw_deg,
+                                            art_launch_yaw_first_deg)) >
+        ART_LAUNCH_YAW_BATCH_MATCH_DEG))
+    {
+        art_replan_finish_launch_yaw(update);
+        return;
+    }
+
+    correction_deg = art_launch_yaw_correction(yaw_deg);
+    art_replan_start_launch_yaw_fix(correction_deg, update);
+}
+
+static void art_replan_tick_launch_yaw_fix(art_replan_update_struct *update)
+{
+    const control_status_struct *status = get_control_status();
+
+    if((time_ms() - art_launch_yaw_phase_start_ms) >=
+       SUBJECT2_TURN_TIMEOUT_MS)
+    {
+        art_replan_center_timeout_error(EXEC_ERROR_SUBJECT2_YAW,
+                                        "E:Yaw", update);
+        return;
+    }
+
+    if(art_abs_float(status->yaw_error) <= SUBJECT2_TURN_TOLERANCE_DEG)
+    {
+        if(0u == art_launch_yaw_stable_started)
+        {
+            art_launch_yaw_stable_started = 1u;
+            art_launch_yaw_stable_start_ms = time_ms();
+        }
+        else if((time_ms() - art_launch_yaw_stable_start_ms) >=
+                SUBJECT2_TURN_STABLE_MS)
+        {
+            art_replan_finish_launch_yaw(update);
+            return;
+        }
+    }
+    else
+    {
+        art_launch_yaw_stable_started = 0u;
+    }
+
+    if(0 != update)
+    {
+        update->run_state = "YawFix";
     }
 }
 
@@ -1316,6 +1552,10 @@ void art_replan_cancel(void)
     art_launch_subject2 = 0u;
     art_launch_delay_start_ms = 0;
     art_launch_move_start_ms = 0;
+    art_launch_pending_move_cm = 0.0f;
+    art_launch_yaw_phase_start_ms = 0u;
+    art_launch_yaw_stable_start_ms = 0u;
+    art_launch_yaw_stable_started = 0u;
     art_return_pending_x_cm = 0.0f;
     art_return_correction_count = 0;
     art_return_phase_start_ms = 0;
@@ -1329,6 +1569,37 @@ void art_replan_cancel(void)
     art_pre_push_box_retry_moving = 0u;
     art_pre_push_box_retry_settling = 0u;
     art_pre_push_box_retry_settle_start_ms = 0u;
+}
+
+void art_replan_reset_competition_yaw(void)
+{
+    art_launch_yaw_reference_valid = 0u;
+    art_launch_yaw_bias_deg = 0.0f;
+    art_launch_yaw_reference_col_q = 0u;
+    art_launch_yaw_reference_row_q = 0u;
+    art_launch_subject1_yaw_done = 0u;
+    art_launch_subject2_yaw_done = 0u;
+    art_launch_yaw_first_deg = 0.0f;
+    art_launch_yaw_phase_start_ms = 0u;
+    art_launch_yaw_stable_start_ms = 0u;
+    art_launch_yaw_stable_started = 0u;
+}
+
+uint8 art_replan_get_launch_yaw_bias(float *bias_deg)
+{
+    if(0u == art_launch_yaw_reference_valid)
+    {
+        if(0 != bias_deg)
+        {
+            *bias_deg = 0.0f;
+        }
+        return 0u;
+    }
+    if(0 != bias_deg)
+    {
+        *bias_deg = art_launch_yaw_bias_deg;
+    }
+    return 1u;
 }
 
 void art_replan_begin_initial(art_replan_update_struct *update)
@@ -1346,6 +1617,7 @@ void art_replan_begin_initial(art_replan_update_struct *update)
     art_home_center_row_q = 0;
     art_home_center_valid = 0;
     art_launch_move_start_ms = 0;
+    art_launch_pending_move_cm = 0.0f;
     art_requested_center_clear();
     if(0 != update)
     {
@@ -1485,6 +1757,18 @@ void art_replan_tick(const art_replan_context_struct *context,
     if(ART_REPLAN_WAIT_CENTER == art_replan_phase)
     {
         art_replan_tick_wait_center(update);
+        return;
+    }
+
+    if(ART_REPLAN_YAW_RECHECK == art_replan_phase)
+    {
+        art_replan_tick_launch_yaw_recheck(update);
+        return;
+    }
+
+    if(ART_REPLAN_YAW_FIX == art_replan_phase)
+    {
+        art_replan_tick_launch_yaw_fix(update);
         return;
     }
 

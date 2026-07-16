@@ -13,6 +13,9 @@ ART_OBSERVATION_SOURCE = (
 SUBJECT2_SOURCE = (ROOT / "project" / "user" / "src" / "subject2.c").read_text(
     encoding="utf-8"
 )
+MENU_SOURCE = (ROOT / "project" / "user" / "src" / "menu.c").read_text(
+    encoding="utf-8"
+)
 
 
 def function_body(source, name, next_marker):
@@ -23,7 +26,7 @@ def function_body(source, name, next_marker):
 
 assert "def poll_map_uart_rx" in OPENMV_SOURCE
 assert '"CENTER_REQ"' in OPENMV_SOURCE
-assert '"CENTER_SAMPLE %d,%d,%d\\n"' in OPENMV_SOURCE
+assert '"CENTER_SAMPLE %d,%d,%d,%d,%d\\n"' in OPENMV_SOURCE
 assert "CENTER_REQ_TIMEOUT" not in OPENMV_SOURCE
 
 main_body = function_body(
@@ -53,7 +56,7 @@ paired_map_send = center_request_body.index(
     "send_map_uart(uart, canonical_char_matrix, player_center_grid)"
 )
 center_sample_send = center_request_body.index(
-    'uart.write("CENTER_SAMPLE %d,%d,%d\\n"'
+    'uart.write("CENTER_SAMPLE %d,%d,%d,%d,%d\\n"'
 )
 assert paired_map_send < center_sample_send
 assert "center_map_sent = process_center_request(" in main_body
@@ -120,21 +123,21 @@ namespace["poll_map_uart_rx"](uart)
 assert namespace["center_request_active"] is True
 first_generation = namespace["center_request_generation"]
 
-namespace["process_center_request"](uart, None, char_matrix)
+namespace["process_center_request"](uart, None, char_matrix, None)
 assert uart.tx[-2] == "PLAYER_CENTER_GRID 0,0 0\n"
 assert uart.tx[-1] == "MAP_END\n"
-namespace["process_center_request"](uart, (568, 550), char_matrix)
-namespace["process_center_request"](uart, (570, 550), char_matrix)
-namespace["process_center_request"](uart, (572, 551), char_matrix)
-namespace["process_center_request"](uart, (574, 552), char_matrix)
-namespace["process_center_request"](uart, (576, 553), char_matrix)
-namespace["process_center_request"](uart, (999, 999), char_matrix)
+namespace["process_center_request"](uart, (568, 550), char_matrix, 176.19)
+namespace["process_center_request"](uart, (570, 550), char_matrix, None)
+namespace["process_center_request"](uart, (572, 551), char_matrix, 177.46)
+namespace["process_center_request"](uart, (574, 552), char_matrix, 180.0)
+namespace["process_center_request"](uart, (576, 553), char_matrix, 359.999)
+namespace["process_center_request"](uart, (999, 999), char_matrix, 180.0)
 expected_samples = [
-    "CENTER_SAMPLE 1,568,550\n",
-    "CENTER_SAMPLE 2,570,550\n",
-    "CENTER_SAMPLE 3,572,551\n",
-    "CENTER_SAMPLE 4,574,552\n",
-    "CENTER_SAMPLE 5,576,553\n",
+    "CENTER_SAMPLE 1,568,550,17619,1\n",
+    "CENTER_SAMPLE 2,570,550,0,0\n",
+    "CENTER_SAMPLE 3,572,551,17746,1\n",
+    "CENTER_SAMPLE 4,574,552,18000,1\n",
+    "CENTER_SAMPLE 5,576,553,0,1\n",
 ]
 sample_lines = [line for line in uart.tx if line.startswith("CENTER_SAMPLE ")]
 assert sample_lines == expected_samples
@@ -146,8 +149,8 @@ assert namespace["center_request_active"] is False
 
 namespace["parse_map_uart_line"]("CENTER_REQ")
 assert namespace["center_request_generation"] == first_generation + 1
-namespace["process_center_request"](uart, (580, 560), char_matrix)
-assert uart.tx[-1] == "CENTER_SAMPLE 1,580,560\n"
+namespace["process_center_request"](uart, (580, 560), char_matrix, 90.0)
+assert uart.tx[-1] == "CENTER_SAMPLE 1,580,560,9000,1\n"
 
 begin_body = function_body(
     ART_REPLAN_SOURCE,
@@ -222,5 +225,21 @@ assert "executor_start_position_correction_with_pose_reset" in ART_REPLAN_SOURCE
 assert "executor_start_position_correction_with_pose_reset" in SUBJECT2_SOURCE
 assert "set_motion(" not in launch_move_body
 assert "set_motion(" not in return_axis_body
+
+new_competition_reset = MENU_SOURCE.index("art_replan_reset_competition_yaw();")
+competition_start = MENU_SOURCE.index("competition_flow_start(COMPETITION_MODE);")
+subject2_yaw_capture = MENU_SOURCE.index(
+    "competition_launch_yaw_deg = get_control_status()->target_yaw;"
+)
+subject2_context_build = MENU_SOURCE.index(
+    "build_subject2_context(&subject2_context);", subject2_yaw_capture
+)
+assert new_competition_reset < competition_start
+assert subject2_yaw_capture < subject2_context_build
+assert "art_replan_get_launch_yaw_bias(&context->art_yaw_bias_deg)" in MENU_SOURCE
+assert "SUBJECT2_POST_OBSERVE_YAW_SAMPLE" in SUBJECT2_SOURCE
+assert "SUBJECT2_POST_OBSERVE_YAW_FIX" in SUBJECT2_SOURCE
+assert 'update->run_state = "VYaw"' in SUBJECT2_SOURCE
+assert 'update->run_state = "VFix"' in SUBJECT2_SOURCE
 
 print("openart-request-flow PASS")

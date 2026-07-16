@@ -1,5 +1,6 @@
 import sensor
 import time
+import math
 from machine import UART
 
 # ==================== UART 地图发送配置 ===================
@@ -23,16 +24,18 @@ if WORK_MODE == MODE_RUN:
     DEBUG_DRAW_GRID_LINES = False
     DEBUG_DRAW_POINTS = False
     DEBUG_PLAYER_CENTER_ENABLE = False
+    DEBUG_PLAYER_HEADING_ENABLE = False
     DEBUG_OBSERVATION_ENABLE = False
     SHOW_RECTIFIED_VIEW = True
     USE_RECTIFIED_RECOGNITION = True
 else:
     DEBUG_ENABLE = True
     DEBUG_DRAW_ROI = True
-    DEBUG_DRAW_GRID_LINES = True
-    DEBUG_DRAW_POINTS = True
+    DEBUG_DRAW_GRID_LINES = False
+    DEBUG_DRAW_POINTS = False
     DEBUG_PLAYER_CENTER_ENABLE = False
-    DEBUG_OBSERVATION_ENABLE = True
+    DEBUG_PLAYER_HEADING_ENABLE = True
+    DEBUG_OBSERVATION_ENABLE = False
     SHOW_RECTIFIED_VIEW = True
     USE_RECTIFIED_RECOGNITION = True
 
@@ -67,10 +70,10 @@ GRID_ROWS = 12
 # MAP_CORNERS 表示屏幕地图外边界，用于四角透视标定。
 # 四点按 左上、右上、右下、左下 填写，指向完整 16x12 地图外边界。
 MAP_CORNERS = (
-    (7, 5),
-    (310,19),
-    (302,220),
-    (9, 237),
+    (13, 11),
+    (310,18),
+    (305,220),
+    (17, 231),
 )
 
 # 拉正图上的有效采样区域边距。四角已对齐但整张网格略偏时，只调这里。
@@ -107,6 +110,16 @@ PLAYER_BLOB_AREA_THRESHOLD = 6
 PLAYER_BLOB_MARGIN = 2
 PLAYER_PRECISE_MIN_COLOR_PIXELS = 12  # 绿色、青色各自至少命中的像素数
 PLAYER_PRECISE_TRIM_PERCENT = 10      # 外框两侧各忽略10%离群颜色像素
+PLAYER_HEADING_CORE_RADIUS = 3 * FRAME_SCALE  # 绿/青主体中心的亚像素求均值半径
+PLAYER_HEADING_BOUNDARY_MAX_GAP = 2 * FRAME_SCALE  # 允许分界处有少量过渡像素
+PLAYER_HEADING_BOUNDARY_NORMAL_BAND = 3 * FRAME_SCALE  # 分界须靠近两色中心中面
+PLAYER_HEADING_BOUNDARY_MIN_POINTS = 6
+PLAYER_HEADING_BOUNDARY_MIN_AXIS_RATIO = 4.0
+PLAYER_HEADING_MIN_VECTOR_Q = 20      # 绿青质心至少相距0.20格
+PLAYER_HEADING_MAX_VECTOR_Q = 80      # 超过0.80格视为颜色误配
+PLAYER_HEADING_SAMPLE_COUNT = 5
+PLAYER_HEADING_MIN_VALID_SAMPLES = 4
+PLAYER_HEADING_OUTLIER_MAX_DEG = 5.0
 
 # OpenMV find_blobs() 使用 LAB 阈值。这里先给一组偏宽的初值，
 # 再用 blob 中心的 RGB 归一化颜色做二次确认，现场还可以继续微调。
@@ -678,7 +691,124 @@ def trimmed_histogram_bounds(histogram, total_count, trim_percent):
     return (left_index, right_index)
 
 
-def detect_player_center_precise(img, anchor_center):
+def histogram_core_mean_coordinate(histogram, total_count, origin, radius):
+    lower_rank = (total_count - 1) // 2
+    upper_rank = total_count // 2
+    accumulated = 0
+    lower_index = 0
+    upper_index = 0
+    lower_found = False
+
+    for index, count in enumerate(histogram):
+        accumulated += count
+        if accumulated > lower_rank and not lower_found:
+            lower_index = index
+            lower_found = True
+        if accumulated > upper_rank:
+            upper_index = index
+            break
+
+    center = (lower_index + upper_index) / 2.0
+    weighted_sum = 0
+    core_count = 0
+
+    for index, count in enumerate(histogram):
+        if abs(index - center) > radius:
+            continue
+        weighted_sum += (origin + index) * count
+        core_count += count
+    return weighted_sum / core_count
+
+
+def player_heading_centers_from_boundary(labels, width, height,
+                                         left, top,
+                                         green_center, cyan_center):
+    rough_dx = cyan_center[0] - green_center[0]
+    rough_dy = cyan_center[1] - green_center[1]
+    distance = math.sqrt(rough_dx * rough_dx + rough_dy * rough_dy)
+    if distance < 0.001:
+        return None
+    center_x = (green_center[0] + cyan_center[0]) / 2.0
+    center_y = (green_center[1] + cyan_center[1]) / 2.0
+    rough_unit_x = rough_dx / distance
+    rough_unit_y = rough_dy / distance
+    point_count = 0
+    x_sum = 0.0
+    y_sum = 0.0
+    xx_sum = 0.0
+    yy_sum = 0.0
+    xy_sum = 0.0
+
+    for y in range(height):
+        for x in range(width):
+            label = labels[y * width + x]
+            if label == 0:
+                continue
+            for step_x, step_y in ((1, 0), (0, 1)):
+                for gap in range(1, PLAYER_HEADING_BOUNDARY_MAX_GAP + 1):
+                    other_x = x + step_x * gap
+                    other_y = y + step_y * gap
+                    if other_x >= width or other_y >= height:
+                        break
+                    other = labels[other_y * width + other_x]
+                    if other == 0:
+                        continue
+                    if other == label:
+                        break
+
+                    point_x = left + (x + other_x) / 2.0
+                    point_y = top + (y + other_y) / 2.0
+                    normal_offset = abs(
+                        (point_x - center_x) * rough_unit_x +
+                        (point_y - center_y) * rough_unit_y)
+                    if normal_offset > PLAYER_HEADING_BOUNDARY_NORMAL_BAND:
+                        break
+                    point_count += 1
+                    x_sum += point_x
+                    y_sum += point_y
+                    xx_sum += point_x * point_x
+                    yy_sum += point_y * point_y
+                    xy_sum += point_x * point_y
+                    break
+
+    if point_count < PLAYER_HEADING_BOUNDARY_MIN_POINTS:
+        return None
+
+    mean_x = x_sum / point_count
+    mean_y = y_sum / point_count
+    covariance_xx = xx_sum / point_count - mean_x * mean_x
+    covariance_yy = yy_sum / point_count - mean_y * mean_y
+    covariance_xy = xy_sum / point_count - mean_x * mean_y
+    discriminant = math.sqrt(
+        (covariance_xx - covariance_yy) *
+        (covariance_xx - covariance_yy) +
+        4.0 * covariance_xy * covariance_xy)
+    major_variance = (covariance_xx + covariance_yy + discriminant) / 2.0
+    minor_variance = (covariance_xx + covariance_yy - discriminant) / 2.0
+    if minor_variance < 0.0:
+        minor_variance = 0.0
+    if (major_variance < 1.0 or
+            major_variance < ((minor_variance + 0.01) *
+                              PLAYER_HEADING_BOUNDARY_MIN_AXIS_RATIO)):
+        return None
+
+    boundary_axis = math.atan2(
+        2.0 * covariance_xy,
+        covariance_xx - covariance_yy) / 2.0
+    normal_x = math.sin(boundary_axis)
+    normal_y = -math.cos(boundary_axis)
+    if normal_x * rough_dx + normal_y * rough_dy < 0.0:
+        normal_x = -normal_x
+        normal_y = -normal_y
+
+    half_distance = distance / 2.0
+    return ((center_x - normal_x * half_distance,
+             center_y - normal_y * half_distance),
+            (center_x + normal_x * half_distance,
+             center_y + normal_y * half_distance))
+
+
+def detect_player_pose_precise(img, anchor_center):
     if anchor_center is None:
         return None
 
@@ -695,6 +825,11 @@ def detect_player_center_precise(img, anchor_center):
 
     x_histogram = [0 for _ in range(right - left)]
     y_histogram = [0 for _ in range(bottom - top)]
+    green_x_histogram = [0 for _ in range(right - left)]
+    green_y_histogram = [0 for _ in range(bottom - top)]
+    cyan_x_histogram = [0 for _ in range(right - left)]
+    cyan_y_histogram = [0 for _ in range(bottom - top)]
+    color_labels = bytearray((right - left) * (bottom - top))
     green_count = 0
     cyan_count = 0
     total_count = 0
@@ -705,11 +840,23 @@ def detect_player_center_precise(img, anchor_center):
             rn, gn, bn, color_sum = normalize_color(pixel[0], pixel[1], pixel[2])
             is_green = is_player_green_half(rn, gn, bn, color_sum)
             is_cyan = is_player_cyan_half(rn, gn, bn, color_sum)
+            is_player_pixel = is_green or is_cyan
+            if is_green and is_cyan:
+                # 重叠区按蓝色占比归到唯一一侧，避免同一像素同时拉动两个色心。
+                is_green = (gn - bn) > 58
+                is_cyan = not is_green
+            label_index = (y - top) * (right - left) + (x - left)
             if is_green:
+                color_labels[label_index] = 1
                 green_count += 1
+                green_x_histogram[x - left] += 1
+                green_y_histogram[y - top] += 1
             if is_cyan:
+                color_labels[label_index] = 2
                 cyan_count += 1
-            if is_green or is_cyan:
+                cyan_x_histogram[x - left] += 1
+                cyan_y_histogram[y - top] += 1
+            if is_player_pixel:
                 x_histogram[x - left] += 1
                 y_histogram[y - top] += 1
                 total_count += 1
@@ -722,8 +869,38 @@ def detect_player_center_precise(img, anchor_center):
         x_histogram, total_count, PLAYER_PRECISE_TRIM_PERCENT)
     y_min, y_max = trimmed_histogram_bounds(
         y_histogram, total_count, PLAYER_PRECISE_TRIM_PERCENT)
-    return ((left + x_min + left + x_max) // 2,
-            (top + y_min + top + y_max) // 2)
+    player_center = ((left + x_min + left + x_max) // 2,
+                     (top + y_min + top + y_max) // 2)
+    # yaw 的绿/青基线很短。先用中位数锁定各自主体，再对中心核心求均值：
+    # 既排除蓝底高亮误点，又避免纯中位数的0.5像素角度量化。
+    green_center = (
+        histogram_core_mean_coordinate(
+            green_x_histogram, green_count, left,
+            PLAYER_HEADING_CORE_RADIUS),
+        histogram_core_mean_coordinate(
+            green_y_histogram, green_count, top,
+            PLAYER_HEADING_CORE_RADIUS))
+    cyan_center = (
+        histogram_core_mean_coordinate(
+            cyan_x_histogram, cyan_count, left,
+            PLAYER_HEADING_CORE_RADIUS),
+        histogram_core_mean_coordinate(
+            cyan_y_histogram, cyan_count, top,
+            PLAYER_HEADING_CORE_RADIUS))
+    heading_centers = player_heading_centers_from_boundary(
+        color_labels, right - left, bottom - top, left, top,
+        green_center, cyan_center)
+    if heading_centers is None:
+        green_center = None
+        cyan_center = None
+    else:
+        green_center, cyan_center = heading_centers
+    return (player_center, green_center, cyan_center)
+
+
+def detect_player_center_precise(img, anchor_center):
+    pose = detect_player_pose_precise(img, anchor_center)
+    return None if pose is None else pose[0]
 
 
 def box_cell_has_coverage(img, center_x, center_y):
@@ -957,6 +1134,72 @@ def image_center_to_grid_q(center, rectified=True, raw_transform=None):
     return (col_q, row_q)
 
 
+def shortest_heading_error_deg(target_deg, current_deg):
+    error = target_deg - current_deg
+    while error > 180.0:
+        error -= 360.0
+    while error < -180.0:
+        error += 360.0
+    return error
+
+
+def player_heading_to_yaw_deg(green_center, cyan_center,
+                              rectified=True, raw_transform=None):
+    green_grid = image_center_to_grid_q(
+        green_center, rectified, raw_transform)
+    cyan_grid = image_center_to_grid_q(
+        cyan_center, rectified, raw_transform)
+    if green_grid is None or cyan_grid is None:
+        return None
+
+    dx_q = cyan_grid[0] - green_grid[0]
+    dy_q = cyan_grid[1] - green_grid[1]
+    distance_sq = dx_q * dx_q + dy_q * dy_q
+    if (distance_sq < PLAYER_HEADING_MIN_VECTOR_Q *
+            PLAYER_HEADING_MIN_VECTOR_Q or
+            distance_sq > PLAYER_HEADING_MAX_VECTOR_Q *
+            PLAYER_HEADING_MAX_VECTOR_Q):
+        return None
+
+    # 地图 yaw 约定：下=0°，右=90°，上=180°，左=270°。
+    yaw_deg = math.atan2(dx_q, dy_q) * 180.0 / math.pi
+    return yaw_deg + 360.0 if yaw_deg < 0.0 else yaw_deg
+
+
+def filter_player_heading_samples(samples):
+    if len(samples) < PLAYER_HEADING_SAMPLE_COUNT:
+        return None
+
+    reference = samples[0]
+    best_score = None
+    for candidate in samples:
+        score = 0.0
+        for sample in samples:
+            score += abs(shortest_heading_error_deg(sample, candidate))
+        if best_score is None or score < best_score:
+            reference = candidate
+            best_score = score
+
+    sin_sum = 0.0
+    cos_sum = 0.0
+    accepted_count = 0
+    for sample in samples:
+        if abs(shortest_heading_error_deg(sample, reference)) > \
+                PLAYER_HEADING_OUTLIER_MAX_DEG:
+            continue
+        angle_rad = sample * math.pi / 180.0
+        sin_sum += math.sin(angle_rad)
+        cos_sum += math.cos(angle_rad)
+        accepted_count += 1
+
+    if accepted_count < PLAYER_HEADING_MIN_VALID_SAMPLES:
+        return None
+    yaw_deg = math.atan2(sin_sum, cos_sum) * 180.0 / math.pi
+    if yaw_deg < 0.0:
+        yaw_deg += 360.0
+    return (yaw_deg, accepted_count)
+
+
 def resolve_player_center(img, recognition_points,
                           raw_element_matrix, stable_element_matrix,
                           previous_precise, previous_cell,
@@ -974,13 +1217,17 @@ def resolve_player_center(img, recognition_points,
         img, recognition_points,
         raw_element_matrix, stable_element_matrix, anchor)
     precise_anchor = blob_center if blob_center is not None else anchor
-    precise_center = detect_player_center_precise(img, precise_anchor)
+    precise_pose = detect_player_pose_precise(img, precise_anchor)
+    if precise_pose is None:
+        return None
+    precise_center, green_center, cyan_center = precise_pose
     grid_q = image_center_to_grid_q(
         precise_center, rectified, raw_transform)
     if grid_q is None:
         return None
     return (precise_center, grid_q,
-            (grid_q[1] // 100, grid_q[0] // 100))
+            (grid_q[1] // 100, grid_q[0] // 100),
+            green_center, cyan_center)
 
 
 def sample_special_color(img, x, y, center_r, center_g, center_b, predicate):
@@ -1122,8 +1369,12 @@ def build_canonical_player_map(element_matrix, background_matrix,
         if selected_row < 0:
             return None
 
-    canonical = [["" for _ in range(GRID_COLS)]
-                 for _ in range(GRID_ROWS)]
+    canonical = []
+    for _ in range(GRID_ROWS):
+        row = []
+        for _ in range(GRID_COLS):
+            row.append("")
+        canonical.append(row)
     for row_idx in range(GRID_ROWS):
         for col_idx in range(GRID_COLS):
             element = element_matrix[row_idx][col_idx]
@@ -1184,6 +1435,45 @@ def print_map(char_matrix, fps, loop_fps, loop_us,
           (snapshot_us, rectify_us, recognize_us, display_us))
     if player_center is not None:
         print("PLAYER_CENTER %d,%d" % (player_center[0], player_center[1]))
+
+
+def draw_player_heading_debug(img, green_center, cyan_center, yaw_deg):
+    if green_center is None or cyan_center is None:
+        return
+    green_x = int(green_center[0] + 0.5)
+    green_y = int(green_center[1] + 0.5)
+    cyan_x = int(cyan_center[0] + 0.5)
+    cyan_y = int(cyan_center[1] + 0.5)
+    dx = cyan_center[0] - green_center[0]
+    dy = cyan_center[1] - green_center[1]
+    length = math.sqrt(dx * dx + dy * dy)
+    if length <= 0.001:
+        return
+
+    end_x = int(cyan_center[0] + dx * 0.8 + 0.5)
+    end_y = int(cyan_center[1] + dy * 0.8 + 0.5)
+    unit_x = dx / length
+    unit_y = dy / length
+    back_x = end_x - unit_x * 5 * FRAME_SCALE
+    back_y = end_y - unit_y * 5 * FRAME_SCALE
+    side_x = -unit_y * 3 * FRAME_SCALE
+    side_y = unit_x * 3 * FRAME_SCALE
+
+    img.draw_line((green_x, green_y, end_x, end_y),
+                  color=(255, 0, 0), thickness=2)
+    img.draw_line((end_x, end_y,
+                   int(back_x + side_x), int(back_y + side_y)),
+                  color=(255, 0, 0), thickness=2)
+    img.draw_line((end_x, end_y,
+                   int(back_x - side_x), int(back_y - side_y)),
+                  color=(255, 0, 0), thickness=2)
+    img.draw_cross(green_x, green_y, color=(0, 255, 0), thickness=2)
+    img.draw_cross(cyan_x, cyan_y, color=(0, 255, 255), thickness=2)
+    if yaw_deg is not None:
+        label_x = max(0, min(img.width() - 52, cyan_x + 6 * FRAME_SCALE))
+        label_y = max(0, cyan_y - 12 * FRAME_SCALE)
+        img.draw_string(label_x, label_y, "Y%.1f" % yaw_deg,
+                        color=(255, 255, 0), scale=1)
 
 
 def init_uart_map():
@@ -1273,7 +1563,7 @@ def poll_map_uart_rx(uart):
 
 
 def process_center_request(uart, player_center_grid,
-                           canonical_char_matrix):
+                           canonical_char_matrix, player_yaw_deg):
     global center_request_active
     global center_request_sample_count
 
@@ -1286,9 +1576,16 @@ def process_center_request(uart, player_center_grid,
     sample_index = center_request_sample_count + 1
     if not send_map_uart(uart, canonical_char_matrix, player_center_grid):
         return False
+    yaw_q = 0
+    yaw_valid = 0
+    if player_yaw_deg is not None:
+        yaw_q = int(player_yaw_deg * 100.0 + 0.5) % 36000
+        yaw_valid = 1
     try:
-        uart.write("CENTER_SAMPLE %d,%d,%d\n" %
-                   (sample_index, player_center_grid[0], player_center_grid[1]))
+        uart.write("CENTER_SAMPLE %d,%d,%d,%d,%d\n" %
+                   (sample_index,
+                    player_center_grid[0], player_center_grid[1],
+                    yaw_q, yaw_valid))
     except Exception:
         return False
 
@@ -1421,11 +1718,22 @@ def main():
     last_precise_player_grid = None
     player_center_lost_frames = 0
     last_player_cell = None
+    player_heading_history = []
+    player_heading_lost_frames = 0
+    player_heading_filtered_deg = None
+    player_heading_accepted_count = 0
+    last_center_request_generation = center_request_generation
 
     while True:
         loop_start_us = time.ticks_us()
         clock.tick()
         poll_map_uart_rx(map_uart)
+        if center_request_generation != last_center_request_generation:
+            player_heading_history = []
+            player_heading_lost_frames = 0
+            player_heading_filtered_deg = None
+            player_heading_accepted_count = 0
+            last_center_request_generation = center_request_generation
         img = sensor.snapshot()
         snapshot_done_us = time.ticks_us()
         now_ms = time.ticks_ms()
@@ -1454,6 +1762,10 @@ def main():
                 last_precise_player_grid = None
                 player_center_lost_frames = 0
                 last_player_cell = None
+                player_heading_history = []
+                player_heading_lost_frames = 0
+                player_heading_filtered_deg = None
+                player_heading_accepted_count = 0
 
         rectify_done_us = time.ticks_us()
         recognize_map(recognition_img, recognition_points, raw_element_matrix)
@@ -1473,11 +1785,15 @@ def main():
 
         need_precise_player_center = (
             center_request_active or observation_request_active or
-            DEBUG_PLAYER_CENTER_ENABLE or DEBUG_OBSERVATION_ENABLE or
+            DEBUG_PLAYER_CENTER_ENABLE or DEBUG_PLAYER_HEADING_ENABLE or
+            DEBUG_OBSERVATION_ENABLE or
             player_count != 1)
         precise_player_center = None
         precise_player_grid = None
         precise_player_cell = None
+        player_green_center = None
+        player_cyan_center = None
+        player_heading_raw_deg = None
         if need_precise_player_center:
             player_center_result = resolve_player_center(
                 recognition_img, recognition_points,
@@ -1488,6 +1804,8 @@ def main():
                 precise_player_center = player_center_result[0]
                 precise_player_grid = player_center_result[1]
                 precise_player_cell = player_center_result[2]
+                player_green_center = player_center_result[3]
+                player_cyan_center = player_center_result[4]
                 player_center_anchor = precise_player_center
                 last_precise_player_center = precise_player_center
                 last_precise_player_grid = precise_player_grid
@@ -1507,6 +1825,30 @@ def main():
                     last_precise_player_center = None
                     last_precise_player_grid = None
                     last_player_cell = None
+
+        if center_request_active or DEBUG_PLAYER_HEADING_ENABLE:
+            player_heading_raw_deg = player_heading_to_yaw_deg(
+                player_green_center, player_cyan_center,
+                rectified_recognition_active, raw_grid_transform)
+            if player_heading_raw_deg is not None:
+                player_heading_lost_frames = 0
+                player_heading_history.append(player_heading_raw_deg)
+                if len(player_heading_history) > PLAYER_HEADING_SAMPLE_COUNT:
+                    player_heading_history.pop(0)
+                heading_result = filter_player_heading_samples(
+                    player_heading_history)
+                if heading_result is None:
+                    player_heading_filtered_deg = None
+                    player_heading_accepted_count = 0
+                else:
+                    player_heading_filtered_deg = heading_result[0]
+                    player_heading_accepted_count = heading_result[1]
+            else:
+                player_heading_lost_frames += 1
+                if player_heading_lost_frames >= PLAYER_CENTER_LOST_FRAME_LIMIT:
+                    player_heading_history = []
+                    player_heading_filtered_deg = None
+                    player_heading_accepted_count = 0
 
         precise_center_is_authoritative = (
             precise_player_grid is not None and
@@ -1532,7 +1874,7 @@ def main():
                 UART_MAP_SEND_PERIOD_MS):
             center_map_sent = process_center_request(
                 map_uart, precise_player_grid,
-                canonical_char_matrix)
+                canonical_char_matrix, player_heading_raw_deg)
         if center_map_sent:
             last_uart_send_ms = now_ms
         box_centers = []
@@ -1603,6 +1945,11 @@ def main():
                 (rectified_recognition_active == display_rectified)):
             img.draw_cross(precise_player_center[0], precise_player_center[1],
                            color=(255, 255, 0), thickness=2)
+        if (DEBUG_PLAYER_HEADING_ENABLE and
+                rectified_recognition_active == display_rectified):
+            draw_player_heading_debug(
+                img, player_green_center, player_cyan_center,
+                player_heading_filtered_deg)
         if DEBUG_OBSERVATION_ENABLE:
             if rectified_recognition_active == display_rectified:
                 for _, _, debug_center, _ in debug_box_centers:
@@ -1610,7 +1957,8 @@ def main():
                                    color=(0, 255, 0), thickness=2)
         display_done_us = time.ticks_us()
 
-        if ((DEBUG_ENABLE or DEBUG_PLAYER_CENTER_ENABLE or DEBUG_OBSERVATION_ENABLE) and
+        if ((DEBUG_ENABLE or DEBUG_PLAYER_CENTER_ENABLE or
+                DEBUG_PLAYER_HEADING_ENABLE or DEBUG_OBSERVATION_ENABLE) and
                 time.ticks_diff(now_ms, last_print_ms) >= DEBUG_PRINT_PERIOD_MS):
             loop_us = time.ticks_diff(time.ticks_us(), loop_start_us)
             loop_fps = 1000000.0 / loop_us if loop_us > 0 else 0.0
@@ -1634,6 +1982,22 @@ def main():
                       (debug_player_center_grid[0], debug_player_center_grid[1]))
             else:
                 print("PLAYER_CENTER_GRID 0,0 0")
+            if DEBUG_PLAYER_HEADING_ENABLE:
+                if player_heading_raw_deg is None:
+                    print("PLAYER_YAW invalid samples=%d/%d" %
+                          (len(player_heading_history),
+                           PLAYER_HEADING_SAMPLE_COUNT))
+                elif player_heading_filtered_deg is None:
+                    print("PLAYER_YAW raw=%.2f filtered=WAIT samples=%d/%d" %
+                          (player_heading_raw_deg,
+                           len(player_heading_history),
+                           PLAYER_HEADING_SAMPLE_COUNT))
+                else:
+                    print("PLAYER_YAW raw=%.2f filtered=%.2f accepted=%d/%d" %
+                          (player_heading_raw_deg,
+                           player_heading_filtered_deg,
+                           player_heading_accepted_count,
+                           PLAYER_HEADING_SAMPLE_COUNT))
             if DEBUG_OBSERVATION_ENABLE:
                 for debug_row, debug_col, _, debug_grid in debug_box_centers:
                     if debug_grid is not None:

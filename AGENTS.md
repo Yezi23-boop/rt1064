@@ -109,11 +109,13 @@ MAP_OK rows=12 cols=16
 
 ```text
 MCU -> CENTER_REQ
-ART -> CENTER_SAMPLE <index>,<col_q>,<row_q>
+ART -> CENTER_SAMPLE <index>,<col_q>,<row_q>,<yaw_q>,<yaw_valid>
 
 MCU -> OBSERVE_REQ <box_row>,<box_col>
 ART -> OBSERVE_SAMPLE <index>,<player_col_q>,<player_row_q>,<box_col_q>,<box_row_q>
 ```
+
+`yaw_q` 单位为 `0.01°`；`yaw_valid=0` 时中心样本仍然有效。除发车区校准和科目二全部观察完成、`HYaw` 稳定后的单次小角校准外，不得用该字段修改 MCU 姿态基准。
 
 ### OpenART #2 协议摘要
 

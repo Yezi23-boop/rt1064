@@ -1,4 +1,5 @@
 import ast
+import math
 from pathlib import Path
 
 from PIL import Image
@@ -15,12 +16,20 @@ CONSTANTS = {
     "PLAYER_CENTER_SEARCH_RADIUS",
     "PLAYER_PRECISE_MIN_COLOR_PIXELS",
     "PLAYER_PRECISE_TRIM_PERCENT",
+    "PLAYER_HEADING_CORE_RADIUS",
+    "PLAYER_HEADING_BOUNDARY_MAX_GAP",
+    "PLAYER_HEADING_BOUNDARY_NORMAL_BAND",
+    "PLAYER_HEADING_BOUNDARY_MIN_POINTS",
+    "PLAYER_HEADING_BOUNDARY_MIN_AXIS_RATIO",
 }
 FUNCTIONS = {
     "normalize_color",
     "is_player_green_half",
     "is_player_cyan_half",
     "trimmed_histogram_bounds",
+    "histogram_core_mean_coordinate",
+    "player_heading_centers_from_boundary",
+    "detect_player_pose_precise",
     "detect_player_center_precise",
 }
 nodes = []
@@ -31,7 +40,7 @@ for node in TREE.body:
     elif isinstance(node, ast.FunctionDef) and node.name in FUNCTIONS:
         nodes.append(node)
 
-namespace = {"FRAME_SCALE": 1}
+namespace = {"FRAME_SCALE": 1, "math": math}
 exec(compile(ast.Module(body=nodes, type_ignores=[]), "main_see.py", "exec"), namespace)
 
 

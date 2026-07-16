@@ -45,10 +45,12 @@
 #define YAW_DEADBAND_DEG (0.05f)
 /** 姿态环允许输出的最大归一化旋转分量。 */
 #define MAX_VZ (1.0f)
+/** 原地转向时姿态环允许输出的最大旋转分量，降低大角度转向冲击。 */
+#define YAW_TURN_MAX_VZ (0.4f)
 /** 平移/路径执行时姿态保持允许叠加的最大旋转修正，避免横移被 yaw 环抢占。 */
 #define YAW_TRANSLATION_MAX_VZ (0.3f)
 /** 离散原地转向每次命令对应的最大目标角步进，单位为 degree。 */
-#define TURN_STEP_DEG (5.0f)
+#define TURN_STEP_DEG (1.0f)
 
 /** IMU 原始 yaw 到底盘控制 yaw 的方向符号。
  * 当前板测为顺时针 raw yaw 增大，因此取 -1，使控制层保持逆时针为正。
@@ -92,7 +94,7 @@
 /** waypoint/发车移动到点需要连续满足阈值的 20ms 周期数，用于过滤瞬时越界和惯性抖动。 */
 #define EXEC_ARRIVAL_STABLE_TICKS (3u)
 /** waypoint 切换前的停稳时间，单位 ms；只在拐点/路径点边界停，不拆连续直线段。 */
-#define EXEC_SEGMENT_SETTLE_MS (500u)
+#define EXEC_SEGMENT_SETTLE_MS (150u)
 /** 推箱动作目标点越界补偿开关；只作用于 U/D/L/R，不改变普通移动。 */
 #define EXEC_PUSH_OVERSHOOT_ENABLE (0)
 /** 推箱动作额外前压比例，单位为格；0.20 表示每格 20cm 时多走 4cm。 */
@@ -100,7 +102,7 @@
 /** 近箱推箱准备位额外退开比例；0.5 表示先在距箱子1.5格处横向对齐。 */
 #define EXEC_NEAR_BOX_EXTRA_GAP_RATIO (0.5f)
 /** ART 等图、中心请求以及发车/返航/观察回中心动作的最长时间。 */
-#define EXEC_ART_SYNC_TIMEOUT_MS (10000u)
+#define EXEC_ART_SYNC_TIMEOUT_MS (5000u)
 /** CENTER_REQ 超时降级开关；1=按阶段使用安全兜底继续，0=严格停车报错。 */
 #ifndef ART_CENTER_TIMEOUT_FALLBACK_ENABLE
 #define ART_CENTER_TIMEOUT_FALLBACK_ENABLE (1)
@@ -125,7 +127,7 @@
 #define COMPETITION_MODE_SUBJECT1_DEBUG (1u)
 #define COMPETITION_MODE_SUBJECT2_DEBUG (2u)
 #define COMPETITION_MODE_FULL (3u)
-#define COMPETITION_MODE (COMPETITION_MODE_SUBJECT2_DEBUG)
+#define COMPETITION_MODE (COMPETITION_MODE_FULL)
 /** UART4 与 OpenART #2 板级自检；1=上电自动测试并禁止启动比赛，0=正常比赛。 */
 #define VISION_UART_BOARD_TEST_ENABLE (0)
 /** 科目二分类结果最低置信度，单位千分值。 */
@@ -133,7 +135,11 @@
 /** 科目二分类需要连续一致的有效样本数。 */
 #define SUBJECT2_CLASS_STABLE_SAMPLES (3u)
 /** 科目二单个视距等待分类结果的最长时间；超时后先后退扩大视野。 */
-#define SUBJECT2_VIEW_TIMEOUT_MS (5000u)
+#define SUBJECT2_VIEW_TIMEOUT_MS (3000u)
+/** 科目二观察到位后，周期中心距计划格中心不超过该值时跳过5帧精确校正。 */
+#define SUBJECT2_FAST_CENTER_TOLERANCE_CM (2.0f)
+/** 科目二观察到位后等待一张新周期中心帧的最长时间。 */
+#define SUBJECT2_FAST_CENTER_WAIT_MS (300u)
 /** 科目二首次识别失败时沿远离对象方向后退的距离，单位 cm。 */
 #define SUBJECT2_VIEW_BACKOFF_CM (8.0f)
 /** 科目二观察转向允许误差，单位 degree。 */
@@ -141,15 +147,37 @@
 /** yaw 连续处于允许误差内的时间，单位 ms。 */
 #define SUBJECT2_TURN_STABLE_MS (100u)
 /** 科目二观察转向最长时间，单位 ms。 */
-#define SUBJECT2_TURN_TIMEOUT_MS (10000u)
+#define SUBJECT2_TURN_TIMEOUT_MS (5000u)
+/** 科目二观察完成后 ART yaw 不超过该偏差时只重建基准，不实际转向。 */
+#define SUBJECT2_POST_OBSERVE_YAW_IGNORE_DEG (2.0f)
+/** 科目二观察完成后允许实际修正的最大 ART yaw 偏差。 */
+#define SUBJECT2_POST_OBSERVE_YAW_MAX_CORRECT_DEG (6.0f)
+/** 科目二观察完成后等待5帧 ART yaw 的最长时间，单位 ms。 */
+#define SUBJECT2_POST_OBSERVE_YAW_TIMEOUT_MS (3000u)
 /** 等待 OpenART #2 READY 时的模式命令重发周期。 */
 #define SUBJECT2_VISION_READY_RETRY_MS (1000u)
 /** 等待 OpenART #2 READY 的总超时时间。 */
-#define SUBJECT2_VISION_READY_TIMEOUT_MS (10000u)
+#define SUBJECT2_VISION_READY_TIMEOUT_MS (4000u)
 /** ART 左发车区目标：第二个可走格中心 X，单位 cm；col=2.5, grid=20cm -> 50cm。 */
 #define ART_LAUNCH_TARGET_X_CM (50.0f)
 /** 每次 CENTER_REQ 需要的有效精确中心样本数；所有关键节点共用5帧中值滤波。 */
 #define ART_CENTER_SAMPLE_COUNT (5u)
+/** 每科目发车区 ART yaw 单点校准开关。 */
+#define ART_LAUNCH_YAW_ENABLE (1)
+/** 发车 yaw 至少需要的有效样本数。 */
+#define ART_LAUNCH_YAW_MIN_VALID_SAMPLES (4u)
+/** 发车 yaw 相对圆周 medoid 的离群阈值，单位 degree。 */
+#define ART_LAUNCH_YAW_OUTLIER_DEG (5.0f)
+/** 科目二 yaw 偏差不超过该值时不实际转向，单位 degree。 */
+#define ART_LAUNCH_YAW_IGNORE_DEG (5.0f)
+/** 科目二 yaw 偏差超过该值时要求第二批确认，单位 degree。 */
+#define ART_LAUNCH_YAW_RECHECK_DEG (10.0f)
+/** 两批发车 yaw 允许的最大差值，单位 degree。 */
+#define ART_LAUNCH_YAW_BATCH_MATCH_DEG (3.0f)
+/** 发车 yaw 样本最长等待时间，单位 ms；超时不阻塞原发车流程。 */
+#define ART_LAUNCH_YAW_TIMEOUT_MS (3000u)
+/** 左发车区已知物理车头方向，ART 坐标下上方为180 degree。 */
+#define ART_LAUNCH_EXPECTED_YAW_DEG (180.0f)
 /** 推箱完成后自动返回左侧发车中心。 */
 #define ART_RETURN_HOME_ENABLE (1)
 /** 左侧发车通道在推箱地图内的入口列。 */

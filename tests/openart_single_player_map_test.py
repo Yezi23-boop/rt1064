@@ -25,6 +25,13 @@ for node in TREE.body:
         found_functions.add(node.name)
 
 assert found_functions == FUNCTIONS, "canonical player map helpers are missing"
+canonical_function = next(
+    node for node in TREE.body
+    if isinstance(node, ast.FunctionDef) and
+    node.name == "build_canonical_player_map")
+assert not any(isinstance(node, ast.ListComp)
+               for node in ast.walk(canonical_function)), \
+    "OpenMV v1.18 cannot execute this nested list comprehension"
 
 namespace = {}
 exec(compile(ast.Module(body=nodes, type_ignores=[]),

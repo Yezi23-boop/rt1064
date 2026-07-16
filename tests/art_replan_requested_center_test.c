@@ -1,7 +1,10 @@
 #include "art_replan.h"
+#include "art_observation.h"
+#include "drive_control.h"
 #include "drive_pose.h"
 #include "executor.h"
 #include "map_utils.h"
+#include "motion_math.h"
 #include "openart_uart.h"
 #include "solver.h"
 #include <math.h>
@@ -12,6 +15,8 @@ static uint32 fake_time_ms;
 static uint32 fake_frame_count;
 static uint16 center_col_q[ART_CENTER_SAMPLE_COUNT];
 static uint16 center_row_q[ART_CENTER_SAMPLE_COUNT];
+static uint16 center_yaw_q[ART_CENTER_SAMPLE_COUNT];
+static uint8 center_yaw_valid[ART_CENTER_SAMPLE_COUNT];
 static uint8 center_count;
 static uint8 center_read;
 static uint16 center_request_count;
@@ -50,6 +55,10 @@ static char fake_sync_action;
 static executor_state_enum fake_executor_state;
 static executor_error_enum fake_executor_error;
 static drive_pose_struct fake_pose;
+static control_status_struct fake_control_status;
+static uint16 yaw_correction_start_count;
+static float yaw_correction_delta_deg;
+static uint16 yaw_rebase_count;
 static char live_rows[MAP_ROWS][MAP_COLS + 1];
 static map_source_struct live_source;
 static char paired_center_rows[MAP_ROWS][MAP_COLS + 1];
@@ -74,6 +83,20 @@ void drive_pose_reset(float x, float y, float yaw)
 void stop_motion(void) { }
 void reset_motion_segment(void) { }
 void set_motion(float vx, float vy) { (void)vx; (void)vy; }
+const control_status_struct *get_control_status(void) { return &fake_control_status; }
+void drive_control_start_relative_yaw_correction(float delta_deg)
+{
+    yaw_correction_start_count++;
+    yaw_correction_delta_deg = delta_deg;
+    fake_control_status.yaw_error = delta_deg;
+}
+void drive_control_lock_yaw_and_reset_pose(void)
+{
+    yaw_rebase_count++;
+    fake_control_status.target_yaw = fake_control_status.current_yaw;
+    fake_control_status.yaw_error = 0.0f;
+    memset(&fake_pose, 0, sizeof(fake_pose));
+}
 void openart_request_player_center(void)
 {
     center_request_count++;
@@ -95,11 +118,14 @@ uint8 openart_get_observation_sample(openart_observation_sample_struct *sample)
     *sample = observation_samples[observation_read++];
     return 1u;
 }
-uint8 openart_get_requested_center_sample(uint16 *col_q, uint16 *row_q)
+uint8 openart_get_requested_center_sample(uint16 *col_q, uint16 *row_q,
+                                          uint16 *yaw_q, uint8 *yaw_valid)
 {
     if(center_read >= center_count) return 0;
     *col_q = center_col_q[center_read];
     *row_q = center_row_q[center_read];
+    *yaw_q = center_yaw_q[center_read];
+    *yaw_valid = center_yaw_valid[center_read];
     center_read++;
     return center_read;
 }
@@ -306,10 +332,56 @@ static void feed_center(uint16 col0, uint16 row0,
         center_col_q[index] = col0;
         center_row_q[index] = row0;
     }
+    memset(center_yaw_q, 0, sizeof(center_yaw_q));
+    memset(center_yaw_valid, 0, sizeof(center_yaw_valid));
     center_count = ART_CENTER_SAMPLE_COUNT;
     center_read = 0;
     map_source_snapshot(&paired_center_source, paired_center_rows, &live_source);
     paired_center_valid = 1u;
+}
+
+static void feed_center_yaw(uint16 col_q, uint16 row_q, float yaw_deg)
+{
+    uint8 index;
+    uint16 yaw_q = (uint16)(yaw_deg * 100.0f + 0.5f);
+
+    for(index = 0u; index < ART_CENTER_SAMPLE_COUNT; index++)
+    {
+        center_col_q[index] = col_q;
+        center_row_q[index] = row_q;
+        center_yaw_q[index] = yaw_q;
+        center_yaw_valid[index] = 1u;
+    }
+    center_count = ART_CENTER_SAMPLE_COUNT;
+    center_read = 0u;
+    map_source_snapshot(&paired_center_source, paired_center_rows, &live_source);
+    paired_center_valid = 1u;
+}
+
+static uint8 circular_yaw_filter_handles_wrap_and_outlier(void)
+{
+    art_center_batch_struct batch;
+    float yaw_deg = 0.0f;
+    uint8 accepted = 0u;
+
+    art_center_batch_reset(&batch);
+    batch.count = ART_CENTER_SAMPLE_COUNT;
+    batch.yaw_q[0] = 35900u;
+    batch.yaw_q[1] = 0u;
+    batch.yaw_q[2] = 100u;
+    batch.yaw_q[3] = 200u;
+    batch.yaw_q[4] = 2000u;
+    memset(batch.yaw_valid, 1, sizeof(batch.yaw_valid));
+
+    if((0u == art_center_batch_get_yaw_deg(&batch, &yaw_deg, &accepted)) ||
+       (4u != accepted) ||
+       (fabsf(shortest_angle_error(0.5f, yaw_deg)) > 0.01f))
+    {
+        return 0u;
+    }
+
+    batch.yaw_valid[3] = 0u;
+    return (0u == art_center_batch_get_yaw_deg(&batch, &yaw_deg, &accepted)) ? 1u : 0u;
 }
 
 static void feed_observation(uint16 car_col_q, uint16 car_row_q,
@@ -889,10 +961,160 @@ static uint8 cross_cell_center_retries_without_resetting_timeout(void)
 #endif
 }
 
+static void init_launch_yaw_test(art_replan_context_struct *context)
+{
+    art_replan_cancel();
+    art_replan_reset_competition_yaw();
+    memset(&result, 0, sizeof(result));
+    memset(&snapshot, 0, sizeof(snapshot));
+    memset(&fake_control_status, 0, sizeof(fake_control_status));
+    memset(&fake_pose, 0, sizeof(fake_pose));
+    build_map();
+    context->result = &result;
+    context->snapshot = &snapshot;
+    context->snapshot_rows = snapshot_rows;
+    context->snapshot_valid = &snapshot_valid;
+    context->elapsed_ms = &elapsed_ms;
+    context->start_row = &start_row;
+    context->start_col = &start_col;
+    context->run_mode = RUN_MODE_RUN;
+    fake_time_ms = 0u;
+    fake_executor_state = EXEC_STATE_IDLE;
+    fake_executor_error = EXEC_ERROR_NONE;
+    center_count = 0u;
+    center_read = 0u;
+    yaw_correction_start_count = 0u;
+    yaw_correction_delta_deg = 0.0f;
+    yaw_rebase_count = 0u;
+    position_correction_start_count = 0u;
+}
+
+static uint8 per_subject_launch_yaw_flow(void)
+{
+    art_replan_context_struct context;
+    art_replan_update_struct update;
+    uint16 request_before;
+    float launch_yaw_bias_deg = 0.0f;
+
+    init_launch_yaw_test(&context);
+    request_before = center_request_count;
+    art_replan_begin_initial(&update);
+    fake_time_ms = 5000u;
+    art_replan_tick(&context, 1u, &update);
+    feed_center_yaw(85u, 525u, 177.0f);
+    art_replan_tick(&context, 1u, &update);
+    if((request_before + 1u != center_request_count) ||
+       (0u != yaw_correction_start_count) ||
+       (1u != yaw_rebase_count) ||
+       (0 != strcmp(update.run_state, "LCH")) ||
+       (0u == art_replan_get_launch_yaw_bias(&launch_yaw_bias_deg)) ||
+       (fabsf(launch_yaw_bias_deg - 3.0f) > 0.01f)) return 0u;
+
+    art_replan_begin_subject2(&update);
+    fake_time_ms += 5000u;
+    art_replan_tick(&context, 1u, &update);
+    feed_center_yaw(85u, 525u, 184.0f);
+    art_replan_tick(&context, 1u, &update);
+    if((1u != yaw_correction_start_count) ||
+       (fabsf(yaw_correction_delta_deg + 7.0f) > 0.01f) ||
+       (0 != strcmp(update.run_state, "YawFix"))) return 0u;
+
+    fake_control_status.yaw_error = 0.0f;
+    art_replan_tick(&context, 1u, &update);
+    fake_time_ms += SUBJECT2_TURN_STABLE_MS;
+    art_replan_tick(&context, 1u, &update);
+    return ((2u == yaw_rebase_count) &&
+            (2u == position_correction_start_count) &&
+            (0 == strcmp(update.run_state, "LCH"))) ? 1u : 0u;
+}
+
+static uint8 large_launch_yaw_requires_matching_recheck(void)
+{
+    art_replan_context_struct context;
+    art_replan_update_struct update;
+    uint16 request_before;
+
+    init_launch_yaw_test(&context);
+    art_replan_begin_initial(&update);
+    fake_time_ms = 5000u;
+    art_replan_tick(&context, 1u, &update);
+    feed_center_yaw(85u, 525u, 180.0f);
+    art_replan_tick(&context, 1u, &update);
+
+    art_replan_begin_subject2(&update);
+    fake_time_ms += 5000u;
+    art_replan_tick(&context, 1u, &update);
+    request_before = center_request_count;
+    feed_center_yaw(85u, 525u, 195.0f);
+    art_replan_tick(&context, 1u, &update);
+    if((request_before + 1u != center_request_count) ||
+       (0 != strcmp(update.run_state, "YawChk")) ||
+       (0u != yaw_correction_start_count)) return 0u;
+
+    feed_center_yaw(85u, 525u, 196.0f);
+    art_replan_tick(&context, 1u, &update);
+    return ((1u == yaw_correction_start_count) &&
+            (fabsf(yaw_correction_delta_deg + 16.0f) <= 0.01f) &&
+            (0 == strcmp(update.run_state, "YawFix"))) ? 1u : 0u;
+}
+
+static uint8 launch_yaw_fallbacks_and_turn_timeout(void)
+{
+    art_replan_context_struct context;
+    art_replan_update_struct update;
+
+    init_launch_yaw_test(&context);
+    art_replan_begin_initial(&update);
+    fake_time_ms = 5000u;
+    art_replan_tick(&context, 1u, &update);
+    feed_center_yaw(85u, 525u, 180.0f);
+    art_replan_tick(&context, 1u, &update);
+    art_replan_begin_subject2(&update);
+    fake_time_ms += 5000u;
+    art_replan_tick(&context, 1u, &update);
+    feed_center_yaw(95u, 525u, 190.0f);
+    art_replan_tick(&context, 1u, &update);
+    if((0u != yaw_correction_start_count) ||
+       (2u != yaw_rebase_count) ||
+       (0 != strcmp(update.run_state, "LCH"))) return 0u;
+
+    init_launch_yaw_test(&context);
+    art_replan_begin_initial(&update);
+    fake_time_ms = 5000u;
+    art_replan_tick(&context, 1u, &update);
+    fake_time_ms += ART_LAUNCH_YAW_TIMEOUT_MS + 1u;
+    feed_center_yaw(85u, 525u, 180.0f);
+    art_replan_tick(&context, 1u, &update);
+    if((0u != yaw_correction_start_count) ||
+       (1u != yaw_rebase_count) ||
+       (0 != strcmp(update.run_state, "LCH"))) return 0u;
+
+    init_launch_yaw_test(&context);
+    art_replan_begin_initial(&update);
+    fake_time_ms = 5000u;
+    art_replan_tick(&context, 1u, &update);
+    feed_center_yaw(85u, 525u, 180.0f);
+    art_replan_tick(&context, 1u, &update);
+    art_replan_begin_subject2(&update);
+    fake_time_ms += 5000u;
+    art_replan_tick(&context, 1u, &update);
+    feed_center_yaw(85u, 525u, 187.0f);
+    art_replan_tick(&context, 1u, &update);
+    fake_time_ms += SUBJECT2_TURN_TIMEOUT_MS;
+    art_replan_tick(&context, 1u, &update);
+    return ((EXEC_STATE_ERROR == fake_executor_state) &&
+            (EXEC_ERROR_SUBJECT2_YAW == fake_executor_error) &&
+            (0 == strcmp(update.run_state, "E:Yaw"))) ? 1u : 0u;
+}
+
 int main(void)
 {
     uint8 all_passed = 1u;
     uint8 passed;
+
+    passed = circular_yaw_filter_handles_wrap_and_outlier();
+    printf("center-yaw-circular-filter   %s\n", (0 != passed) ? "PASS" : "FAIL");
+    all_passed &= passed;
 
     passed = run_test();
     printf("request-driven-art-state      %s\n", (0 != passed) ? "PASS" : "FAIL");
@@ -914,6 +1136,15 @@ int main(void)
     all_passed &= passed;
     passed = pre_push_box_failures_follow_policy();
     printf("pre-push-box-failures         %s\n", (0 != passed) ? "PASS" : "FAIL");
+    all_passed &= passed;
+    passed = per_subject_launch_yaw_flow();
+    printf("per-subject-launch-yaw       %s\n", (0 != passed) ? "PASS" : "FAIL");
+    all_passed &= passed;
+    passed = large_launch_yaw_requires_matching_recheck();
+    printf("launch-yaw-recheck           %s\n", (0 != passed) ? "PASS" : "FAIL");
+    all_passed &= passed;
+    passed = launch_yaw_fallbacks_and_turn_timeout();
+    printf("launch-yaw-fallbacks         %s\n", (0 != passed) ? "PASS" : "FAIL");
     all_passed &= passed;
     return (0 != all_passed) ? 0 : 1;
 }

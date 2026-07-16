@@ -8,6 +8,8 @@ typedef struct
 {
     uint16 col_q[ART_CENTER_SAMPLE_COUNT];
     uint16 row_q[ART_CENTER_SAMPLE_COUNT];
+    uint16 yaw_q[ART_CENTER_SAMPLE_COUNT];
+    uint8 yaw_valid[ART_CENTER_SAMPLE_COUNT];
     uint8 count;
 } art_center_batch_struct;
 
@@ -24,6 +26,9 @@ uint8 art_center_batch_collect(art_center_batch_struct *batch);
 uint8 art_center_batch_get_median(const art_center_batch_struct *batch,
                                   uint16 *col_q,
                                   uint16 *row_q);
+uint8 art_center_batch_get_yaw_deg(const art_center_batch_struct *batch,
+                                   float *yaw_deg,
+                                   uint8 *accepted_count);
 uint8 art_center_batch_apply_to_executor(const art_center_batch_struct *batch);
 
 void art_box_observation_session_reset(art_box_observation_session_struct *session);

@@ -246,5 +246,5 @@ assert namespace["observation_request_active"] is False
 
 assert "DEBUG_OBSERVATION_ENABLE =" in SOURCE
 assert "player_heading_from_halves" not in SOURCE
-assert "PLAYER_HEADING" not in SOURCE
+assert 'uart.write("PLAYER_YAW' not in SOURCE
 print("openart-observation PASS")

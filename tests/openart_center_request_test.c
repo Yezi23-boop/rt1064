@@ -42,7 +42,10 @@ static uint8 pop_sample_equals(uint8 expected_index, uint16 expected_col, uint16
 {
     uint16 col_q = 0u;
     uint16 row_q = 0u;
-    uint8 index = openart_get_requested_center_sample(&col_q, &row_q);
+    uint16 yaw_q = 0u;
+    uint8 yaw_valid = 0u;
+    uint8 index = openart_get_requested_center_sample(&col_q, &row_q,
+                                                       &yaw_q, &yaw_valid);
 
     return ((expected_index == index) &&
             (expected_col == col_q) &&
@@ -53,6 +56,23 @@ static uint8 run_case(const char *name, uint8 passed)
 {
     printf("%-28s %s\n", name, (0 != passed) ? "PASS" : "FAIL");
     return passed;
+}
+
+static uint8 pop_sample_with_yaw_equals(uint8 expected_index,
+                                        uint16 expected_col, uint16 expected_row,
+                                        uint16 expected_yaw, uint8 expected_valid)
+{
+    uint16 col_q = 0u;
+    uint16 row_q = 0u;
+    uint16 yaw_q = 0u;
+    uint8 yaw_valid = 0u;
+    uint8 index = openart_get_requested_center_sample(&col_q, &row_q,
+                                                       &yaw_q, &yaw_valid);
+
+    return ((expected_index == index) &&
+            (expected_col == col_q) && (expected_row == row_q) &&
+            (expected_yaw == yaw_q) &&
+            (expected_valid == yaw_valid)) ? 1u : 0u;
 }
 
 static uint8 pop_observation_equals(uint8 expected_available,
@@ -123,7 +143,7 @@ static void feed_center_sample_with_map(uint8 index, uint16 col_q, uint16 row_q)
 
     feed_map_frame("#....C.........#", col_q, row_q, 1u);
     snprintf(sample_line, sizeof(sample_line),
-             "CENTER_SAMPLE %u,%u,%u", index, col_q, row_q);
+             "CENTER_SAMPLE %u,%u,%u,18000,1", index, col_q, row_q);
     feed_line(sample_line);
 }
 
@@ -160,14 +180,18 @@ int main(void)
     passed &= run_case("request-command", 0 == strcmp(tx_text, "CENTER_REQ\n"));
     passed &= run_case("request-clears-samples", pop_sample_equals(0u, 0u, 0u));
 
-    feed_line("CENTER_SAMPLE 1,568,550");
+    feed_line("CENTER_SAMPLE 1,568,550,18000,1");
     passed &= run_case("unpaired-sample-rejected", pop_sample_equals(0u, 0u, 0u));
     feed_map_frame("#....C.........#", 568u, 550u, 1u);
-    feed_line("CENTER_SAMPLE 1,569,550");
+    feed_line("CENTER_SAMPLE 1,568,550");
+    passed &= run_case("old-center-protocol-rejected", pop_sample_equals(0u, 0u, 0u));
+    feed_map_frame("#....C.........#", 568u, 550u, 1u);
+    feed_line("CENTER_SAMPLE 1,569,550,18000,1");
     passed &= run_case("mismatched-sample-rejected", pop_sample_equals(0u, 0u, 0u));
     feed_center_sample_with_map(1u, 568u, 550u);
-    feed_line("CENTER_SAMPLE 2,568,550");
-    passed &= run_case("sample-requires-new-map", pop_sample_equals(1u, 568u, 550u));
+    feed_line("CENTER_SAMPLE 2,568,550,18000,1");
+    passed &= run_case("sample-requires-new-map",
+        pop_sample_with_yaw_equals(1u, 568u, 550u, 18000u, 1u));
     feed_center_sample_with_map(2u, 570u, 550u);
     feed_center_sample_with_map(3u, 572u, 550u);
     feed_center_sample_with_map(4u, 574u, 550u);
@@ -202,7 +226,7 @@ int main(void)
     openart_request_player_center();
     passed &= run_case("new-request-clears-paired-map",
                        NULL == openart_get_requested_center_map());
-    feed_line("CENTER_SAMPLE 1,600,500");
+    feed_line("CENTER_SAMPLE 1,600,500,18000,1");
     openart_request_player_center();
     passed &= run_case("new-request-clears-queue", pop_sample_equals(0u, 0u, 0u));
 

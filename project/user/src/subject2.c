@@ -62,6 +62,8 @@ static uint32 confirm_wait_start_ms;
 static map_stability_tracker_struct confirm_tracker;
 static uint32 center_request_start_ms;
 static uint32 center_adjust_start_ms;
+static uint32 scan_fast_center_after_frame;
+static uint8 scan_center_request_started;
 static uint32 turn_start_ms;
 static uint32 turn_stable_start_ms;
 static uint8 turn_stable_active;
@@ -74,6 +76,10 @@ static float view_backoff_origin_x_cm;
 static float view_backoff_origin_y_cm;
 static uint32 view_motion_start_ms;
 static float launch_yaw_deg;
+static uint8 post_observe_art_yaw_bias_valid;
+static float post_observe_art_yaw_bias_deg;
+static uint8 post_observe_yaw_done;
+static uint32 post_observe_yaw_start_ms;
 static subject2_scan_sync_phase_enum scan_sync_phase;
 static uint8 scan_plan_snapshot_pending;
 
@@ -85,6 +91,13 @@ static const map_source_struct *subject2_effective_map(
     const subject2_context_struct *context,
     const map_source_struct *source,
     uint8 allow_infer);
+static uint8 subject2_try_fast_scan_center(
+    const subject2_context_struct *context,
+    uint16 center_col_q,
+    uint16 center_row_q,
+    uint8 center_valid,
+    uint8 is_box_scan,
+    subject2_update_struct *update);
 
 static void subject2_update_reset(subject2_update_struct *update)
 {
@@ -273,6 +286,7 @@ static void subject2_retry_center_request(const char *state_text,
     art_center_batch_reset(&center_batch);
     executor_reset_art_player_center_samples();
     openart_request_player_center();
+    scan_center_request_started = 1u;
     if(0 != update)
     {
         update->run_state = state_text;
@@ -293,16 +307,16 @@ static uint8 subject2_observation_map_matches(const map_source_struct *source)
 }
 
 static uint8 subject2_apply_center_from_cell(const subject2_context_struct *context,
-                                             const map_source_struct *source,
-                                             uint8 source_car_row,
-                                             uint8 source_car_col,
-                                             uint8 reference_row,
-                                             uint8 reference_col,
-                                             float *applied_x_cm,
-                                             float *applied_y_cm)
+                                              const map_source_struct *source,
+                                              uint8 source_car_row,
+                                              uint8 source_car_col,
+                                              uint8 reference_row,
+                                              uint8 reference_col,
+                                              uint16 col_q,
+                                              uint16 row_q,
+                                              float *applied_x_cm,
+                                              float *applied_y_cm)
 {
-    uint16 col_q;
-    uint16 row_q;
     char old_car_value;
     char reference_value;
     float offset_x_cm;
@@ -313,10 +327,6 @@ static uint8 subject2_apply_center_from_cell(const subject2_context_struct *cont
         return 0u;
     }
 
-    if(0u == subject2_get_center_median(&col_q, &row_q))
-    {
-        return 0u;
-    }
     if((col_q >= (MAP_COLS * 100u)) || (row_q >= (MAP_ROWS * 100u)))
     {
         return 0u;
@@ -367,8 +377,12 @@ static uint8 subject2_apply_center(const subject2_context_struct *context,
 {
     uint8 car_row;
     uint8 car_col;
+    uint16 col_q;
+    uint16 row_q;
 
-    if((0 == source) || (0 == map_find_car(source, &car_row, &car_col, 0)))
+    if((0 == source) ||
+       (0u == subject2_get_center_median(&col_q, &row_q)) ||
+       (0 == map_find_car(source, &car_row, &car_col, 0)))
     {
         return 0u;
     }
@@ -380,6 +394,7 @@ static uint8 subject2_apply_center(const subject2_context_struct *context,
     return subject2_apply_center_from_cell(context, source,
                                            car_row, car_col,
                                            car_row, car_col,
+                                           col_q, row_q,
                                            applied_x_cm, applied_y_cm);
 }
 
@@ -491,11 +506,19 @@ static void subject2_begin_view_return(uint8 recognition_accepted,
 static void subject2_begin_scan_center(subject2_update_struct *update)
 {
     uint8 box_scan = (box_objects == current_objects()) ? 1u : 0u;
+    uint8 periodic_center_valid;
 
     set_motion(0.0f, 0.0f);
     art_center_batch_reset(&center_batch);
     center_request_start_ms = time_ms();
-    openart_request_player_center();
+    scan_fast_center_after_frame = openart_get_player_center(
+        0, 0, &periodic_center_valid);
+    scan_center_request_started = 0u;
+    if(0u == periodic_center_valid)
+    {
+        openart_request_player_center();
+        scan_center_request_started = 1u;
+    }
     subject2_state = (0u != box_scan) ?
                      SUBJECT2_SCAN_BOX_CENTER : SUBJECT2_SCAN_TARGET_CENTER;
     if(0 != update)
@@ -569,6 +592,42 @@ static void subject2_tick_center(const subject2_context_struct *context,
     uint16 center_col_q;
     uint16 center_row_q;
     uint8 center_applied = 0u;
+
+    if(0u == scan_center_request_started)
+    {
+        uint8 periodic_center_valid;
+        uint32 periodic_center_frame = openart_get_player_center(
+            &center_col_q, &center_row_q, &periodic_center_valid);
+
+        if(periodic_center_frame != scan_fast_center_after_frame)
+        {
+            if(0u != subject2_try_fast_scan_center(context,
+                                                    center_col_q,
+                                                    center_row_q,
+                                                    periodic_center_valid,
+                                                    is_box_scan,
+                                                    update))
+            {
+                return;
+            }
+            openart_request_player_center();
+            scan_center_request_started = 1u;
+        }
+        else if((time_ms() - center_request_start_ms) >=
+                SUBJECT2_FAST_CENTER_WAIT_MS)
+        {
+            openart_request_player_center();
+            scan_center_request_started = 1u;
+        }
+        else
+        {
+            if(0 != update)
+            {
+                update->run_state = "VCtr";
+            }
+            return;
+        }
+    }
 
     if(0 == subject2_collect_center())
     {
@@ -979,6 +1038,221 @@ static void subject2_tick_validate(subject2_update_struct *update)
     }
 }
 
+static uint8 subject2_try_fast_scan_center(
+    const subject2_context_struct *context,
+    uint16 center_col_q,
+    uint16 center_row_q,
+    uint8 center_valid,
+    uint8 is_box_scan,
+    subject2_update_struct *update)
+{
+    const map_source_struct *source = openart_map_get();
+    uint8 car_row;
+    uint8 car_col;
+    float offset_x_cm;
+    float offset_y_cm;
+
+    if((0u == center_valid) ||
+       (0u == map_validate_player_center(source,
+                                         center_col_q, center_row_q,
+                                         &car_row, &car_col)) ||
+       (0u == subject2_map_objects_unchanged(source)) ||
+       (car_row != current_observation.row) ||
+       (car_col != current_observation.col))
+    {
+        return 0u;
+    }
+
+    offset_x_cm = ((float)((int32)center_col_q -
+                           (int32)(car_col * 100u + 50u)) /
+                   100.0f) * GRID_SIZE_CM;
+    offset_y_cm = -((float)((int32)center_row_q -
+                            (int32)(car_row * 100u + 50u)) /
+                    100.0f) * GRID_SIZE_CM;
+    if((subject2_abs_float(offset_x_cm) > SUBJECT2_FAST_CENTER_TOLERANCE_CM) ||
+       (subject2_abs_float(offset_y_cm) > SUBJECT2_FAST_CENTER_TOLERANCE_CM))
+    {
+        return 0u;
+    }
+    if(0u == subject2_apply_center_from_cell(context, source,
+                                              car_row, car_col,
+                                              car_row, car_col,
+                                              center_col_q, center_row_q,
+                                              0, 0))
+    {
+        return 0u;
+    }
+    if(0u == executor_start_position_correction_with_pose_reset(
+                  current_pose_offset_x_cm,
+                  current_pose_offset_y_cm,
+                  current_pose_offset_x_cm,
+                  current_pose_offset_y_cm))
+    {
+        subject2_fail(EXEC_ERROR_ART_CENTER, "E:CBsy", update);
+        return 1u;
+    }
+
+    center_adjust_start_ms = time_ms();
+    subject2_state = (0u != is_box_scan) ?
+                     SUBJECT2_SCAN_BOX_ADJUST : SUBJECT2_SCAN_TARGET_ADJUST;
+    if(0 != update)
+    {
+        update->run_state = "VAdj";
+        update->redraw = 1u;
+    }
+    return 1u;
+}
+
+static void subject2_enter_select_push(subject2_update_struct *update)
+{
+    subject2_state = SUBJECT2_SELECT_PUSH;
+    if(0 != update)
+    {
+        update->run_state = "Bind";
+        update->redraw = 1u;
+    }
+}
+
+static void subject2_finish_post_observe_yaw(uint8 rebase,
+                                             subject2_update_struct *update)
+{
+    if(0u != rebase)
+    {
+        drive_control_lock_yaw_and_reset_pose();
+        launch_yaw_deg = get_control_status()->target_yaw;
+    }
+    subject2_enter_select_push(update);
+}
+
+static void subject2_begin_post_observe_yaw(subject2_update_struct *update)
+{
+    if(0u != post_observe_yaw_done)
+    {
+        subject2_enter_select_push(update);
+        return;
+    }
+
+    post_observe_yaw_done = 1u;
+    if(0u == post_observe_art_yaw_bias_valid)
+    {
+        subject2_enter_select_push(update);
+        return;
+    }
+    set_motion(0.0f, 0.0f);
+    art_center_batch_reset(&center_batch);
+    openart_request_player_center();
+    post_observe_yaw_start_ms = time_ms();
+    subject2_state = SUBJECT2_POST_OBSERVE_YAW_SAMPLE;
+    if(0 != update)
+    {
+        update->run_state = "VYaw";
+        update->redraw = 1u;
+    }
+}
+
+static void subject2_tick_post_observe_yaw_sample(subject2_update_struct *update)
+{
+    const map_source_struct *source;
+    uint16 center_col_q;
+    uint16 center_row_q;
+    uint8 car_row;
+    uint8 car_col;
+    float measured_yaw_deg;
+    float corrected_yaw_deg;
+    float correction_deg;
+    float correction_abs_deg;
+
+    if((time_ms() - post_observe_yaw_start_ms) >=
+       SUBJECT2_POST_OBSERVE_YAW_TIMEOUT_MS)
+    {
+        subject2_finish_post_observe_yaw(0u, update);
+        return;
+    }
+    if(0u == art_center_batch_collect(&center_batch))
+    {
+        if(0 != update)
+        {
+            update->run_state = "VYaw";
+        }
+        return;
+    }
+
+    source = openart_get_requested_center_map();
+    if((0u == art_center_batch_get_median(&center_batch,
+                                          &center_col_q, &center_row_q)) ||
+       (0u == map_validate_player_center(source,
+                                         center_col_q, center_row_q,
+                                         &car_row, &car_col)) ||
+       (0u == art_center_batch_get_yaw_deg(&center_batch,
+                                           &measured_yaw_deg, 0)))
+    {
+        subject2_finish_post_observe_yaw(0u, update);
+        return;
+    }
+    (void)car_row;
+    (void)car_col;
+
+    corrected_yaw_deg = measured_yaw_deg + post_observe_art_yaw_bias_deg;
+    correction_deg = shortest_angle_error(ART_LAUNCH_EXPECTED_YAW_DEG,
+                                           corrected_yaw_deg);
+    correction_abs_deg = subject2_abs_float(correction_deg);
+    if(correction_abs_deg <= SUBJECT2_POST_OBSERVE_YAW_IGNORE_DEG)
+    {
+        subject2_finish_post_observe_yaw(1u, update);
+        return;
+    }
+    if(correction_abs_deg > SUBJECT2_POST_OBSERVE_YAW_MAX_CORRECT_DEG)
+    {
+        subject2_finish_post_observe_yaw(0u, update);
+        return;
+    }
+
+    drive_control_start_relative_yaw_correction(correction_deg);
+    turn_start_ms = time_ms();
+    turn_stable_start_ms = 0u;
+    turn_stable_active = 0u;
+    subject2_state = SUBJECT2_POST_OBSERVE_YAW_FIX;
+    if(0 != update)
+    {
+        update->run_state = "VFix";
+        update->redraw = 1u;
+    }
+}
+
+static void subject2_tick_post_observe_yaw_fix(subject2_update_struct *update)
+{
+    const control_status_struct *status = get_control_status();
+    uint32 now_ms = time_ms();
+
+    if(subject2_abs_float(status->yaw_error) <= SUBJECT2_TURN_TOLERANCE_DEG)
+    {
+        if(0u == turn_stable_active)
+        {
+            turn_stable_active = 1u;
+            turn_stable_start_ms = now_ms;
+        }
+        else if((now_ms - turn_stable_start_ms) >= SUBJECT2_TURN_STABLE_MS)
+        {
+            turn_stable_active = 0u;
+            subject2_finish_post_observe_yaw(1u, update);
+            return;
+        }
+    }
+    else
+    {
+        turn_stable_active = 0u;
+    }
+
+    if((now_ms - turn_start_ms) >= SUBJECT2_TURN_TIMEOUT_MS)
+    {
+        subject2_fail(EXEC_ERROR_SUBJECT2_YAW, "E:Yaw", update);
+    }
+    else if(0 != update)
+    {
+        update->run_state = "VFix";
+    }
+}
+
 static void subject2_tick_restore_heading(subject2_update_struct *update)
 {
     const control_status_struct *status = get_control_status();
@@ -994,12 +1268,7 @@ static void subject2_tick_restore_heading(subject2_update_struct *update)
         else if((now_ms - turn_stable_start_ms) >= SUBJECT2_TURN_STABLE_MS)
         {
             turn_stable_active = 0u;
-            subject2_state = SUBJECT2_SELECT_PUSH;
-            if(0 != update)
-            {
-                update->run_state = "Bind";
-                update->redraw = 1u;
-            }
+            subject2_begin_post_observe_yaw(update);
             return;
         }
     }
@@ -1876,6 +2145,10 @@ void subject2_begin(const subject2_context_struct *context,
     transit_overlap_cell = INVALID_STATE;
     replan_center_for_return = 0u;
     launch_yaw_deg = context->launch_yaw_deg;
+    post_observe_art_yaw_bias_valid = context->art_yaw_bias_valid;
+    post_observe_art_yaw_bias_deg = context->art_yaw_bias_deg;
+    post_observe_yaw_done = 0u;
+    post_observe_yaw_start_ms = 0u;
     map_stability_tracker_reset(&confirm_tracker, 0u);
     confirm_wait_start_ms = 0u;
     scan_sync_phase = SUBJECT2_SCAN_SYNC_WAIT_MAP;
@@ -1956,6 +2229,12 @@ void subject2_tick(const subject2_context_struct *context,
         case SUBJECT2_RESTORE_HEADING:
             subject2_tick_restore_heading(update);
             break;
+        case SUBJECT2_POST_OBSERVE_YAW_SAMPLE:
+            subject2_tick_post_observe_yaw_sample(update);
+            break;
+        case SUBJECT2_POST_OBSERVE_YAW_FIX:
+            subject2_tick_post_observe_yaw_fix(update);
+            break;
         case SUBJECT2_SELECT_PUSH:
             subject2_tick_select_push(context, update);
             break;
@@ -2017,6 +2296,8 @@ void subject2_cancel(void)
     confirm_wait_start_ms = 0u;
     center_request_start_ms = 0u;
     center_adjust_start_ms = 0u;
+    scan_fast_center_after_frame = 0u;
+    scan_center_request_started = 0u;
     turn_start_ms = 0u;
     turn_stable_start_ms = 0u;
     turn_stable_active = 0u;
@@ -2029,6 +2310,10 @@ void subject2_cancel(void)
     view_backoff_origin_y_cm = 0.0f;
     view_motion_start_ms = 0u;
     launch_yaw_deg = 0.0f;
+    post_observe_art_yaw_bias_valid = 0u;
+    post_observe_art_yaw_bias_deg = 0.0f;
+    post_observe_yaw_done = 0u;
+    post_observe_yaw_start_ms = 0u;
     scan_sync_phase = SUBJECT2_SCAN_SYNC_WAIT_MAP;
     scan_plan_snapshot_pending = 0u;
 }

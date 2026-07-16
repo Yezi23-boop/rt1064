@@ -29,6 +29,8 @@ typedef enum
     SUBJECT2_SCAN_MAP_SYNC,
     SUBJECT2_VALIDATE_BINDINGS,
     SUBJECT2_RESTORE_HEADING,
+    SUBJECT2_POST_OBSERVE_YAW_SAMPLE,
+    SUBJECT2_POST_OBSERVE_YAW_FIX,
     SUBJECT2_SELECT_PUSH,
     SUBJECT2_EXECUTE_PUSH,
     SUBJECT2_PRE_PUSH_CENTER,
@@ -50,6 +52,8 @@ typedef struct
     uint8 *start_col;
     run_mode_enum run_mode;
     float launch_yaw_deg;
+    uint8 art_yaw_bias_valid;
+    float art_yaw_bias_deg;
 } subject2_context_struct;
 
 typedef struct

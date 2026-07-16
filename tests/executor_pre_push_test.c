@@ -667,6 +667,29 @@ static uint8 near_box_move_uses_one_world_axis(void)
             (0u == dual_axis_motion_seen)) ? 1u : 0u;
 }
 
+static uint8 run_near_box_boundary_keeps_moving(void)
+{
+    waypoint_struct waypoints[2] = {
+        {5u, 6u, 'r', 0u, 1u, 0u, 0u, 0u, 0u},
+        {5u, 7u, 'r', 1u, 2u, 0u, 0u, 1u, 0u}
+    };
+    uint16 reset_before;
+    uint16 motion_before;
+
+    reset_fixture();
+    executor_start(waypoints, 2u, 5u, 5u, 0.0f, 0.0f, 0u, 0u);
+    drive_pose_reset(GRID_SIZE_CM, 0.0f, 0.0f);
+    reset_before = reset_call_count;
+    motion_before = motion_call_count;
+    executor_update_20ms();
+
+    return ((0u == executor_get_current_step()) &&
+            (reset_before == reset_call_count) &&
+            (motion_call_count > motion_before) &&
+            (last_motion_vx > 0.0f) &&
+            (fabsf(last_motion_vy) < 0.0001f)) ? 1u : 0u;
+}
+
 static uint8 extra_gap_direction(char action, uint8 box_row, uint8 box_col,
                                  uint16 box_col_q, uint16 box_row_q,
                                  float expected_sign, uint8 x_axis)
@@ -1086,6 +1109,7 @@ int main(void)
     passed &= run_case("box-align-consumes-approach", box_preparation_aligns_and_consumes_approach());
     passed &= run_case("box-short-gap-retreat", short_gap_retreats_before_alignment());
     passed &= run_case("near-box-axis-lock", near_box_move_uses_one_world_axis());
+    passed &= run_case("near-box-boundary-continuous", run_near_box_boundary_keeps_moving());
     passed &= run_case("box-extra-gap-directions", extra_gap_targets_all_directions());
     passed &= run_case("box-extra-gap-blocked", blocked_extra_gap_keeps_one_grid());
     passed &= run_case("box-wrong-side-rejected", wrong_side_box_is_rejected());

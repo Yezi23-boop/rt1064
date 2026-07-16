@@ -66,6 +66,8 @@ static uint8 requested_center_count;                             // 当前请求
 static uint8 requested_center_read_index;                        // 主循环下一条待取样本下标。
 static uint16 requested_center_col_q[OPENART_REQUESTED_CENTER_SAMPLE_COUNT]; // 请求样本列队列，单位 1/100 格。
 static uint16 requested_center_row_q[OPENART_REQUESTED_CENTER_SAMPLE_COUNT]; // 请求样本行队列，单位 1/100 格。
+static uint16 requested_center_yaw_q[OPENART_REQUESTED_CENTER_SAMPLE_COUNT]; // 请求样本 ART yaw，单位 0.01 degree。
+static uint8 requested_center_yaw_valid[OPENART_REQUESTED_CENTER_SAMPLE_COUNT]; // 1 表示对应 yaw 样本有效。
 static char requested_center_map_rows[MAP_ROWS][MAP_COLS + 1];   // 最近一条有效 CENTER_SAMPLE 前的配套完整地图。
 static map_source_struct requested_center_map_source;            // 指向请求中心配套地图快照。
 static uint8 requested_center_map_valid;                         // 1 表示配套地图与当前请求样本已通过一致性校验。
@@ -358,13 +360,18 @@ static void parse_player_center_line(void)
 
 static uint8 parse_center_sample_line(uint16 *sample_index,
                                      uint16 *center_col_q,
-                                     uint16 *center_row_q)
+                                     uint16 *center_row_q,
+                                     uint16 *yaw_q,
+                                     uint8 *yaw_valid)
 {
     const char *prefix = "CENTER_SAMPLE ";
     char *text = line_buffer + strlen(prefix);
     char *index_text;
     char *col_text;
     char *row_text;
+    char *yaw_text;
+    char *valid_text;
+    uint16 valid_value;
 
     if(0 != strncmp(line_buffer, prefix, strlen(prefix)))
     {
@@ -393,10 +400,43 @@ static uint8 parse_center_sample_line(uint16 *sample_index,
     }
     *text++ = '\0';
     row_text = text;
+    while(('\0' != *text) && (',' != *text))
+    {
+        text++;
+    }
+    if(',' != *text)
+    {
+        return 0;
+    }
+    *text++ = '\0';
 
-    return ((0 != parse_uint16_text(index_text, sample_index)) &&
-            (0 != parse_uint16_text(col_text, center_col_q)) &&
-            (0 != parse_uint16_text(row_text, center_row_q))) ? 1u : 0u;
+    yaw_text = text;
+    while(('\0' != *text) && (',' != *text))
+    {
+        text++;
+    }
+    if(',' != *text)
+    {
+        return 0;
+    }
+    *text++ = '\0';
+    valid_text = text;
+
+    if((0 == parse_uint16_text(index_text, sample_index)) ||
+       (0 == parse_uint16_text(col_text, center_col_q)) ||
+       (0 == parse_uint16_text(row_text, center_row_q)) ||
+       (0 == parse_uint16_text(yaw_text, yaw_q)) ||
+       (0 == parse_uint16_text(valid_text, &valid_value)) ||
+       (valid_value > 1u) || (*yaw_q >= 36000u))
+    {
+        return 0u;
+    }
+    if((0u == valid_value) && (0u != *yaw_q))
+    {
+        return 0u;
+    }
+    *yaw_valid = (uint8)valid_value;
+    return 1u;
 }
 
 static void parse_requested_center_line(void)
@@ -404,9 +444,12 @@ static void parse_requested_center_line(void)
     uint16 sample_index;
     uint16 center_col_q;
     uint16 center_row_q;
+    uint16 yaw_q;
+    uint8 yaw_valid;
 
     if((0 == requested_center_active) ||
-       (0 == parse_center_sample_line(&sample_index, &center_col_q, &center_row_q)))
+       (0 == parse_center_sample_line(&sample_index, &center_col_q, &center_row_q,
+                                      &yaw_q, &yaw_valid)))
     {
         return;
     }
@@ -427,6 +470,8 @@ static void parse_requested_center_line(void)
 
     requested_center_col_q[requested_center_count] = center_col_q;
     requested_center_row_q[requested_center_count] = center_row_q;
+    requested_center_yaw_q[requested_center_count] = yaw_q;
+    requested_center_yaw_valid[requested_center_count] = yaw_valid;
     map_source_snapshot(&requested_center_map_source,
                         requested_center_map_rows,
                         &openart_map_source);
@@ -668,6 +713,8 @@ void openart_uart_init(void)
     requested_center_last_map_frame = 0;
     memset(requested_center_col_q, 0, sizeof(requested_center_col_q));
     memset(requested_center_row_q, 0, sizeof(requested_center_row_q));
+    memset(requested_center_yaw_q, 0, sizeof(requested_center_yaw_q));
+    memset(requested_center_yaw_valid, 0, sizeof(requested_center_yaw_valid));
     observation_active = 0u;
     observation_count = 0u;
     observation_read_index = 0u;
@@ -788,10 +835,13 @@ void openart_request_player_center(void)
     requested_center_last_map_frame = frame_count;
     memset(requested_center_col_q, 0, sizeof(requested_center_col_q));
     memset(requested_center_row_q, 0, sizeof(requested_center_row_q));
+    memset(requested_center_yaw_q, 0, sizeof(requested_center_yaw_q));
+    memset(requested_center_yaw_valid, 0, sizeof(requested_center_yaw_valid));
     uart_write_string(OPENART_UART_INDEX, "CENTER_REQ\n");
 }
 
-uint8 openart_get_requested_center_sample(uint16 *col_q, uint16 *row_q)
+uint8 openart_get_requested_center_sample(uint16 *col_q, uint16 *row_q,
+                                          uint16 *yaw_q, uint8 *yaw_valid)
 {
     uint8 sample_index;
 
@@ -805,6 +855,14 @@ uint8 openart_get_requested_center_sample(uint16 *col_q, uint16 *row_q)
         {
             *row_q = 0;
         }
+        if(0 != yaw_q)
+        {
+            *yaw_q = 0;
+        }
+        if(0 != yaw_valid)
+        {
+            *yaw_valid = 0;
+        }
         return 0;
     }
 
@@ -816,6 +874,14 @@ uint8 openart_get_requested_center_sample(uint16 *col_q, uint16 *row_q)
     if(0 != row_q)
     {
         *row_q = requested_center_row_q[requested_center_read_index];
+    }
+    if(0 != yaw_q)
+    {
+        *yaw_q = requested_center_yaw_q[requested_center_read_index];
+    }
+    if(0 != yaw_valid)
+    {
+        *yaw_valid = requested_center_yaw_valid[requested_center_read_index];
     }
     requested_center_read_index++;
     return sample_index;

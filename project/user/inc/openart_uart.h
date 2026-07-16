@@ -104,9 +104,12 @@ void openart_request_player_center(void);
  * @brief 按接收顺序弹出当前请求的一条中心样本。
  * @param[out] col_q 中心列坐标，单位 1/100 格，可传 NULL。
  * @param[out] row_q 中心行坐标，单位 1/100 格，可传 NULL。
+ * @param[out] yaw_q ART yaw，单位 0.01 degree，可传 NULL。
+ * @param[out] yaw_valid 1 表示 yaw 有效；0 表示本帧只有中心，可传 NULL。
  * @return 样本序号 1..ART_CENTER_SAMPLE_COUNT；0 表示当前没有待取样本。
  */
-uint8 openart_get_requested_center_sample(uint16 *col_q, uint16 *row_q);
+uint8 openart_get_requested_center_sample(uint16 *col_q, uint16 *row_q,
+                                          uint16 *yaw_q, uint8 *yaw_valid);
 
 /**
  * @brief 获取当前 CENTER_REQ 最近一条已接受样本的配套完整地图。

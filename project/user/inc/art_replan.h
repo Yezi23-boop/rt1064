@@ -74,6 +74,12 @@ typedef struct
  */
 void art_replan_cancel(void);
 
+/** 开始一轮新比赛前清除科目间共享的发车区 yaw 参考。 */
+void art_replan_reset_competition_yaw(void);
+
+/** 获取本轮发车区 ART yaw 固定偏差；返回0表示发车样本无效。 */
+uint8 art_replan_get_launch_yaw_bias(float *bias_deg);
+
 /**
  * @brief 开始一次 ART 初始求解等待。
  *

@@ -1,5 +1,6 @@
 #include <stdio.h>
 #include <string.h>
+#include <math.h>
 #include "drive_control.h"
 #include "drive_pose.h"
 #include "executor.h"
@@ -20,6 +21,9 @@ static control_status_struct fake_control_status;
 static uint16 set_motion_count;
 static uint16 set_target_yaw_count;
 static float last_target_yaw;
+static uint16 relative_yaw_correction_count;
+static float relative_yaw_correction_deg;
+static uint16 yaw_rebase_count;
 static uint8 fake_ready_box;
 static uint8 fake_ready_target;
 static vision_mode_enum last_mode;
@@ -32,6 +36,8 @@ static uint16 vision_ack_count;
 static uint16 vision_cancel_count;
 static uint16 center_col_q[ART_CENTER_SAMPLE_COUNT];
 static uint16 center_row_q[ART_CENTER_SAMPLE_COUNT];
+static uint16 center_yaw_q[ART_CENTER_SAMPLE_COUNT];
+static uint8 center_yaw_valid[ART_CENTER_SAMPLE_COUNT];
 static uint8 center_count;
 static uint8 center_read;
 static uint16 center_request_count;
@@ -71,6 +77,9 @@ static char fake_art_sync_action;
 static uint16 continue_pre_push_count;
 static uint16 start_pre_push_alignment_count;
 static uint32 fake_frame_count;
+static uint16 periodic_center_col_q;
+static uint16 periodic_center_row_q;
+static uint8 periodic_center_valid;
 static uint8 executor_target_row;
 static uint8 executor_target_col;
 static char live_rows[MAP_ROWS][MAP_COLS + 1];
@@ -110,6 +119,20 @@ void set_target_yaw(float yaw)
 {
     set_target_yaw_count++;
     last_target_yaw = yaw;
+}
+void drive_control_start_relative_yaw_correction(float delta_deg)
+{
+    relative_yaw_correction_count++;
+    relative_yaw_correction_deg = delta_deg;
+    fake_control_status.target_yaw = fake_control_status.current_yaw + delta_deg;
+    fake_control_status.yaw_error = delta_deg;
+}
+void drive_control_lock_yaw_and_reset_pose(void)
+{
+    yaw_rebase_count++;
+    fake_control_status.target_yaw = fake_control_status.current_yaw;
+    fake_control_status.yaw_error = 0.0f;
+    drive_pose_reset(0.0f, 0.0f, 0.0f);
 }
 
 void executor_start(const waypoint_struct *waypoints, uint16 count,
@@ -277,7 +300,8 @@ void openart_request_player_center(void)
     center_read = 0u;
     paired_center_valid = 0u;
 }
-uint8 openart_get_requested_center_sample(uint16 *col_q, uint16 *row_q)
+uint8 openart_get_requested_center_sample(uint16 *col_q, uint16 *row_q,
+                                          uint16 *yaw_q, uint8 *yaw_valid)
 {
     if(center_read >= center_count)
     {
@@ -285,6 +309,8 @@ uint8 openart_get_requested_center_sample(uint16 *col_q, uint16 *row_q)
     }
     *col_q = center_col_q[center_read];
     *row_q = center_row_q[center_read];
+    *yaw_q = center_yaw_q[center_read];
+    *yaw_valid = center_yaw_valid[center_read];
     center_read++;
     return center_read;
 }
@@ -303,6 +329,13 @@ uint8 openart_get_observation_sample(openart_observation_sample_struct *sample)
     return 1u;
 }
 const map_source_struct *openart_map_get(void) { return &live_source; }
+uint32 openart_get_player_center(uint16 *col_q, uint16 *row_q, uint8 *valid)
+{
+    if(0 != col_q) *col_q = periodic_center_col_q;
+    if(0 != row_q) *row_q = periodic_center_row_q;
+    if(0 != valid) *valid = periodic_center_valid;
+    return fake_frame_count;
+}
 const map_source_struct *openart_get_requested_center_map(void)
 {
     return (0u != paired_center_valid) ? &paired_center_source : 0;
@@ -362,6 +395,9 @@ static void build_map(void)
     set_motion_count = 0u;
     set_target_yaw_count = 0u;
     last_target_yaw = 0.0f;
+    relative_yaw_correction_count = 0u;
+    relative_yaw_correction_deg = 0.0f;
+    yaw_rebase_count = 0u;
     fake_ready_box = 0u;
     fake_ready_target = 0u;
     last_mode = VISION_MODE_NONE;
@@ -374,6 +410,8 @@ static void build_map(void)
     center_count = 0u;
     center_read = 0u;
     center_request_count = 0u;
+    memset(center_yaw_q, 0, sizeof(center_yaw_q));
+    memset(center_yaw_valid, 0, sizeof(center_yaw_valid));
     observation_count = 0u;
     observation_read = 0u;
     observation_request_count = 0u;
@@ -409,6 +447,9 @@ static void build_map(void)
     continue_pre_push_count = 0u;
     start_pre_push_alignment_count = 0u;
     fake_frame_count = 0u;
+    periodic_center_col_q = 0u;
+    periodic_center_row_q = 0u;
+    periodic_center_valid = 0u;
     for(row = 0u; row < MAP_ROWS; row++)
     {
         for(col = 0u; col < MAP_COLS; col++)
@@ -461,6 +502,8 @@ static void feed_center(uint16 col_q, uint16 row_q)
     {
         center_col_q[index] = (uint16)(col_q + index);
         center_row_q[index] = row_q;
+        center_yaw_q[index] = 0u;
+        center_yaw_valid[index] = 0u;
     }
     center_count = ART_CENTER_SAMPLE_COUNT;
     center_read = 0u;
@@ -479,6 +522,19 @@ static void feed_center(uint16 col_q, uint16 row_q)
             (('T' == destination) || ('+' == destination)) ? '+' : 'C';
     }
     paired_center_valid = 1u;
+}
+
+static void feed_center_yaw(uint16 col_q, uint16 row_q, float yaw_deg)
+{
+    uint8 index;
+    uint16 yaw_q = (uint16)(yaw_deg * 100.0f + 0.5f);
+
+    feed_center(col_q, row_q);
+    for(index = 0u; index < ART_CENTER_SAMPLE_COUNT; index++)
+    {
+        center_yaw_q[index] = yaw_q;
+        center_yaw_valid[index] = 1u;
+    }
 }
 
 static void feed_observation(uint16 car_col_q, uint16 car_row_q,
@@ -1388,6 +1444,123 @@ static uint8 heading_restore_timeout_stops(void)
             (0 == strcmp(update.run_state, "E:HYaw"))) ? 1u : 0u;
 }
 
+static uint8 enter_post_observe_yaw(subject2_context_struct *context,
+                                    subject2_update_struct *update,
+                                    float bias_deg)
+{
+    build_map();
+    init_context(context);
+    context->art_yaw_bias_valid = 1u;
+    context->art_yaw_bias_deg = bias_deg;
+    if(0u == scan_to_heading_restore(context, update)) return 0u;
+    fake_control_status.yaw_error = 0.0f;
+    subject2_tick(context, update);
+    fake_time_ms += SUBJECT2_TURN_STABLE_MS;
+    subject2_tick(context, update);
+    return ((SUBJECT2_POST_OBSERVE_YAW_SAMPLE == subject2_get_state()) &&
+            (0 == strcmp(update->run_state, "VYaw"))) ? 1u : 0u;
+}
+
+static uint8 post_observe_yaw_thresholds_and_bias(void)
+{
+    subject2_context_struct context;
+    subject2_update_struct update;
+    uint16 request_count_after_sample;
+
+    if(0u == enter_post_observe_yaw(&context, &update, 1.0f)) return 0u;
+    feed_center_yaw(550u, 550u, 177.0f);
+    subject2_tick(&context, &update);
+    if((SUBJECT2_SELECT_PUSH != subject2_get_state()) ||
+       (1u != yaw_rebase_count) ||
+       (0u != relative_yaw_correction_count)) return 0u;
+    request_count_after_sample = center_request_count;
+    subject2_tick(&context, &update);
+    if((SUBJECT2_EXECUTE_PUSH != subject2_get_state()) ||
+       (request_count_after_sample != center_request_count)) return 0u;
+
+    if(0u == enter_post_observe_yaw(&context, &update, 0.0f)) return 0u;
+    feed_center_yaw(550u, 550u, 176.0f);
+    subject2_tick(&context, &update);
+    if((SUBJECT2_POST_OBSERVE_YAW_FIX != subject2_get_state()) ||
+       (1u != relative_yaw_correction_count) ||
+       (fabsf(relative_yaw_correction_deg - 4.0f) > 0.01f))
+    {
+        return 0u;
+    }
+    fake_control_status.yaw_error = 0.0f;
+    subject2_tick(&context, &update);
+    fake_time_ms += SUBJECT2_TURN_STABLE_MS;
+    subject2_tick(&context, &update);
+    if((SUBJECT2_SELECT_PUSH != subject2_get_state()) ||
+       (1u != yaw_rebase_count)) return 0u;
+
+    if(0u == enter_post_observe_yaw(&context, &update, 0.0f)) return 0u;
+    feed_center_yaw(550u, 550u, 174.0f);
+    subject2_tick(&context, &update);
+    if((SUBJECT2_POST_OBSERVE_YAW_FIX != subject2_get_state()) ||
+       (fabsf(relative_yaw_correction_deg - 6.0f) > 0.01f))
+    {
+        return 0u;
+    }
+
+    if(0u == enter_post_observe_yaw(&context, &update, 0.0f)) return 0u;
+    feed_center_yaw(550u, 550u, 173.9f);
+    subject2_tick(&context, &update);
+    return ((SUBJECT2_SELECT_PUSH == subject2_get_state()) &&
+            (0u == relative_yaw_correction_count) &&
+            (0u == yaw_rebase_count)) ? 1u : 0u;
+}
+
+static uint8 post_observe_yaw_fallbacks(void)
+{
+    subject2_context_struct context;
+    subject2_update_struct update;
+    uint16 request_before;
+
+    build_map();
+    init_context(&context);
+    if(0u == scan_to_heading_restore(&context, &update)) return 0u;
+    request_before = center_request_count;
+    if(0u == complete_heading_restore(&context, &update)) return 0u;
+    if(request_before != center_request_count) return 0u;
+
+    if(0u == enter_post_observe_yaw(&context, &update, 0.0f)) return 0u;
+    feed_center(550u, 550u);
+    subject2_tick(&context, &update);
+    if((SUBJECT2_SELECT_PUSH != subject2_get_state()) ||
+       (0u != yaw_rebase_count)) return 0u;
+
+    if(0u == enter_post_observe_yaw(&context, &update, 0.0f)) return 0u;
+    feed_center_yaw(550u, 550u, 180.0f);
+    paired_center_valid = 0u;
+    subject2_tick(&context, &update);
+    if((SUBJECT2_SELECT_PUSH != subject2_get_state()) ||
+       (0u != yaw_rebase_count)) return 0u;
+
+    if(0u == enter_post_observe_yaw(&context, &update, 0.0f)) return 0u;
+    fake_time_ms += SUBJECT2_POST_OBSERVE_YAW_TIMEOUT_MS;
+    subject2_tick(&context, &update);
+    return ((SUBJECT2_SELECT_PUSH == subject2_get_state()) &&
+            (0u == relative_yaw_correction_count) &&
+            (0u == yaw_rebase_count)) ? 1u : 0u;
+}
+
+static uint8 post_observe_yaw_fix_timeout_stops(void)
+{
+    subject2_context_struct context;
+    subject2_update_struct update;
+
+    if(0u == enter_post_observe_yaw(&context, &update, 0.0f)) return 0u;
+    feed_center_yaw(550u, 550u, 176.0f);
+    subject2_tick(&context, &update);
+    if(SUBJECT2_POST_OBSERVE_YAW_FIX != subject2_get_state()) return 0u;
+    fake_time_ms += SUBJECT2_TURN_TIMEOUT_MS;
+    subject2_tick(&context, &update);
+    return ((SUBJECT2_ERROR == subject2_get_state()) &&
+            (EXEC_ERROR_SUBJECT2_YAW == fake_executor_error) &&
+            (0 == strcmp(update.run_state, "E:Yaw"))) ? 1u : 0u;
+}
+
 static uint8 map_change_syncs_scan(void)
 {
     subject2_context_struct context;
@@ -1691,6 +1864,85 @@ static uint8 center_offset_adjusts_before_turn_and_classify(void)
             (1u == vision_request_id)) ? 1u : 0u;
 }
 
+static uint8 fresh_periodic_center_within_2cm_skips_batch(void)
+{
+    subject2_context_struct context;
+    subject2_update_struct update;
+
+    build_map();
+    init_context(&context);
+    periodic_center_col_q = 550u;
+    periodic_center_row_q = 550u;
+    periodic_center_valid = 1u;
+    fake_frame_count = 1u;
+    subject2_begin(&context, 0.0f, 0.0f, &update);
+    fake_ready_box = 1u;
+    subject2_tick(&context, &update);
+    subject2_tick(&context, &update);
+    if((SUBJECT2_SCAN_BOX_CENTER != subject2_get_state()) ||
+       (0u != center_request_count)) return 0u;
+
+    periodic_center_col_q = 560u;
+    fake_frame_count++;
+    subject2_tick(&context, &update);
+    return ((SUBJECT2_SCAN_BOX_ADJUST == subject2_get_state()) &&
+            (0u == center_request_count) &&
+            (1u == correction_start_count) &&
+            (correction_target_x > 1.99f) &&
+            (correction_target_x < 2.01f) &&
+            (correction_target_y == 0.0f)) ? 1u : 0u;
+}
+
+static uint8 fresh_periodic_center_over_2cm_uses_batch(void)
+{
+    subject2_context_struct context;
+    subject2_update_struct update;
+
+    build_map();
+    init_context(&context);
+    periodic_center_col_q = 550u;
+    periodic_center_row_q = 550u;
+    periodic_center_valid = 1u;
+    fake_frame_count = 1u;
+    subject2_begin(&context, 0.0f, 0.0f, &update);
+    fake_ready_box = 1u;
+    subject2_tick(&context, &update);
+    subject2_tick(&context, &update);
+
+    periodic_center_col_q = 561u;
+    fake_frame_count++;
+    subject2_tick(&context, &update);
+    return ((SUBJECT2_SCAN_BOX_CENTER == subject2_get_state()) &&
+            (1u == center_request_count) &&
+            (0u == correction_start_count)) ? 1u : 0u;
+}
+
+static uint8 periodic_center_old_frame_waits_then_uses_batch(void)
+{
+    subject2_context_struct context;
+    subject2_update_struct update;
+
+    build_map();
+    init_context(&context);
+    periodic_center_col_q = 550u;
+    periodic_center_row_q = 550u;
+    periodic_center_valid = 1u;
+    fake_frame_count = 1u;
+    subject2_begin(&context, 0.0f, 0.0f, &update);
+    fake_ready_box = 1u;
+    subject2_tick(&context, &update);
+    subject2_tick(&context, &update);
+    subject2_tick(&context, &update);
+    if((0u != center_request_count) ||
+       (0u != correction_start_count)) return 0u;
+
+    fake_time_ms += SUBJECT2_FAST_CENTER_WAIT_MS;
+    subject2_tick(&context, &update);
+    return ((SUBJECT2_SCAN_BOX_CENTER == subject2_get_state()) &&
+            (1u == center_request_count) &&
+            (0u == correction_start_count)) ? 1u : 0u;
+}
+
 static uint8 small_center_offset_still_enters_adjustment(void)
 {
     subject2_context_struct context;
@@ -1952,6 +2204,12 @@ int main(void)
     printf("subject2-home-yaw-stable    %s\n", (0u != passed) ? "PASS" : "FAIL");
     passed &= heading_restore_timeout_stops();
     printf("subject2-home-yaw-timeout   %s\n", (0u != passed) ? "PASS" : "FAIL");
+    passed &= post_observe_yaw_thresholds_and_bias();
+    printf("subject2-post-yaw-threshold %s\n", (0u != passed) ? "PASS" : "FAIL");
+    passed &= post_observe_yaw_fallbacks();
+    printf("subject2-post-yaw-fallback  %s\n", (0u != passed) ? "PASS" : "FAIL");
+    passed &= post_observe_yaw_fix_timeout_stops();
+    printf("subject2-post-yaw-timeout   %s\n", (0u != passed) ? "PASS" : "FAIL");
     passed &= map_change_syncs_scan();
     printf("subject2-scan-map-change    %s\n", (0u != passed) ? "PASS" : "FAIL");
     passed &= scan_map_sync_all_done_requests_return();
@@ -1980,6 +2238,12 @@ int main(void)
     printf("subject2-ready-timeout      %s\n", (0u != passed) ? "PASS" : "FAIL");
     passed &= center_offset_adjusts_before_turn_and_classify();
     printf("subject2-center-pose        %s\n", (0u != passed) ? "PASS" : "FAIL");
+    passed &= fresh_periodic_center_within_2cm_skips_batch();
+    printf("subject2-center-fast-2cm    %s\n", (0u != passed) ? "PASS" : "FAIL");
+    passed &= fresh_periodic_center_over_2cm_uses_batch();
+    printf("subject2-center-fast-over   %s\n", (0u != passed) ? "PASS" : "FAIL");
+    passed &= periodic_center_old_frame_waits_then_uses_batch();
+    printf("subject2-center-fast-stale  %s\n", (0u != passed) ? "PASS" : "FAIL");
     passed &= small_center_offset_still_enters_adjustment();
     printf("subject2-center-small       %s\n", (0u != passed) ? "PASS" : "FAIL");
     passed &= center_adjustment_timeout_stops();

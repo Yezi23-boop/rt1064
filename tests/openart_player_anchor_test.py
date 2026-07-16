@@ -107,7 +107,13 @@ namespace["detect_player_center"] = (
     lambda img, points, raw, stable, anchor:
     anchors.append(anchor) or anchor
 )
-namespace["detect_player_center_precise"] = lambda img, anchor: anchor
+namespace["detect_player_pose_precise"] = (
+    lambda img, anchor: (
+                         anchor,
+                         (anchor[0], anchor[1] + 5),
+                         (anchor[0], anchor[1] - 5))
+    if anchor is not None else None
+)
 namespace["image_center_to_grid_q"] = (
     lambda center, rectified, transform: (550, 550)
     if center is not None else None
@@ -117,7 +123,8 @@ result = namespace["resolve_player_center"](
     image, points, empty_map, empty_map,
     (101, 102), (5, 6), True, None)
 assert anchors[-1] == (101, 102)
-assert result == ((101, 102), (550, 550), (5, 5))
+assert result[:3] == ((101, 102), (550, 550), (5, 5))
+assert result[3:] == ((101, 107), (101, 97))
 
 result = namespace["resolve_player_center"](
     image, points, empty_map, empty_map,
@@ -134,7 +141,7 @@ assert anchors[-1] == points[4 * 16 + 7]
 assert result[2] == (5, 5)
 
 namespace["detect_player_center"] = lambda *args: None
-namespace["detect_player_center_precise"] = lambda *args: None
+namespace["detect_player_pose_precise"] = lambda *args: None
 assert namespace["resolve_player_center"](
     image, points, empty_map, empty_map,
     None, None, True, None) is None

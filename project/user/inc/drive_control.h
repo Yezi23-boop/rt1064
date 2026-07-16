@@ -67,6 +67,12 @@ void set_motion_command(motion_command_enum command, float move_speed, float tur
  */
 void set_target_yaw(float yaw);
 
+/** 停车并以当前 IMU yaw 为基准启动一次相对角度修正。 */
+void drive_control_start_relative_yaw_correction(float delta_deg);
+
+/** 原子锁定当前 IMU yaw，并将局部 pose 的位置和 yaw 零点一起重建。 */
+void drive_control_lock_yaw_and_reset_pose(void);
+
 /**
  * @brief 同时设置平移分量和绝对目标航向角。
  * @param[in] vx 车体右向分量，范围 [-1, 1]。
