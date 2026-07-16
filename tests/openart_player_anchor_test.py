@@ -21,14 +21,19 @@ FUNCTIONS = {
     "find_player_coarse_center",
     "select_recent_player_anchor",
     "detect_player_center",
+    "resolve_player_center",
 }
 nodes = []
+found_functions = set()
 for node in TREE.body:
     if isinstance(node, ast.Assign):
         if any(isinstance(target, ast.Name) and target.id in CONSTANTS for target in node.targets):
             nodes.append(node)
     elif isinstance(node, ast.FunctionDef) and node.name in FUNCTIONS:
         nodes.append(node)
+        found_functions.add(node.name)
+
+assert found_functions == FUNCTIONS, "shared player center resolver is missing"
 
 namespace = {"FRAME_SCALE": 1}
 exec(compile(ast.Module(body=nodes, type_ignores=[]), "main_see.py", "exec"), namespace)
@@ -96,5 +101,42 @@ assert namespace["select_recent_player_anchor"](
 assert namespace["select_recent_player_anchor"](
     (120, 100), (100, 100), 3
 ) == (120, 100)
+
+anchors = []
+namespace["detect_player_center"] = (
+    lambda img, points, raw, stable, anchor:
+    anchors.append(anchor) or anchor
+)
+namespace["detect_player_center_precise"] = lambda img, anchor: anchor
+namespace["image_center_to_grid_q"] = (
+    lambda center, rectified, transform: (550, 550)
+    if center is not None else None
+)
+
+result = namespace["resolve_player_center"](
+    image, points, empty_map, empty_map,
+    (101, 102), (5, 6), True, None)
+assert anchors[-1] == (101, 102)
+assert result == ((101, 102), (550, 550), (5, 5))
+
+result = namespace["resolve_player_center"](
+    image, points, empty_map, empty_map,
+    None, (5, 6), True, None)
+assert anchors[-1] == points[5 * 16 + 6]
+assert result[2] == (5, 5)
+
+coarse_map = [["space" for _ in range(16)] for _ in range(12)]
+coarse_map[4][7] = "player"
+result = namespace["resolve_player_center"](
+    image, points, coarse_map, empty_map,
+    None, None, True, None)
+assert anchors[-1] == points[4 * 16 + 7]
+assert result[2] == (5, 5)
+
+namespace["detect_player_center"] = lambda *args: None
+namespace["detect_player_center_precise"] = lambda *args: None
+assert namespace["resolve_player_center"](
+    image, points, empty_map, empty_map,
+    None, None, True, None) is None
 
 print("openart-player-anchor PASS")

@@ -40,7 +40,7 @@ typedef struct
 /**
  * @brief ART 重解算对菜单层的一次性更新请求。
  *
- * 每次调用 `art_replan_tick()` 或 `art_replan_confirm_launch()` 前都会被模块清零；
+ * 每次调用 `art_replan_tick()` 前都会被模块清零；
  * 菜单层应在当轮轮询内消费这些标志，避免旧状态影响下一帧刷新。
  */
 typedef struct
@@ -64,11 +64,10 @@ typedef struct
     uint8 confirmed_box_count;            /**< 上一次确认同步后的箱子数量。 */
     uint8 confirmed_target_count;         /**< 上一次确认同步后的目标数量。 */
     uint8 confirmed_counts_valid;         /**< 1 表示 B/T 基线有效。 */
-    uint8 launch_pending;                 /**< 1 表示等待 K3 确认启动。 */
 } art_replan_debug_status_struct;
 
 /**
- * @brief 取消当前 ART 等待、稳定帧统计和 K3 待确认启动状态。
+ * @brief 取消当前 ART 等待和稳定帧统计状态。
  *
  * @note 可由菜单安全退出、切换地图或执行器结束路径调用；不会清除最近收到的
  * OpenART 地图，也不会修改已有求解结果。
@@ -107,25 +106,6 @@ uint8 art_replan_begin_return_home(const art_replan_context_struct *context,
 void art_replan_tick(const art_replan_context_struct *context,
                      uint8 art_source_enabled,
                      art_replan_update_struct *update);
-
-/**
- * @brief 确认初始 ART 求解后的 K3 启动请求。
- *
- * @param[in,out] context 执行器起点和求解结果上下文，不能为空。
- * @param[out] update 菜单更新请求，可为 NULL。
- *
- * 初次稳定帧求解成功后不会立刻发车，而是进入待确认状态；本函数只在用户按 K3
- * 时启动执行器，避免屏幕识别到意外地图后车辆自动运动。
- */
-void art_replan_confirm_launch(const art_replan_context_struct *context,
-                               art_replan_update_struct *update);
-
-/**
- * @brief 查询是否存在等待 K3 确认的 ART 启动请求。
- *
- * @return 1 表示已有求解结果并等待人工确认启动；0 表示无需确认。
- */
-uint8 art_replan_launch_pending(void);
 
 /**
  * @brief 获取 VOFA/屏幕调试用 ART 重解算状态快照。

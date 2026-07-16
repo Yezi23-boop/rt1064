@@ -112,12 +112,74 @@ static uint8 same_direction_push_is_not_marked(void)
     return ((0 == strcmp(result.actions, "rrRR")) &&
             (4u == result.waypoint_count) &&
             (2u == result.waypoints[0].col) &&
+            (0u == result.waypoints[0].near_box_axis_lock) &&
             (0u == result.waypoints[0].center_correct_before) &&
             ('r' == result.waypoints[1].action) &&
+            (1u == result.waypoints[1].near_box_axis_lock) &&
             (1u == result.waypoints[1].center_correct_before) &&
             ('R' == result.waypoints[2].action) &&
+            (1u == result.waypoints[2].pre_push_extra_gap) &&
             (0u == result.waypoints[2].center_correct_before) &&
+            (0u == result.waypoints[3].pre_push_extra_gap) &&
             (0u == result.waypoints[3].center_correct_before)) ? 1u : 0u;
+}
+
+static uint8 navigation_splits_near_box_boundary(void)
+{
+    navigation_test_map_struct map;
+    solve_result_struct result;
+
+    init_map(&map, 2u, 1u);
+    map.storage[1][3] = 'B';
+    if(0 == solve_navigation_path(&map.source, 2u, 6u, &result))
+    {
+        return 0u;
+    }
+
+    return ((0 == strcmp(result.actions, "rrrrr")) &&
+            (2u == result.waypoint_count) &&
+            (1u == result.waypoints[0].near_box_axis_lock) &&
+            (5u == result.waypoints[0].col) &&
+            (0u == result.waypoints[1].near_box_axis_lock) &&
+            (6u == result.waypoints[1].col)) ? 1u : 0u;
+}
+
+static uint8 blocked_extra_gap_case(char blocker)
+{
+    navigation_test_map_struct map;
+    solve_result_struct result;
+    uint16 index;
+
+    init_map(&map, 2u, 1u);
+    map.storage[1][2] = blocker;
+    map.storage[1][4] = 'B';
+    map.storage[1][5] = 'T';
+    if('B' == blocker)
+    {
+        map.storage[3][2] = 'T';
+    }
+    if(0 == solve_bound_box_path(&map.source,
+                                 map_cell_index(1u, 4u),
+                                 map_cell_index(1u, 5u),
+                                 &result))
+    {
+        return 0u;
+    }
+    for(index = 0u; index < result.waypoint_count; index++)
+    {
+        if('R' == result.waypoints[index].action)
+        {
+            return (0u == result.waypoints[index].pre_push_extra_gap) ? 1u : 0u;
+        }
+    }
+    return 0u;
+}
+
+static uint8 blocked_extra_gap_is_not_marked(void)
+{
+    return ((0u != blocked_extra_gap_case('#')) &&
+            (0u != blocked_extra_gap_case('X')) &&
+            (0u != blocked_extra_gap_case('B'))) ? 1u : 0u;
 }
 
 static uint8 turn_into_push_is_marked(void)
@@ -297,6 +359,8 @@ int main(void)
 
     passed &= run_case("each-push-is-waypoint", each_push_action_is_a_waypoint());
     passed &= run_case("same-dir-push-no-center", same_direction_push_is_not_marked());
+    passed &= run_case("near-box-split", navigation_splits_near_box_boundary());
+    passed &= run_case("blocked-extra-gap", blocked_extra_gap_is_not_marked());
     passed &= run_case("turn-into-push-center", turn_into_push_is_marked());
     passed &= run_case("merged-turn-center", merged_turn_marks_next_waypoint());
     passed &= run_case("merged-straight-no-center", merged_straight_does_not_mark_center());

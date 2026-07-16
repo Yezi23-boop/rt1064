@@ -99,6 +99,24 @@ static void feed_map_frame(const char *row_five,
     feed_line("MAP_END");
 }
 
+static void feed_map_frame_without_center(const char *row_five)
+{
+    feed_line("MAP_BEGIN");
+    feed_line("################");
+    feed_line("#..............#");
+    feed_line("#..............#");
+    feed_line("#..............#");
+    feed_line("#..............#");
+    feed_line(row_five);
+    feed_line("#..............#");
+    feed_line("#..............#");
+    feed_line("#..............#");
+    feed_line("#..............#");
+    feed_line("#..............#");
+    feed_line("################");
+    feed_line("MAP_END");
+}
+
 static void feed_center_sample_with_map(uint8 index, uint16 col_q, uint16 row_q)
 {
     char sample_line[48];
@@ -106,6 +124,21 @@ static void feed_center_sample_with_map(uint8 index, uint16 col_q, uint16 row_q)
     feed_map_frame("#....C.........#", col_q, row_q, 1u);
     snprintf(sample_line, sizeof(sample_line),
              "CENTER_SAMPLE %u,%u,%u", index, col_q, row_q);
+    feed_line(sample_line);
+}
+
+static void feed_observation_sample_with_map(uint8 index,
+                                             uint16 car_col_q,
+                                             uint16 car_row_q,
+                                             uint16 box_col_q,
+                                             uint16 box_row_q)
+{
+    char sample_line[48];
+
+    feed_map_frame("#......CB......#", car_col_q, car_row_q, 1u);
+    snprintf(sample_line, sizeof(sample_line),
+             "OBSERVE_SAMPLE %u,%u,%u,%u,%u",
+             index, car_col_q, car_row_q, box_col_q, box_row_q);
     feed_line(sample_line);
 }
 
@@ -118,6 +151,7 @@ int main(void)
     uint8 player_count = 0u;
     map_scan_stats_struct stats;
     map_scan_stats_struct paired_stats;
+    uint32 frame_before;
     uint8 passed = 1u;
 
     openart_uart_init();
@@ -144,15 +178,26 @@ int main(void)
     passed &= run_case("queued-sample-five", pop_sample_equals(5u, 576u, 550u));
     passed &= run_case("queue-empty", pop_sample_equals(0u, 0u, 0u));
 
+    frame_before = openart_uart_get_frame_count();
     feed_map_frame("#.C..C.........#", 0u, 0u, 0u);
     map = openart_map_get();
     paired_map = openart_get_requested_center_map();
     map_scan_stats(map, &stats);
     map_scan_stats(paired_map, &paired_stats);
-    passed &= run_case("paired-map-survives-periodic",
-        (2u == stats.car_count) &&
+    passed &= run_case("multi-car-map-rejected",
+        (frame_before == openart_uart_get_frame_count()) &&
+        (1u == stats.car_count) &&
+        (5u == stats.car_row) && (5u == stats.car_col) &&
         (1u == paired_stats.car_count) &&
         (5u == paired_stats.car_row) && (5u == paired_stats.car_col));
+
+    frame_before = openart_uart_get_frame_count();
+    feed_map_frame_without_center("#....C.........#");
+    map = openart_map_get();
+    passed &= run_case("map-without-center-accepted",
+        ((frame_before + 1u) == openart_uart_get_frame_count()) &&
+        (0u != map_find_car(map, &player_row, &player_col, &player_count)) &&
+        (5u == player_row) && (5u == player_col) && (1u == player_count));
 
     openart_request_player_center();
     passed &= run_case("new-request-clears-paired-map",
@@ -166,51 +211,45 @@ int main(void)
     passed &= run_case("observe-request-command",
                        0 == strcmp(tx_text, "OBSERVE_REQ 5,8\n"));
     feed_line("OBSERVE_SAMPLE 1,750,550,850,550");
-    feed_line("OBSERVE_SAMPLE 1,999,999,999,999");
-    feed_line("OBSERVE_SAMPLE 3,752,551,852,551");
-    feed_line("OBSERVE_SAMPLE 2,751,550,851,550");
-    feed_line("OBSERVE_SAMPLE 3,1600,551,852,551");
-    feed_line("OBSERVE_SAMPLE 3,752,551,852,551");
+    passed &= run_case("observe-unpaired-rejected",
+        pop_observation_equals(0u, 0u, 0u, 0u, 0u));
+    feed_observation_sample_with_map(1u, 750u, 550u, 850u, 550u);
+    feed_observation_sample_with_map(3u, 752u, 551u, 852u, 551u);
+    feed_observation_sample_with_map(2u, 751u, 550u, 931u, 550u);
+    feed_observation_sample_with_map(2u, 751u, 550u, 930u, 550u);
+    feed_observation_sample_with_map(3u, 752u, 551u, 852u, 551u);
     passed &= run_case("observe-sample-one",
         pop_observation_equals(1u, 750u, 550u, 850u, 550u));
     passed &= run_case("observe-sample-two",
-        pop_observation_equals(1u, 751u, 550u, 851u, 550u));
+        pop_observation_equals(1u, 751u, 550u, 930u, 550u));
     passed &= run_case("observe-sample-three",
         pop_observation_equals(1u, 752u, 551u, 852u, 551u));
     passed &= run_case("observe-queue-empty",
         pop_observation_equals(0u, 0u, 0u, 0u, 0u));
 
     openart_request_observation(5u, 8u);
-    feed_line("OBSERVE_SAMPLE 1,700,500,800,500");
+    feed_observation_sample_with_map(1u, 750u, 550u, 850u, 550u);
     openart_request_observation(6u, 9u);
     passed &= run_case("observe-new-request-clears",
         pop_observation_equals(0u, 0u, 0u, 0u, 0u));
 
-    feed_line("MAP_BEGIN");
-    feed_line("################");
-    feed_line("#..............#");
-    feed_line("#..............#");
-    feed_line("#..............#");
-    feed_line("#..............#");
-    feed_line("#.C..C.........#");
-    feed_line("#..............#");
-    feed_line("#..............#");
-    feed_line("#..............#");
-    feed_line("#..............#");
-    feed_line("#..............#");
-    feed_line("################");
-    feed_line("PLAYER_CENTER_GRID 550,550 1");
-    feed_line("MAP_END");
+    feed_map_frame("#....C.........#", 550u, 550u, 1u);
+    frame_before = openart_uart_get_frame_count();
+    feed_map_frame("#.C..C.........#", 550u, 550u, 1u);
     map = openart_map_get();
-    passed &= run_case("map-center-selects-car",
+    passed &= run_case("center-does-not-rewrite-map",
+        (frame_before == openart_uart_get_frame_count()) &&
         (0 != map) &&
-        ('.' == map->rows[5][2]) &&
         ('C' == map->rows[5][5]) &&
         (0 != openart_find_player_cell(&player_row, &player_col, &player_count)) &&
         (5u == player_row) && (5u == player_col) && (1u == player_count));
 
-    feed_map_frame("#...CT.........#", 450u, 550u, 1u);
-    feed_map_frame("#....C.........#", 550u, 550u, 1u);
+    frame_before = openart_uart_get_frame_count();
+    feed_map_frame("#....C.........#", 650u, 550u, 1u);
+    passed &= run_case("center-cell-mismatch-rejected",
+                       frame_before == openart_uart_get_frame_count());
+
+    feed_map_frame("#....+.........#", 550u, 550u, 1u);
     map = openart_map_get();
     map_scan_stats(map, &stats);
     passed &= run_case("car-on-target-keeps-target",
@@ -225,7 +264,7 @@ int main(void)
         ('T' == map->rows[5][5]) && ('C' == map->rows[5][6]) &&
         (1u == stats.car_count) && (1u == stats.target_count));
 
-    feed_map_frame("#....C.........#", 0u, 0u, 0u);
+    feed_map_frame("#....+.........#", 0u, 0u, 0u);
     map = openart_map_get();
     map_scan_stats(map, &stats);
     passed &= run_case("coarse-car-keeps-target",

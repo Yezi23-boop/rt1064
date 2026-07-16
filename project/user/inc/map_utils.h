@@ -12,11 +12,26 @@
 typedef struct
 {
     uint8 car_count;                   /**< `C/+` 的数量；正常可求解地图应为 1。 */
-    uint8 box_count;                   /**< `B` 的数量；应与目标点数量一致。 */
-    uint8 target_count;                /**< `T/+` 的数量；当前求解器按一箱一目标拆解。 */
-    uint8 car_row;                     /**< 第一个 `C/+` 的行号；没有小车时保持 0。 */
-    uint8 car_col;                     /**< 第一个 `C/+` 的列号；没有小车时保持 0。 */
+    uint8 box_count;                   /**< `B` 与 `*` 的数量；应与目标点数量一致。 */
+    uint8 target_count;                /**< `T`、`+` 与 `*` 的数量；当前求解器按一箱一目标拆解。 */
+    uint8 car_row;                     /**< 唯一 `C/+` 的行号；非唯一时为 0xFF。 */
+    uint8 car_col;                     /**< 唯一 `C/+` 的列号；非唯一时为 0xFF。 */
 } map_scan_stats_struct;
+
+typedef enum
+{
+    MAP_STABILITY_NO_NEW_FRAME = 0,
+    MAP_STABILITY_PENDING,
+    MAP_STABILITY_READY
+} map_stability_result_enum;
+
+typedef struct
+{
+    char candidate_rows[MAP_ROWS][MAP_COLS + 1];
+    uint32 last_frame;
+    uint8 candidate_valid;
+    uint8 stable_count;
+} map_stability_tracker_struct;
 
 /**
  * @brief 将二维行列坐标压成一维 cell 编号。
@@ -97,5 +112,21 @@ void map_scan_stats(const map_source_struct *source, map_scan_stats_struct *stat
  * @return 1 表示恰好找到一个 `C`；0 表示没有或存在多个 `C`。
  */
 uint8 map_find_car(const map_source_struct *source, uint8 *row, uint8 *col, uint8 *count);
+
+/** 校验精确中心位于地图唯一 C/+ 所在格，并返回该车格。 */
+uint8 map_validate_player_center(const map_source_struct *source,
+                                 uint16 center_col_q,
+                                 uint16 center_row_q,
+                                 uint8 *car_row,
+                                 uint8 *car_col);
+
+void map_stability_tracker_reset(map_stability_tracker_struct *tracker,
+                                 uint32 current_frame);
+void map_stability_tracker_reset_candidate(map_stability_tracker_struct *tracker);
+map_stability_result_enum map_stability_tracker_push(
+    map_stability_tracker_struct *tracker,
+    uint32 frame,
+    const map_source_struct *source,
+    uint8 required_frames);
 
 #endif

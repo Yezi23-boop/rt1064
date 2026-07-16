@@ -22,15 +22,6 @@ typedef struct
 
 typedef struct
 {
-    uint16 box_cell;
-    uint16 target_cell;
-    uint8 box_valid;
-    uint8 target_valid;
-    uint8 completed;
-} subject2_binding_struct;
-
-typedef struct
-{
     uint8 object_index;
     uint8 observation_bit;
     uint8 row;
@@ -46,13 +37,6 @@ typedef struct
 
 typedef enum
 {
-    SUBJECT2_TRACK_UNCHANGED = 0,
-    SUBJECT2_TRACK_MOVED,
-    SUBJECT2_TRACK_AMBIGUOUS
-} subject2_track_result_enum;
-
-typedef enum
-{
     SUBJECT2_SYNC_OK = 0,
     SUBJECT2_SYNC_RESCAN,
     SUBJECT2_SYNC_AMBIGUOUS
@@ -63,7 +47,19 @@ typedef struct
     uint8 need_box_scan;
     uint8 need_target_scan;
     uint8 completed_count;
+    uint8 active_box_valid;
+    uint8 active_target_removed;
+    uint16 active_box_cell;
 } subject2_sync_update_struct;
+
+typedef struct
+{
+    uint8 class_id;
+    uint8 box_index;
+    uint8 target_index;
+    uint16 box_cell;
+    uint16 target_cell;
+} subject2_push_plan_struct;
 
 uint8 subject2_collect_objects(const map_source_struct *source,
                                char symbol,
@@ -87,46 +83,48 @@ uint8 subject2_classifier_push(subject2_classifier_struct *filter,
                                uint8 stable_samples,
                                uint8 *confirmed_class);
 
-void subject2_bindings_clear(subject2_binding_struct bindings[SUBJECT2_CLASS_COUNT]);
-uint8 subject2_bind_box(subject2_binding_struct bindings[SUBJECT2_CLASS_COUNT],
-                        uint8 class_id,
-                        uint16 cell);
-uint8 subject2_bind_target(subject2_binding_struct bindings[SUBJECT2_CLASS_COUNT],
-                           uint8 class_id,
-                           uint16 cell);
-uint8 subject2_binding_sets_match(
-    const subject2_binding_struct bindings[SUBJECT2_CLASS_COUNT]);
-
-subject2_track_result_enum subject2_track_active_box(
-    subject2_binding_struct bindings[SUBJECT2_CLASS_COUNT],
-    uint8 active_class,
-    const uint16 *old_boxes,
-    uint8 old_box_count,
-    const uint16 *new_boxes,
-    uint8 new_box_count);
-
-/**
- * @brief 将冻结地图中的唯一小车格归一化到多帧中心所在格。
- * @note 中心格只允许位于原 C/+ 格或其八邻域；输出快照由调用方持有。
- */
-uint8 subject2_normalize_center_map(
+uint8 subject2_object_class_counts_match(
+    const subject2_object_struct *box_objects,
+    uint8 box_count,
+    const subject2_object_struct *target_objects,
+    uint8 target_count);
+void subject2_invalidate_mismatched_classes(
+    subject2_object_struct *box_objects,
+    uint8 box_count,
+    subject2_object_struct *target_objects,
+    uint8 target_count,
+    uint8 *need_box_scan,
+    uint8 *need_target_scan);
+uint8 subject2_select_push_plan(
     const map_source_struct *source,
-    uint16 center_col_q,
-    uint16 center_row_q,
-    map_source_struct *normalized,
+    const subject2_object_struct *box_objects,
+    uint8 box_count,
+    const subject2_object_struct *target_objects,
+    uint8 target_count,
+    uint8 retry_active_only,
+    uint8 active_box_valid,
+    uint16 active_box_cell,
+    uint16 active_target_cell,
+    subject2_push_plan_struct *plan,
+    solve_result_struct *result);
+uint8 subject2_normalize_transit_box_overlap(
+    const map_source_struct *source,
+    const solve_result_struct *result,
+    uint16 current_step,
+    uint16 active_box_cell,
+    uint16 final_target_cell,
+    char completed_action,
     char normalized_rows[MAP_ROWS][MAP_COLS + 1],
-    uint8 *car_row,
-    uint8 *car_col);
-
-subject2_sync_result_enum subject2_reconcile_objects(
+    map_source_struct *normalized_source,
+    uint16 *overlap_cell);
+subject2_sync_result_enum subject2_reconcile_object_lists(
     const map_source_struct *source,
     subject2_object_struct box_objects[MAX_BOXES],
     uint8 *box_count,
     subject2_object_struct target_objects[MAX_BOXES],
     uint8 *target_count,
-    subject2_binding_struct bindings[SUBJECT2_CLASS_COUNT],
-    uint8 strict_push_tracking,
-    uint8 active_class,
+    uint16 active_box_cell,
+    uint16 active_target_cell,
     subject2_sync_update_struct *update);
 
 #endif

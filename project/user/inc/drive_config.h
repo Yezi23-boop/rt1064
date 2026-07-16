@@ -97,6 +97,8 @@
 #define EXEC_PUSH_OVERSHOOT_ENABLE (0)
 /** 推箱动作额外前压比例，单位为格；0.20 表示每格 20cm 时多走 4cm。 */
 #define EXEC_PUSH_OVERSHOOT_RATIO (0.20f)
+/** 近箱推箱准备位额外退开比例；0.5 表示先在距箱子1.5格处横向对齐。 */
+#define EXEC_NEAR_BOX_EXTRA_GAP_RATIO (0.5f)
 /** ART 等图、中心请求以及发车/返航/观察回中心动作的最长时间。 */
 #define EXEC_ART_SYNC_TIMEOUT_MS (10000u)
 /** CENTER_REQ 超时降级开关；1=按阶段使用安全兜底继续，0=严格停车报错。 */
@@ -109,8 +111,10 @@
 #define EXEC_ART_STABLE_FRAMES (1u)
 /** 推箱前车箱观察单次等待时间，单位 ms。 */
 #define ART_BOX_OBSERVE_WAIT_MS (1500u)
-/** 提前预取的车箱中心最大允许年龄，单位 ms。 */
-#define ART_BOX_OBSERVE_SAMPLE_MAX_AGE_MS (500u)
+/** 每次 OBSERVE_REQ 需要的有效车箱配对样本数。 */
+#define ART_BOX_OBSERVE_SAMPLE_COUNT (3u)
+/** 请求式箱子中心允许偏离目标格中心的最大值，单位 1/100 格。 */
+#define ART_BOX_MATCH_MAX_OFFSET_Q (80)
 /** 车箱观察失败后沿推箱反方向退开的距离，单位 cm。 */
 #define ART_BOX_OBSERVE_RETRY_MOVE_CM (5.0f)
 /** 观察恢复动作完成后的停稳时间，单位 ms。 */
@@ -146,8 +150,6 @@
 #define ART_LAUNCH_TARGET_X_CM (50.0f)
 /** 每次 CENTER_REQ 需要的有效精确中心样本数；所有关键节点共用5帧中值滤波。 */
 #define ART_CENTER_SAMPLE_COUNT (5u)
-/** ART 发车移动最大归一化速度。 */
-#define ART_LAUNCH_MOVE_MAX_SPEED (1.0f)
 /** 推箱完成后自动返回左侧发车中心。 */
 #define ART_RETURN_HOME_ENABLE (1)
 /** 左侧发车通道在推箱地图内的入口列。 */

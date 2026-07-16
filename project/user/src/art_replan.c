@@ -1,11 +1,11 @@
 #include "zf_common_headfile.h"
+#include "art_observation.h"
 #include "art_replan.h"
 #include "drive_control.h"
 #include "drive_config.h"
 #include "drive_pose.h"
 #include "executor.h"
 #include "map_utils.h"
-#include "motion_math.h"
 #include "openart_uart.h"
 #include "solver.h"
 #include "timebase.h"
@@ -16,7 +16,7 @@ typedef enum
 {
     ART_REPLAN_IDLE = 0,         /**< 空闲态：不主动等待 ART，只响应 executor 触发的同步请求。 */
     ART_REPLAN_WAIT_LAUNCH,      /**< 发车前等待态：持续收图，但只计时不求解。 */
-    ART_REPLAN_WAIT_CENTER,      /**< 发车区中心等待态：等待 CENTER_REQ 的3个精确中心样本。 */
+    ART_REPLAN_WAIT_CENTER,      /**< 发车区中心等待态：等待 CENTER_REQ 的5个精确中心样本。 */
     ART_REPLAN_LAUNCH_MOVE,      /**< 按 ART 中心计算距离，移动到外面第一可走格中心。 */
     ART_REPLAN_INITIAL,          /**< 出发车区后等待真实推箱地图并首次求解。 */
     ART_REPLAN_INITIAL_CENTER,   /**< 初次稳定地图已冻结，等待请求式精确中心后再求解。 */
@@ -31,12 +31,8 @@ typedef enum
 } art_replan_phase_enum;
 
 static art_replan_phase_enum art_replan_phase = ART_REPLAN_IDLE; // 主循环写入和读取；决定稳定帧成功后的启动策略。
-static char art_candidate_rows[MAP_ROWS][MAP_COLS + 1];          // 当前候选稳定帧快照；不增加 UART 环形缓冲容量。
-static uint8 art_candidate_valid = 0;                            // 1 表示 `art_candidate_rows` 已保存一帧可比较地图。
-static uint8 art_stable_count = 0;                               // 连续一致的新完整帧计数，达到 EXEC_ART_STABLE_FRAMES 才求解。
-static uint32 art_last_seen_frame = 0;                            // 已处理到的 OpenART 帧号；用于丢弃等待前的旧帧。
+static map_stability_tracker_struct art_map_tracker;
 static uint32 art_wait_start_ms = 0;                              // 本轮 ART 等待起点，单位 ms；用于统一初始/段末超时。
-static uint8 art_launch_pending = 0;                              // 兼容旧界面字段；当前发车流程不再置 1。
 static uint8 art_launch_subject2 = 0;                             // 1 表示发车后把地图交给科目二，不运行任意配对求解。
 static uint32 art_launch_delay_start_ms = 0;                      // 5 秒延迟起点。
 static uint8 confirmed_box_count = 0;                             // 上一次被 ART 认定为“同步完成”的箱子数基线。
@@ -44,32 +40,23 @@ static uint8 confirmed_target_count = 0;                          // 上一次�
 static uint8 confirmed_counts_valid = 0;                           // 1 表示上面的 B/T 基线有效，可用于判断是否发生了消除。
 static uint32 art_monitor_last_frame = 0;                           // 执行空闲态已检查的最新地图帧号。
 static uint8 art_external_change_pending = 0;                       // 1 表示上位机提前消除 B/T，正在接管旧路径。
-static uint16 art_requested_center_col_samples[ART_CENTER_SAMPLE_COUNT]; // 当前 CENTER_REQ 列样本，单位 1/100 格。
-static uint16 art_requested_center_row_samples[ART_CENTER_SAMPLE_COUNT]; // 当前 CENTER_REQ 行样本，单位 1/100 格。
-static uint8 art_requested_center_sample_count = 0;                 // 当前请求已收集的有效样本数量。
+static art_center_batch_struct art_center_batch;
 static uint16 art_requested_center_col_q = 0;                       // 当前请求列中值，单位 1/100 格。
 static uint16 art_requested_center_row_q = 0;                       // 当前请求行中值，单位 1/100 格。
 static uint8 art_requested_center_valid = 0;                        // 1 表示当前请求已得到多帧样本中值。
+static uint8 art_requested_center_fallback = 0;                     // 1 表示当前中心由超时后的地图格中心回退生成。
 static uint8 art_pre_push_box_request_active = 0;                   // 1 表示当前 waypoint 前等待使用 OBSERVE_REQ。
 static uint8 art_pre_push_box_preparation_started = 0;              // 1 表示 executor 已接管二维安全准备位。
-static uint8 art_box_prefetch_active = 0u;
-static uint8 art_box_prefetch_ready = 0u;
-static uint8 art_box_prefetch_row = 0u;
-static uint8 art_box_prefetch_col = 0u;
-static uint32 art_box_prefetch_ready_ms = 0u;
+static art_box_observation_session_struct art_box_session;
 static uint8 art_pre_push_box_retry_count = 0u;
 static uint8 art_pre_push_box_retry_moving = 0u;
 static uint8 art_pre_push_box_retry_settling = 0u;
 static uint32 art_pre_push_box_retry_settle_start_ms = 0u;
-static float art_launch_target_x_cm = 0.0f;                         // 发车移动目标距离，单位 cm。
-static uint8 art_launch_arrival_ticks = 0;                          // 发车移动连续到点计数。
 static uint32 art_launch_move_start_ms = 0;                         // 发车移动开始时间。
 static uint16 art_home_center_col_q = 0;                            // 本轮启动时发车中心列，单位 1/100 格。
 static uint16 art_home_center_row_q = 0;                            // 本轮启动时发车中心行，单位 1/100 格。
 static uint8 art_home_center_valid = 0;                             // 1 表示本轮已保存发车中心，可执行自动返航。
-static float art_return_target_cm = 0.0f;                           // 当前返航单轴局部目标，单位 cm。
 static float art_return_pending_x_cm = 0.0f;                       // Y 对齐后待执行的 X 返航距离。
-static uint8 art_return_arrival_ticks = 0;                          // 返航单轴连续到点计数。
 static uint8 art_return_correction_count = 0;                       // 最终视觉复核失败后的再次校正次数。
 static uint32 art_return_phase_start_ms = 0;                        // 返航采样或单轴移动阶段起点。
 
@@ -78,36 +65,13 @@ static float art_abs_float(float value)
     return (value < 0.0f) ? -value : value;
 }
 
-static uint16 art_median_u16(const uint16 *values, uint8 count)
-{
-    uint16 sorted[ART_CENTER_SAMPLE_COUNT];
-    uint8 i;
-    uint8 j;
-
-    for(i = 0; i < count; i++)
-    {
-        sorted[i] = values[i];
-    }
-    for(i = 1; i < count; i++)
-    {
-        uint16 key = sorted[i];
-        j = i;
-        while((j > 0u) && (sorted[j - 1u] > key))
-        {
-            sorted[j] = sorted[j - 1u];
-            j--;
-        }
-        sorted[j] = key;
-    }
-    return sorted[count / 2u];
-}
-
 static void art_requested_center_clear(void)
 {
-    art_requested_center_sample_count = 0;
+    art_center_batch_reset(&art_center_batch);
     art_requested_center_col_q = 0;
     art_requested_center_row_q = 0;
     art_requested_center_valid = 0;
+    art_requested_center_fallback = 0;
 }
 
 #if ART_CENTER_TIMEOUT_FALLBACK_ENABLE
@@ -123,6 +87,7 @@ static uint8 art_requested_center_use_map_cell(const map_source_struct *source)
     art_requested_center_col_q = (uint16)(stats.car_col * 100u + 50u);
     art_requested_center_row_q = (uint16)(stats.car_row * 100u + 50u);
     art_requested_center_valid = 1u;
+    art_requested_center_fallback = 1u;
     return 1u;
 }
 #endif
@@ -146,45 +111,41 @@ static float art_grid_q_to_x_cm(uint16 col_q)
     return ((float)col_q * GRID_SIZE_CM) / 100.0f;
 }
 
-static uint8 art_replan_calculate_pose_offset(const map_scan_stats_struct *stats,
+static uint8 art_replan_calculate_pose_offset(const map_source_struct *source,
                                                uint16 center_col_q,
                                                uint16 center_row_q,
                                                float *offset_x_cm,
                                                float *offset_y_cm)
 {
-    uint8 center_col;
-    uint8 center_row;
-    int16 col_delta;
-    int16 row_delta;
+    uint8 car_col;
+    uint8 car_row;
 
     *offset_x_cm = 0.0f;
     *offset_y_cm = 0.0f;
-    if((0 == stats) || (1u != stats->car_count))
+    if(0 == map_validate_player_center(source, center_col_q, center_row_q,
+                                       &car_row, &car_col))
     {
         return 0;
     }
 
-    if((center_col_q >= (MAP_COLS * 100u)) ||
-       (center_row_q >= (MAP_ROWS * 100u)))
-    {
-        return 0;
-    }
-
-    center_col = (uint8)(center_col_q / 100u);
-    center_row = (uint8)(center_row_q / 100u);
-    col_delta = (int16)center_col - (int16)stats->car_col;
-    row_delta = (int16)center_row - (int16)stats->car_row;
-    if((col_delta < -1) || (col_delta > 1) ||
-       (row_delta < -1) || (row_delta > 1))
-    {
-        return 0;
-    }
-
-    *offset_x_cm = ((float)center_col_q - ((float)stats->car_col * 100.0f + 50.0f))
+    *offset_x_cm = ((float)center_col_q - ((float)car_col * 100.0f + 50.0f))
                    * GRID_SIZE_CM / 100.0f;
-    *offset_y_cm = -(((float)center_row_q - ((float)stats->car_row * 100.0f + 50.0f))
+    *offset_y_cm = -(((float)center_row_q - ((float)car_row * 100.0f + 50.0f))
                      * GRID_SIZE_CM / 100.0f);
     return 1;
+}
+
+static void art_replan_retry_center_request(const char *state,
+                                            art_replan_update_struct *update)
+{
+    art_requested_center_clear();
+    executor_reset_art_player_center_samples();
+    openart_request_player_center();
+    if(0 != update)
+    {
+        update->run_state = state;
+        update->redraw = 1u;
+    }
 }
 
 static void art_replan_update_reset(art_replan_update_struct *update)
@@ -202,9 +163,8 @@ static void art_replan_wait_fresh_frame(void)
     // 切入等待态时，先丢掉半帧和旧缓冲。
     // 这样后续只有“等待之后新产生的完整帧”才会参与稳定性判断。
     openart_uart_discard_pending();
-    art_candidate_valid = 0;
-    art_stable_count = 0;
-    art_last_seen_frame = openart_uart_get_frame_count();
+    map_stability_tracker_reset(&art_map_tracker,
+                                openart_uart_get_frame_count());
 }
 
 static void art_replan_begin_center_request(art_replan_phase_enum phase,
@@ -221,54 +181,6 @@ static void art_replan_begin_center_request(art_replan_phase_enum phase,
         update->run_state = state;
         update->redraw = 1;
     }
-}
-
-static void art_box_prefetch_clear(void)
-{
-    art_box_prefetch_active = 0u;
-    art_box_prefetch_ready = 0u;
-    art_box_prefetch_row = 0u;
-    art_box_prefetch_col = 0u;
-    art_box_prefetch_ready_ms = 0u;
-}
-
-static uint8 art_box_observation_collect(void)
-{
-    openart_observation_sample_struct sample;
-
-    while(0u != openart_get_observation_sample(&sample))
-    {
-        if(0u != executor_apply_art_box_observation(sample.car_col_q,
-                                                    sample.car_row_q,
-                                                    sample.box_col_q,
-                                                    sample.box_row_q))
-        {
-            art_box_prefetch_active = 0u;
-            art_box_prefetch_ready = 1u;
-            art_box_prefetch_ready_ms = time_ms();
-        }
-    }
-    return art_box_prefetch_ready;
-}
-
-static uint8 art_box_prefetch_is_fresh(uint8 box_row, uint8 box_col)
-{
-    return ((0u != art_box_prefetch_ready) &&
-            (box_row == art_box_prefetch_row) &&
-            (box_col == art_box_prefetch_col) &&
-            ((time_ms() - art_box_prefetch_ready_ms) <=
-             ART_BOX_OBSERVE_SAMPLE_MAX_AGE_MS)) ? 1u : 0u;
-}
-
-static void art_box_observation_request(uint8 box_row, uint8 box_col)
-{
-    executor_reset_art_box_observation_samples();
-    openart_request_observation(box_row, box_col);
-    art_box_prefetch_active = 1u;
-    art_box_prefetch_ready = 0u;
-    art_box_prefetch_row = box_row;
-    art_box_prefetch_col = box_col;
-    art_box_prefetch_ready_ms = 0u;
 }
 
 static void art_replan_begin(art_replan_phase_enum phase, art_replan_update_struct *update)
@@ -289,13 +201,8 @@ static void art_replan_begin(art_replan_phase_enum phase, art_replan_update_stru
             stop_motion();
             art_replan_phase = phase;
             art_wait_start_ms = time_ms();
-            if((0u == art_box_prefetch_is_fresh(box_row, box_col)) &&
-               ((0u == art_box_prefetch_active) ||
-                (box_row != art_box_prefetch_row) ||
-                (box_col != art_box_prefetch_col)))
-            {
-                art_box_observation_request(box_row, box_col);
-            }
+            art_box_observation_session_request(&art_box_session,
+                                                box_row, box_col);
             art_pre_push_box_request_active = 1u;
             if(0 != update)
             {
@@ -340,35 +247,16 @@ static uint8 art_get_stable_map(const map_source_struct **source_out)
 {
     const map_source_struct *source = openart_map_get();
     uint32 frame = openart_uart_get_frame_count();
+    map_stability_result_enum result;
 
     if((0 == source) || (0 == frame))
     {
         return 0;
     }
 
-    if(frame == art_last_seen_frame)
-    {
-        return 0;
-    }
-    art_last_seen_frame = frame;
-
-    // OpenART 在页面刷新瞬间会抖动，所以这里只接受“连续完整帧一致”的地图。
-    // 稳定计数按帧推进，不按主循环次数推进。
-    if((0 != art_candidate_valid) && (0 != map_rows_equal(art_candidate_rows, source)))
-    {
-        if(art_stable_count < EXEC_ART_STABLE_FRAMES)
-        {
-            art_stable_count++;
-        }
-    }
-    else
-    {
-        map_copy_rows(art_candidate_rows, source);
-        art_candidate_valid = 1;
-        art_stable_count = 1;
-    }
-
-    if(art_stable_count >= EXEC_ART_STABLE_FRAMES)
+    result = map_stability_tracker_push(&art_map_tracker, frame, source,
+                                        EXEC_ART_STABLE_FRAMES);
+    if(MAP_STABILITY_READY == result)
     {
         *source_out = source;
         return 1;
@@ -424,7 +312,7 @@ static uint8 art_stats_valid_for_solve(const map_scan_stats_struct *stats)
 
 static void art_update_confirmed_counts(const map_scan_stats_struct *stats)
 {
-    // 记录当前稳定帧的 B/T 数量，作为下一次段末同步的对照基线。
+    // 只提交即将执行或返航的配套地图数量，作为下一次段末同步的对照基线。
     confirmed_box_count = stats->box_count;
     confirmed_target_count = stats->target_count;
     confirmed_counts_valid = 1;
@@ -492,6 +380,13 @@ static uint8 art_replan_handle_host_completion(art_replan_update_struct *update)
     }
 
     executor_stop();
+    art_box_observation_session_reset(&art_box_session);
+    art_pre_push_box_request_active = 0u;
+    art_pre_push_box_preparation_started = 0u;
+    art_pre_push_box_retry_count = 0u;
+    art_pre_push_box_retry_moving = 0u;
+    art_pre_push_box_retry_settling = 0u;
+    art_pre_push_box_retry_settle_start_ms = 0u;
     art_external_change_pending = 1u;
     art_replan_begin(ART_REPLAN_SEGMENT, update);
     if(0 != update)
@@ -542,34 +437,18 @@ static void art_replan_start_executor(const art_replan_context_struct *context,
 
 static uint8 art_replan_collect_requested_center(void)
 {
-    uint16 center_col_q;
-    uint16 center_row_q;
-    uint8 sample_index;
-
-    while(0u != (sample_index = openart_get_requested_center_sample(&center_col_q,
-                                                                     &center_row_q)))
-    {
-        (void)sample_index;
-        if(art_requested_center_sample_count < ART_CENTER_SAMPLE_COUNT)
-        {
-            art_requested_center_col_samples[art_requested_center_sample_count] = center_col_q;
-            art_requested_center_row_samples[art_requested_center_sample_count] = center_row_q;
-            art_requested_center_sample_count++;
-        }
-    }
-
-    if(art_requested_center_sample_count < ART_CENTER_SAMPLE_COUNT)
+    if(0u == art_center_batch_collect(&art_center_batch))
     {
         return 0;
     }
 
     if(0 == art_requested_center_valid)
     {
-        art_requested_center_col_q = art_median_u16(art_requested_center_col_samples,
-                                                     ART_CENTER_SAMPLE_COUNT);
-        art_requested_center_row_q = art_median_u16(art_requested_center_row_samples,
-                                                     ART_CENTER_SAMPLE_COUNT);
+        (void)art_center_batch_get_median(&art_center_batch,
+                                          &art_requested_center_col_q,
+                                          &art_requested_center_row_q);
         art_requested_center_valid = 1;
+        art_requested_center_fallback = 0;
     }
     return 1;
 }
@@ -638,8 +517,9 @@ static void art_replan_tick_pre_push_box(art_replan_update_struct *update)
 
         art_pre_push_box_retry_moving = 0u;
         art_pre_push_box_retry_settling = 0u;
-        art_box_observation_request(art_box_prefetch_row,
-                                    art_box_prefetch_col);
+        art_box_observation_session_request(&art_box_session,
+                                            art_box_session.box_row,
+                                            art_box_session.box_col);
         art_wait_start_ms = time_ms();
         if(0 != update)
         {
@@ -679,14 +559,14 @@ static void art_replan_tick_pre_push_box(art_replan_update_struct *update)
         return;
     }
 
-    if(0u == art_box_observation_collect())
+    if(0u == art_box_observation_session_collect(&art_box_session))
     {
         if((time_ms() - art_wait_start_ms) >= ART_BOX_OBSERVE_WAIT_MS)
         {
             if(art_pre_push_box_retry_count < ART_BOX_OBSERVE_MAX_RETRIES)
             {
-                art_box_prefetch_active = 0u;
-                art_box_prefetch_ready = 0u;
+                art_box_session.active = 0u;
+                art_box_session.ready = 0u;
                 executor_reset_art_box_observation_samples();
                 if(0 == executor_start_pre_push_box_retry_nudge(
                              ART_BOX_OBSERVE_RETRY_MOVE_CM))
@@ -731,7 +611,7 @@ static void art_replan_tick_pre_push_box(art_replan_update_struct *update)
         return;
     }
 
-    art_box_prefetch_clear();
+    art_box_observation_session_reset(&art_box_session);
     art_pre_push_box_preparation_started = 1u;
     if(0 != update)
     {
@@ -740,71 +620,16 @@ static void art_replan_tick_pre_push_box(art_replan_update_struct *update)
     }
 }
 
-static void art_replan_tick_box_prefetch(void)
-{
-    uint8 box_row;
-    uint8 box_col;
-
-    if(0u != art_box_prefetch_active)
-    {
-        (void)art_box_observation_collect();
-    }
-    if(0 == executor_get_pre_push_box_prefetch_request(&box_row, &box_col))
-    {
-        return;
-    }
-    if(((0u != art_box_prefetch_active) &&
-        (box_row == art_box_prefetch_row) &&
-        (box_col == art_box_prefetch_col)) ||
-       (0u != art_box_prefetch_is_fresh(box_row, box_col)))
-    {
-        return;
-    }
-    art_box_observation_request(box_row, box_col);
-}
-
-static uint8 art_replan_get_pre_push_reference_cell(
-    const art_replan_context_struct *context,
-    uint8 *reference_row,
-    uint8 *reference_col)
-{
-    uint16 current_step;
-
-    if((0 == context) || (0 == context->result) ||
-       (0 == context->start_row) || (0 == context->start_col) ||
-       (0 == reference_row) || (0 == reference_col))
-    {
-        return 0;
-    }
-
-    current_step = executor_get_current_step();
-    if(0u == current_step)
-    {
-        *reference_row = *context->start_row;
-        *reference_col = *context->start_col;
-        return 1;
-    }
-    if(current_step > context->result->waypoint_count)
-    {
-        return 0;
-    }
-
-    *reference_row = context->result->waypoints[current_step - 1u].row;
-    *reference_col = context->result->waypoints[current_step - 1u].col;
-    return 1;
-}
-
 static void art_replan_tick_pre_push_center(const art_replan_context_struct *context,
                                              uint8 center_ready,
                                              art_replan_update_struct *update)
 {
     const map_source_struct *source;
-    map_scan_stats_struct stats;
     executor_art_center_result_enum center_result;
     uint8 reference_row;
     uint8 reference_col;
-    uint8 reference_valid = 0;
-    uint8 sample_index;
+
+    (void)context;
 
     if(0 == center_ready)
     {
@@ -834,33 +659,18 @@ static void art_replan_tick_pre_push_center(const art_replan_context_struct *con
         return;
     }
 
-    source = openart_map_get();
-    if(0 != source)
+    source = openart_get_requested_center_map();
+    if(0 == map_validate_player_center(source,
+                                       art_requested_center_col_q,
+                                       art_requested_center_row_q,
+                                       &reference_row,
+                                       &reference_col))
     {
-        map_scan_stats(source, &stats);
-        if(1u == stats.car_count)
-        {
-            reference_row = stats.car_row;
-            reference_col = stats.car_col;
-            reference_valid = 1;
-        }
-    }
-    if((0 == reference_valid) &&
-       (0 == art_replan_get_pre_push_reference_cell(context,
-                                                     &reference_row,
-                                                     &reference_col)))
-    {
-        art_replan_fail_pre_push_center(update);
+        art_replan_retry_center_request("PCtr", update);
         return;
     }
 
-    for(sample_index = 0; sample_index < ART_CENTER_SAMPLE_COUNT; sample_index++)
-    {
-        (void)executor_apply_art_player_center(
-            art_requested_center_col_samples[sample_index],
-            art_requested_center_row_samples[sample_index],
-            (uint32)(sample_index + 1u));
-    }
+    (void)art_center_batch_apply_to_executor(&art_center_batch);
     center_result = executor_commit_art_player_center(reference_row, reference_col);
     if(0 == art_pre_push_center_succeeded(center_result))
     {
@@ -896,14 +706,16 @@ static void art_replan_begin_wait_center(art_replan_update_struct *update)
 
 static void art_replan_begin_launch_move(float move_cm, art_replan_update_struct *update)
 {
-    const drive_pose_struct *pose = drive_pose_get();
-
-    drive_pose_reset(0.0f, 0.0f, pose->yaw_deg);
-    reset_motion_segment();
-    art_launch_target_x_cm = move_cm;
-    art_launch_arrival_ticks = 0;
+    executor_stop();
     art_launch_move_start_ms = time_ms();
     art_replan_phase = ART_REPLAN_LAUNCH_MOVE;
+    if(0 == executor_start_position_correction_with_pose_reset(
+                 0.0f, 0.0f, move_cm, 0.0f))
+    {
+        art_replan_center_timeout_error(EXEC_ERROR_ART_TIMEOUT,
+                                        "E:LMov", update);
+        return;
+    }
     if(0 != update)
     {
         update->run_state = "LCH";
@@ -955,37 +767,27 @@ static void art_replan_tick_wait_center(art_replan_update_struct *update)
 
 static void art_replan_tick_launch_move(art_replan_update_struct *update)
 {
-    const drive_pose_struct *pose = drive_pose_get();
-    float error_x = art_launch_target_x_cm - pose->x_cm;
-    float vx;
+    executor_state_enum state = executor_get_state();
 
     if((time_ms() - art_launch_move_start_ms) >= EXEC_ART_SYNC_TIMEOUT_MS)
     {
-        stop_motion();
+        executor_stop();
         art_replan_begin(ART_REPLAN_INITIAL, update);
         return;
     }
 
-    if(art_abs_float(error_x) <= PATH_ARRIVAL_THRESHOLD_CM)
+    if(EXEC_STATE_DONE == state)
     {
-        reset_motion_segment();
-        if(art_launch_arrival_ticks < EXEC_ARRIVAL_STABLE_TICKS)
-        {
-            art_launch_arrival_ticks++;
-        }
-        if(art_launch_arrival_ticks >= EXEC_ARRIVAL_STABLE_TICKS)
-        {
-            stop_motion();
-            art_replan_begin(ART_REPLAN_INITIAL, update);
-        }
+        executor_stop();
+        art_replan_begin(ART_REPLAN_INITIAL, update);
         return;
     }
-
-    art_launch_arrival_ticks = 0;
-    vx = limit_float(error_x * PATH_KP,
-                     -ART_LAUNCH_MOVE_MAX_SPEED,
-                     ART_LAUNCH_MOVE_MAX_SPEED);
-    set_motion(vx, 0.0f);
+    if(EXEC_STATE_ERROR == state)
+    {
+        art_replan_center_timeout_error(EXEC_ERROR_ART_TIMEOUT,
+                                        "E:LMov", update);
+        return;
+    }
 
     if(0 != update)
     {
@@ -1039,14 +841,26 @@ static void art_replan_begin_return_axis(art_replan_phase_enum phase,
                                          float target_cm,
                                          art_replan_update_struct *update)
 {
-    const drive_pose_struct *pose = drive_pose_get();
+    float target_x_cm = 0.0f;
+    float target_y_cm = 0.0f;
 
-    drive_pose_reset(0.0f, 0.0f, pose->yaw_deg);
-    reset_motion_segment();
+    executor_stop();
     art_replan_phase = phase;
-    art_return_target_cm = target_cm;
-    art_return_arrival_ticks = 0;
     art_return_phase_start_ms = time_ms();
+    if(ART_REPLAN_RETURN_ALIGN_Y == phase)
+    {
+        target_y_cm = target_cm;
+    }
+    else
+    {
+        target_x_cm = target_cm;
+    }
+    if(0 == executor_start_position_correction_with_pose_reset(
+                 0.0f, 0.0f, target_x_cm, target_y_cm))
+    {
+        art_replan_return_error(EXEC_ERROR_ART_TIMEOUT, update);
+        return;
+    }
     if(0 != update)
     {
         update->run_state = (ART_REPLAN_RETURN_ALIGN_Y == phase) ? "RetY" : "RetX";
@@ -1120,12 +934,12 @@ static void art_replan_tick_return_center(art_replan_update_struct *update)
 
     if((time_ms() - art_wait_start_ms) >= EXEC_ART_SYNC_TIMEOUT_MS)
     {
-#if ART_CENTER_TIMEOUT_FALLBACK_ENABLE
         if(ART_REPLAN_RETURN_VERIFY == phase)
         {
-            art_replan_finish_return(update);
+            art_replan_return_error(EXEC_ERROR_ART_SYNC, update);
             return;
         }
+#if ART_CENTER_TIMEOUT_FALLBACK_ENABLE
         if(0 == art_requested_center_use_map_cell(openart_map_get()))
         {
             art_requested_center_col_q = (uint16)(ART_RETURN_GATE_COL * 100u + 50u);
@@ -1144,11 +958,8 @@ static void art_replan_tick_return_center(art_replan_update_struct *update)
 
 static void art_replan_tick_return_axis(art_replan_update_struct *update)
 {
-    const drive_pose_struct *pose = drive_pose_get();
     uint8 is_y_axis = (ART_REPLAN_RETURN_ALIGN_Y == art_replan_phase) ? 1u : 0u;
-    float current_cm = (0 != is_y_axis) ? pose->y_cm : pose->x_cm;
-    float error_cm = art_return_target_cm - current_cm;
-    float speed;
+    executor_state_enum state = executor_get_state();
 
     if((time_ms() - art_return_phase_start_ms) >= EXEC_ART_SYNC_TIMEOUT_MS)
     {
@@ -1156,39 +967,22 @@ static void art_replan_tick_return_axis(art_replan_update_struct *update)
         return;
     }
 
-    if(art_abs_float(error_cm) <= PATH_ARRIVAL_THRESHOLD_CM)
+    if(EXEC_STATE_DONE == state)
     {
-        reset_motion_segment();
-        if(art_return_arrival_ticks < EXEC_ARRIVAL_STABLE_TICKS)
+        executor_stop();
+        if(0 != is_y_axis)
         {
-            art_return_arrival_ticks++;
+            art_replan_begin_return_x_or_verify(update);
         }
-        if(art_return_arrival_ticks >= EXEC_ARRIVAL_STABLE_TICKS)
+        else
         {
-            stop_motion();
-            if(0 != is_y_axis)
-            {
-                art_replan_begin_return_x_or_verify(update);
-            }
-            else
-            {
-                art_replan_begin_return_center(ART_REPLAN_RETURN_VERIFY, update);
-            }
+            art_replan_begin_return_center(ART_REPLAN_RETURN_VERIFY, update);
         }
         return;
     }
-
-    art_return_arrival_ticks = 0;
-    speed = limit_float(error_cm * PATH_KP,
-                        -ART_LAUNCH_MOVE_MAX_SPEED,
-                        ART_LAUNCH_MOVE_MAX_SPEED);
-    if(0 != is_y_axis)
+    if(EXEC_STATE_ERROR == state)
     {
-        set_motion(0.0f, speed);
-    }
-    else
-    {
-        set_motion(speed, 0.0f);
+        art_replan_return_error(EXEC_ERROR_ART_TIMEOUT, update);
     }
 }
 
@@ -1294,7 +1088,6 @@ static void art_handle_stable_map(const art_replan_context_struct *context,
        (1u == stats.car_count) &&
        (0 != art_stats_done(&stats)))
     {
-        art_update_confirmed_counts(&stats);
         art_replan_begin_center_request(ART_REPLAN_SEGMENT_CENTER, "RCtr", update);
         return;
     }
@@ -1313,18 +1106,11 @@ static void art_handle_stable_map(const art_replan_context_struct *context,
 
     if((ART_REPLAN_SEGMENT == phase) && (0u != art_external_change_pending))
     {
-        art_update_confirmed_counts(&stats);
-        art_external_change_pending = 0u;
         art_replan_begin_center_request(ART_REPLAN_SEGMENT_CENTER, "RCtr", update);
         return;
     }
 
-    if(ART_REPLAN_INITIAL == phase)
-    {
-        // 初次求解只建立基线，不拿 B/T 变化做成败判断。
-        art_update_confirmed_counts(&stats);
-    }
-    else if(ART_REPLAN_SEGMENT == phase)
+    if(ART_REPLAN_SEGMENT == phase)
     {
         char sync_action = executor_get_art_sync_action();
 
@@ -1335,7 +1121,6 @@ static void art_handle_stable_map(const art_replan_context_struct *context,
 #else
             center_result = EXEC_ART_CENTER_NONE;
 #endif
-            art_update_confirmed_counts(&stats);
             if(0 == art_center_result_needs_map(center_result))
             {
                 (void)executor_continue_after_art_sync();
@@ -1355,7 +1140,6 @@ static void art_handle_stable_map(const art_replan_context_struct *context,
         else if(0 != art_stats_count_decreased(&stats))
         {
             // 单箱任务结束点：必须看到 B/T 真的减少，才算上位机已确认这次箱子消除。
-            art_update_confirmed_counts(&stats);
             if(0 != update)
             {
                 update->run_state = "Box OK";
@@ -1382,6 +1166,7 @@ static void art_replan_solve_snapshot_after_center(
     art_replan_phase_enum center_phase,
     art_replan_update_struct *update)
 {
+    const map_source_struct *paired_source;
     map_scan_stats_struct stats;
     art_replan_phase_enum map_phase =
         (ART_REPLAN_INITIAL_CENTER == center_phase) ? ART_REPLAN_INITIAL : ART_REPLAN_SEGMENT;
@@ -1389,22 +1174,32 @@ static void art_replan_solve_snapshot_after_center(
     float initial_pose_y_cm;
     uint32 start_ms;
 
-    map_scan_stats(context->snapshot, &stats);
-    if(0 == art_replan_calculate_pose_offset(&stats,
+    paired_source = openart_get_requested_center_map();
+#if ART_CENTER_TIMEOUT_FALLBACK_ENABLE
+    if((0 == paired_source) && (0 != art_requested_center_fallback))
+    {
+        paired_source = context->snapshot;
+    }
+#endif
+    if(0 == art_replan_calculate_pose_offset(paired_source,
                                              art_requested_center_col_q,
                                              art_requested_center_row_q,
                                              &initial_pose_x_cm,
                                              &initial_pose_y_cm))
     {
-        executor_set_error(EXEC_ERROR_ART_CENTER);
-        art_replan_cancel();
-        if(0 != update)
-        {
-            update->run_state = "E:Ctr";
-            update->redraw = 1;
-        }
+        art_replan_retry_center_request(
+            (ART_REPLAN_INITIAL_CENTER == center_phase) ? "ICtr" : "RCtr",
+            update);
         return;
     }
+    map_scan_stats(paired_source, &stats);
+    if((0 == art_stats_valid_for_solve(&stats)) &&
+       !((ART_REPLAN_SEGMENT == map_phase) && (0 != art_stats_done(&stats))))
+    {
+        art_replan_begin(map_phase, update);
+        return;
+    }
+    art_replan_save_snapshot(context, paired_source);
 
     if((ART_REPLAN_INITIAL == map_phase) && (0u != art_launch_subject2))
     {
@@ -1434,9 +1229,14 @@ static void art_replan_solve_snapshot_after_center(
                                     initial_pose_x_cm,
                                     initial_pose_y_cm,
                                     update);
+            if(ART_REPLAN_IDLE != art_replan_phase)
+            {
+                art_update_confirmed_counts(&stats);
+            }
         }
         else
         {
+            art_update_confirmed_counts(&stats);
             *context->start_row = stats.car_row;
             *context->start_col = stats.car_col;
             clear_result(context->result);
@@ -1460,6 +1260,7 @@ static void art_replan_solve_snapshot_after_center(
     {
         *context->elapsed_ms = time_ms() - start_ms;
         openart_uart_discard_pending();
+        art_update_confirmed_counts(&stats);
         if(0 != update)
         {
             update->reset_playback_step = 1;
@@ -1510,19 +1311,12 @@ static void art_replan_solve_snapshot_after_center(
 void art_replan_cancel(void)
 {
     art_replan_phase = ART_REPLAN_IDLE;
-    art_candidate_valid = 0;
-    art_stable_count = 0;
-    art_last_seen_frame = 0;
+    map_stability_tracker_reset(&art_map_tracker, 0u);
     art_wait_start_ms = 0;
-    art_launch_pending = 0;
     art_launch_subject2 = 0u;
     art_launch_delay_start_ms = 0;
-    art_launch_target_x_cm = 0.0f;
-    art_launch_arrival_ticks = 0;
     art_launch_move_start_ms = 0;
-    art_return_target_cm = 0.0f;
     art_return_pending_x_cm = 0.0f;
-    art_return_arrival_ticks = 0;
     art_return_correction_count = 0;
     art_return_phase_start_ms = 0;
     art_monitor_last_frame = 0;
@@ -1530,7 +1324,7 @@ void art_replan_cancel(void)
     art_requested_center_clear();
     art_pre_push_box_request_active = 0u;
     art_pre_push_box_preparation_started = 0u;
-    art_box_prefetch_clear();
+    art_box_observation_session_reset(&art_box_session);
     art_pre_push_box_retry_count = 0u;
     art_pre_push_box_retry_moving = 0u;
     art_pre_push_box_retry_settling = 0u;
@@ -1551,8 +1345,6 @@ void art_replan_begin_initial(art_replan_update_struct *update)
     art_home_center_col_q = 0;
     art_home_center_row_q = 0;
     art_home_center_valid = 0;
-    art_launch_target_x_cm = 0.0f;
-    art_launch_arrival_ticks = 0;
     art_launch_move_start_ms = 0;
     art_requested_center_clear();
     if(0 != update)
@@ -1601,17 +1393,12 @@ void art_replan_tick(const art_replan_context_struct *context,
 
     art_replan_update_reset(update);
 
-    if((ART_REPLAN_IDLE == art_replan_phase) &&
+    if(((ART_REPLAN_IDLE == art_replan_phase) ||
+        (ART_REPLAN_PRE_PUSH_CENTER == art_replan_phase)) &&
        (0 != art_source_enabled) &&
        (0 != art_replan_handle_host_completion(update)))
     {
         return;
-    }
-
-    if((ART_REPLAN_IDLE == art_replan_phase) &&
-       (0 != art_source_enabled))
-    {
-        art_replan_tick_box_prefetch();
     }
 
     if((ART_REPLAN_IDLE == art_replan_phase) &&
@@ -1762,43 +1549,6 @@ void art_replan_tick(const art_replan_context_struct *context,
     }
 }
 
-void art_replan_confirm_launch(const art_replan_context_struct *context,
-                                art_replan_update_struct *update)
-{
-    map_scan_stats_struct stats;
-    float initial_pose_x_cm = 0.0f;
-    float initial_pose_y_cm = 0.0f;
-
-    art_replan_update_reset(update);
-    if(0 == art_launch_pending)
-    {
-        return;
-    }
-
-    map_scan_stats(context->snapshot, &stats);
-    (void)art_replan_calculate_pose_offset(&stats,
-                                           art_requested_center_col_q,
-                                           art_requested_center_row_q,
-                                           &initial_pose_x_cm,
-                                           &initial_pose_y_cm);
-    art_launch_pending = 0;
-    // K3 确认只消费一次待启动标志；如果用户随后再按 K3，就交回菜单的暂停/继续逻辑处理。
-    art_replan_start_executor(context,
-                              &stats,
-                              initial_pose_x_cm,
-                              initial_pose_y_cm,
-                              update);
-    if(0 != update)
-    {
-        update->redraw = 1;
-    }
-}
-
-uint8 art_replan_launch_pending(void)
-{
-    return art_launch_pending;
-}
-
 void art_replan_get_debug_status(art_replan_debug_status_struct *status)
 {
     if(0 == status)
@@ -1807,10 +1557,9 @@ void art_replan_get_debug_status(art_replan_debug_status_struct *status)
     }
 
     status->phase = (uint8)art_replan_phase;
-    status->stable_count = art_stable_count;
-    status->candidate_valid = art_candidate_valid;
+    status->stable_count = art_map_tracker.stable_count;
+    status->candidate_valid = art_map_tracker.candidate_valid;
     status->confirmed_box_count = confirmed_box_count;
     status->confirmed_target_count = confirmed_target_count;
     status->confirmed_counts_valid = confirmed_counts_valid;
-    status->launch_pending = art_launch_pending;
 }

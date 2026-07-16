@@ -101,6 +101,7 @@ PLAYER_SAMPLE_OFFSETS = (
 
 PLAYER_CENTER_SEARCH_RADIUS = 14 * FRAME_SCALE
 PLAYER_RECENT_C_FALLBACK_FRAMES = 3
+PLAYER_CENTER_LOST_FRAME_LIMIT = 3
 PLAYER_BLOB_PIXELS_THRESHOLD = 6
 PLAYER_BLOB_AREA_THRESHOLD = 6
 PLAYER_BLOB_MARGIN = 2
@@ -117,6 +118,7 @@ BOX_CENTER_MIN_COLOR_PIXELS = 12
 BOX_YELLOW_BLOB_THRESHOLD = (40, 100, -50, 25, 20, 127)
 BOX_BLOB_AREA_THRESHOLD = 12
 BOX_BLOB_MARGIN = 2
+BOX_REQUEST_MATCH_MAX_OFFSET_Q = 80
 BOX_SAMPLE_OFFSETS = (
     (-8, -8), (-4, -8), (0, -8), (4, -8), (8, -8),
     (-8, -4), (-4, -4), (0, -4), (4, -4), (8, -4),
@@ -857,6 +859,7 @@ def select_box_center(box_centers, recognition_points, row_idx, col_idx):
     max_dy = max(4, cell_h * 4 // 5)
     best_center = None
     best_distance = None
+    ambiguous = False
     for detected_x, detected_y in box_centers:
         if (abs(detected_x - center_x) > max_dx or
                 abs(detected_y - center_y) > max_dy):
@@ -866,7 +869,10 @@ def select_box_center(box_centers, recognition_points, row_idx, col_idx):
         if best_distance is None or distance < best_distance:
             best_center = (detected_x, detected_y)
             best_distance = distance
-    return best_center
+            ambiguous = False
+        elif distance == best_distance:
+            ambiguous = True
+    return None if ambiguous else best_center
 
 
 def detect_box_center(img, recognition_points, row_idx, col_idx):
@@ -880,14 +886,38 @@ def detect_box_center(img, recognition_points, row_idx, col_idx):
         box_centers, recognition_points, row_idx, col_idx)
 
 
-def player_center_to_grid_q(player_center, rectified=True, raw_transform=None):
-    if player_center is None:
+def resolve_requested_box_center(img, recognition_points,
+                                 element_matrix, row_idx, col_idx):
+    if not (0 <= row_idx < GRID_ROWS and 0 <= col_idx < GRID_COLS):
+        return None
+    if element_matrix[row_idx][col_idx] != "box":
+        return None
+    box_centers = detect_box_centers(
+        img, recognition_points, element_matrix)
+    return select_box_center(
+        box_centers, recognition_points, row_idx, col_idx)
+
+
+def box_center_grid_matches_request(box_center_grid, row_idx, col_idx):
+    if box_center_grid is None:
+        return False
+    col_q, row_q = box_center_grid
+    col_offset_q = col_q - (col_idx * 100 + 50)
+    row_offset_q = row_q - (row_idx * 100 + 50)
+    return (-BOX_REQUEST_MATCH_MAX_OFFSET_Q <= col_offset_q <=
+            BOX_REQUEST_MATCH_MAX_OFFSET_Q and
+            -BOX_REQUEST_MATCH_MAX_OFFSET_Q <= row_offset_q <=
+            BOX_REQUEST_MATCH_MAX_OFFSET_Q)
+
+
+def image_center_to_grid_q(center, rectified=True, raw_transform=None):
+    if center is None:
         return None
 
     if not rectified:
         if raw_transform is None:
             return None
-        x, y = player_center
+        x, y = center
         a, b, c, d, e, f, g, h = raw_transform
         m00 = a - x * g
         m01 = b - x * h
@@ -917,7 +947,7 @@ def player_center_to_grid_q(player_center, rectified=True, raw_transform=None):
     if width <= 0 or height <= 0:
         return None
 
-    x, y = player_center
+    x, y = center
     col_q = int(((x - left) * GRID_COLS * 100 / width) + 0.5)
     row_q = int(((y - top) * GRID_ROWS * 100 / height) + 0.5)
     if col_q < 0 or col_q >= GRID_COLS * 100:
@@ -925,6 +955,32 @@ def player_center_to_grid_q(player_center, rectified=True, raw_transform=None):
     if row_q < 0 or row_q >= GRID_ROWS * 100:
         return None
     return (col_q, row_q)
+
+
+def resolve_player_center(img, recognition_points,
+                          raw_element_matrix, stable_element_matrix,
+                          previous_precise, previous_cell,
+                          rectified, raw_transform):
+    anchor = previous_precise
+    if anchor is None and previous_cell is not None:
+        row_idx, col_idx = previous_cell
+        if (0 <= row_idx < GRID_ROWS and 0 <= col_idx < GRID_COLS):
+            anchor = recognition_points[row_idx * GRID_COLS + col_idx]
+    if anchor is None:
+        anchor = find_player_coarse_center(
+            recognition_points, raw_element_matrix, stable_element_matrix)
+
+    blob_center = detect_player_center(
+        img, recognition_points,
+        raw_element_matrix, stable_element_matrix, anchor)
+    precise_anchor = blob_center if blob_center is not None else anchor
+    precise_center = detect_player_center_precise(img, precise_anchor)
+    grid_q = image_center_to_grid_q(
+        precise_center, rectified, raw_transform)
+    if grid_q is None:
+        return None
+    return (precise_center, grid_q,
+            (grid_q[1] // 100, grid_q[0] // 100))
 
 
 def sample_special_color(img, x, y, center_r, center_g, center_b, predicate):
@@ -1020,6 +1076,67 @@ def recognize_map(img, grid_points, raw_element_matrix):
         col_idx = idx % GRID_COLS
         raw_element_matrix[row_idx][col_idx] = classify_element(
             img, row_idx, col_idx, x, y)
+
+
+def count_player_cells(element_matrix):
+    count = 0
+    for row in element_matrix:
+        for element in row:
+            if element == "player":
+                count += 1
+    return count
+
+
+def update_non_player_background(element_matrix, background_matrix,
+                                 protected_cell=None):
+    for row_idx in range(GRID_ROWS):
+        for col_idx in range(GRID_COLS):
+            if protected_cell == (row_idx, col_idx):
+                continue
+            element = element_matrix[row_idx][col_idx]
+            if element != "player":
+                background_matrix[row_idx][col_idx] = element
+
+
+def build_canonical_player_map(element_matrix, background_matrix,
+                               precise_center_grid=None):
+    selected_row = -1
+    selected_col = -1
+
+    if precise_center_grid is not None:
+        col_q, row_q = precise_center_grid
+        if not (0 <= col_q < GRID_COLS * 100 and
+                0 <= row_q < GRID_ROWS * 100):
+            return None
+        selected_col = col_q // 100
+        selected_row = row_q // 100
+    else:
+        for row_idx in range(GRID_ROWS):
+            for col_idx in range(GRID_COLS):
+                if element_matrix[row_idx][col_idx] != "player":
+                    continue
+                if selected_row >= 0:
+                    return None
+                selected_row = row_idx
+                selected_col = col_idx
+        if selected_row < 0:
+            return None
+
+    canonical = [["" for _ in range(GRID_COLS)]
+                 for _ in range(GRID_ROWS)]
+    for row_idx in range(GRID_ROWS):
+        for col_idx in range(GRID_COLS):
+            element = element_matrix[row_idx][col_idx]
+            background = background_matrix[row_idx][col_idx]
+            if (row_idx == selected_row and col_idx == selected_col):
+                canonical[row_idx][col_idx] = "+" if background == "goal" else "C"
+            elif element == "player":
+                if background == "":
+                    return None
+                canonical[row_idx][col_idx] = ELEMENT_CHAR[background]
+            else:
+                canonical[row_idx][col_idx] = ELEMENT_CHAR[element]
+    return canonical
 
 
 def update_stable_map(raw_element_matrix, stable_element_matrix,
@@ -1155,24 +1272,23 @@ def poll_map_uart_rx(uart):
         map_uart_rx_line = ""
 
 
-def process_center_request(uart, detected_player_center,
-                           rectified_recognition, raw_transform, char_matrix):
+def process_center_request(uart, player_center_grid,
+                           canonical_char_matrix):
     global center_request_active
     global center_request_sample_count
 
-    if not center_request_active or uart is None or detected_player_center is None:
+    if (not center_request_active or uart is None or
+            canonical_char_matrix is None):
         return False
-    center_grid = player_center_to_grid_q(
-        detected_player_center, rectified_recognition, raw_transform)
-    if center_grid is None:
-        return False
+    if player_center_grid is None:
+        return send_map_uart(uart, canonical_char_matrix, None)
 
     sample_index = center_request_sample_count + 1
-    if not send_map_uart(uart, char_matrix, center_grid):
+    if not send_map_uart(uart, canonical_char_matrix, player_center_grid):
         return False
     try:
         uart.write("CENTER_SAMPLE %d,%d,%d\n" %
-                   (sample_index, center_grid[0], center_grid[1]))
+                   (sample_index, player_center_grid[0], player_center_grid[1]))
     except Exception:
         return False
 
@@ -1182,24 +1298,29 @@ def process_center_request(uart, detected_player_center,
     return True
 
 
-def process_observation_request(uart, player_center_grid, box_center_grid):
+def process_observation_request(uart, canonical_char_matrix,
+                                player_center_grid, box_center_grid):
     global observation_request_active
     global observation_request_sample_count
 
     if (not observation_request_active or uart is None or
+            canonical_char_matrix is None or
             player_center_grid is None or box_center_grid is None):
-        return
+        return False
     sample_index = observation_request_sample_count + 1
+    if not send_map_uart(uart, canonical_char_matrix, player_center_grid):
+        return False
     try:
         uart.write("OBSERVE_SAMPLE %d,%d,%d,%d,%d\n" %
                    (sample_index,
                     player_center_grid[0], player_center_grid[1],
                     box_center_grid[0], box_center_grid[1]))
     except Exception:
-        return
+        return False
     observation_request_sample_count = sample_index
     if observation_request_sample_count >= OBSERVATION_SAMPLE_COUNT:
         observation_request_active = False
+    return True
 
 
 def send_map_uart(uart, char_matrix, player_center_grid=None):
@@ -1268,6 +1389,8 @@ def main():
     pending_element_matrix = [["" for _ in range(GRID_COLS)] for _ in range(GRID_ROWS)]
     pending_count_matrix = [[0 for _ in range(GRID_COLS)] for _ in range(GRID_ROWS)]
     char_matrix = [["" for _ in range(GRID_COLS)] for _ in range(GRID_ROWS)]
+    player_background_matrix = [["" for _ in range(GRID_COLS)]
+                                for _ in range(GRID_ROWS)]
 
     clock = time.clock()
     last_print_ms = time.ticks_ms()
@@ -1294,10 +1417,10 @@ def main():
     rectified_view_failed = False
     rectified_recognition_failed = False
     player_center_anchor = None
-    recent_player_coarse_center = None
-    player_coarse_missing_frames = 0
-    handled_center_request_generation = -1
-    handled_observation_request_generation = -1
+    last_precise_player_center = None
+    last_precise_player_grid = None
+    player_center_lost_frames = 0
+    last_player_cell = None
 
     while True:
         loop_start_us = time.ticks_us()
@@ -1327,47 +1450,89 @@ def main():
                 recognition_img = img
                 recognition_points = grid_points
                 player_center_anchor = None
+                last_precise_player_center = None
+                last_precise_player_grid = None
+                player_center_lost_frames = 0
+                last_player_cell = None
 
         rectify_done_us = time.ticks_us()
         recognize_map(recognition_img, recognition_points, raw_element_matrix)
         update_stable_map(
             raw_element_matrix, element_matrix,
             pending_element_matrix, pending_count_matrix, char_matrix)
-        current_player_coarse_center = find_player_coarse_center(
-            recognition_points, raw_element_matrix, None)
-        if current_player_coarse_center is not None:
-            recent_player_coarse_center = current_player_coarse_center
-            player_coarse_missing_frames = 0
-        else:
-            player_coarse_missing_frames += 1
-        precise_player_center = None
-        if (center_request_active or observation_request_active or
-                DEBUG_PLAYER_CENTER_ENABLE or DEBUG_OBSERVATION_ENABLE):
-            if (handled_center_request_generation != center_request_generation or
-                    handled_observation_request_generation != observation_request_generation):
-                player_center_anchor = None
-                handled_center_request_generation = center_request_generation
-                handled_observation_request_generation = observation_request_generation
+        player_count = count_player_cells(element_matrix)
+        unique_player_cell = None
+        if player_count == 1:
+            for player_row in range(GRID_ROWS):
+                for player_col in range(GRID_COLS):
+                    if element_matrix[player_row][player_col] == "player":
+                        unique_player_cell = (player_row, player_col)
+                        break
+                if unique_player_cell is not None:
+                    break
 
-            search_anchor = (player_center_anchor if player_center_anchor is not None else
-                             select_recent_player_anchor(
-                                 current_player_coarse_center,
-                                 recent_player_coarse_center,
-                                 player_coarse_missing_frames))
-            blob_player_center = detect_player_center(
+        need_precise_player_center = (
+            center_request_active or observation_request_active or
+            DEBUG_PLAYER_CENTER_ENABLE or DEBUG_OBSERVATION_ENABLE or
+            player_count != 1)
+        precise_player_center = None
+        precise_player_grid = None
+        precise_player_cell = None
+        if need_precise_player_center:
+            player_center_result = resolve_player_center(
                 recognition_img, recognition_points,
                 raw_element_matrix, element_matrix,
-                search_anchor)
-            precise_anchor = (blob_player_center if blob_player_center is not None
-                              else player_center_anchor)
-            precise_player_center = detect_player_center_precise(
-                recognition_img, precise_anchor)
-            if precise_player_center is not None:
+                player_center_anchor, last_player_cell,
+                rectified_recognition_active, raw_grid_transform)
+            if player_center_result is not None:
+                precise_player_center = player_center_result[0]
+                precise_player_grid = player_center_result[1]
+                precise_player_cell = player_center_result[2]
                 player_center_anchor = precise_player_center
+                last_precise_player_center = precise_player_center
+                last_precise_player_grid = precise_player_grid
+                player_center_lost_frames = 0
+            else:
+                player_center_lost_frames += 1
+                if (player_center_lost_frames < PLAYER_CENTER_LOST_FRAME_LIMIT and
+                        last_precise_player_center is not None and
+                        last_precise_player_grid is not None):
+                    precise_player_center = last_precise_player_center
+                    precise_player_grid = last_precise_player_grid
+                    precise_player_cell = (
+                        precise_player_grid[1] // 100,
+                        precise_player_grid[0] // 100)
+                else:
+                    player_center_anchor = None
+                    last_precise_player_center = None
+                    last_precise_player_grid = None
+                    last_player_cell = None
 
-        center_map_sent = process_center_request(
-            map_uart, precise_player_center,
-            rectified_recognition_active, raw_grid_transform, char_matrix)
+        precise_center_is_authoritative = (
+            precise_player_grid is not None and
+            (center_request_active or observation_request_active or
+             player_count != 1))
+        canonical_center_grid = (precise_player_grid
+                                 if precise_center_is_authoritative else None)
+        selected_player_cell = (precise_player_cell
+                                if precise_center_is_authoritative
+                                else unique_player_cell)
+        update_non_player_background(
+            element_matrix, player_background_matrix,
+            selected_player_cell)
+        canonical_char_matrix = build_canonical_player_map(
+            element_matrix, player_background_matrix,
+            canonical_center_grid)
+        if canonical_char_matrix is not None:
+            last_player_cell = selected_player_cell
+
+        center_map_sent = False
+        if (precise_player_center is not None or
+                time.ticks_diff(now_ms, last_uart_send_ms) >=
+                UART_MAP_SEND_PERIOD_MS):
+            center_map_sent = process_center_request(
+                map_uart, precise_player_grid,
+                canonical_char_matrix)
         if center_map_sent:
             last_uart_send_ms = now_ms
         box_centers = []
@@ -1376,17 +1541,23 @@ def main():
                 recognition_img, recognition_points, element_matrix)
         observation_box_center = None
         if observation_request_active:
-            observation_box_center = detect_box_center(
+            observation_box_center = resolve_requested_box_center(
                 recognition_img, recognition_points,
+                element_matrix,
                 observation_request_row, observation_request_col)
-        observation_player_grid = player_center_to_grid_q(
-            precise_player_center,
-            rectified_recognition_active, raw_grid_transform)
-        observation_box_grid = player_center_to_grid_q(
+        observation_player_grid = precise_player_grid
+        observation_box_grid = image_center_to_grid_q(
             observation_box_center,
             rectified_recognition_active, raw_grid_transform)
-        process_observation_request(
-            map_uart, observation_player_grid, observation_box_grid)
+        if not box_center_grid_matches_request(
+                observation_box_grid,
+                observation_request_row, observation_request_col):
+            observation_box_grid = None
+        observation_map_sent = process_observation_request(
+            map_uart, canonical_char_matrix,
+            observation_player_grid, observation_box_grid)
+        if observation_map_sent:
+            last_uart_send_ms = now_ms
         debug_box_centers = []
         if DEBUG_OBSERVATION_ENABLE:
             debug_seen_centers = []
@@ -1400,7 +1571,7 @@ def main():
                             debug_center in debug_seen_centers):
                         continue
                     debug_seen_centers.append(debug_center)
-                    debug_grid = player_center_to_grid_q(
+                    debug_grid = image_center_to_grid_q(
                         debug_center, rectified_recognition_active,
                         raw_grid_transform)
                     debug_box_centers.append(
@@ -1443,12 +1614,12 @@ def main():
                 time.ticks_diff(now_ms, last_print_ms) >= DEBUG_PRINT_PERIOD_MS):
             loop_us = time.ticks_diff(time.ticks_us(), loop_start_us)
             loop_fps = 1000000.0 / loop_us if loop_us > 0 else 0.0
-            debug_player_center_grid = player_center_to_grid_q(
+            debug_player_center_grid = image_center_to_grid_q(
                 precise_player_center,
                 rectified_recognition_active,
                 raw_grid_transform)
             print_map(
-                char_matrix,
+                canonical_char_matrix if canonical_char_matrix is not None else char_matrix,
                 clock.fps(),
                 loop_fps,
                 loop_us,
@@ -1471,8 +1642,14 @@ def main():
                                debug_grid[0], debug_grid[1]))
             last_print_ms = now_ms
 
-        if UART_MAP_SEND_ENABLE and map_uart is not None and time.ticks_diff(now_ms, last_uart_send_ms) >= UART_MAP_SEND_PERIOD_MS:
-            send_map_uart(map_uart, char_matrix, None)
+        if (UART_MAP_SEND_ENABLE and map_uart is not None and
+                canonical_char_matrix is not None and
+                not center_request_active and not observation_request_active and
+                time.ticks_diff(now_ms, last_uart_send_ms) >= UART_MAP_SEND_PERIOD_MS):
+            periodic_center_grid = (precise_player_grid
+                                    if player_count != 1 else None)
+            send_map_uart(map_uart, canonical_char_matrix,
+                          periodic_center_grid)
             last_uart_send_ms = now_ms
 
 

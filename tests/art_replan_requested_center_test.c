@@ -23,13 +23,15 @@ static uint8 observation_request_row;
 static uint8 observation_request_col;
 static uint16 solve_count;
 static uint16 executor_start_count;
+static uint16 position_correction_start_count;
+static float position_correction_target_x_cm;
+static float position_correction_target_y_cm;
 static uint16 executor_error_count;
 static float executor_initial_x_cm;
 static float executor_initial_y_cm;
 static uint8 fake_sync_pending;
 static uint8 fake_pre_push_pending;
 static uint8 fake_pre_push_box_request;
-static uint8 fake_pre_push_box_prefetch_request;
 static uint8 fake_pre_push_box_active;
 static uint8 fake_error_on_box_active_query;
 static uint8 fake_pre_push_box_row;
@@ -42,12 +44,17 @@ static uint8 fake_art_box_sample_count;
 static uint8 fake_center_requires_push_alignment;
 static uint16 continue_pre_push_count;
 static uint16 start_pre_push_alignment_count;
+static uint8 last_commit_row;
+static uint8 last_commit_col;
 static char fake_sync_action;
 static executor_state_enum fake_executor_state;
 static executor_error_enum fake_executor_error;
 static drive_pose_struct fake_pose;
 static char live_rows[MAP_ROWS][MAP_COLS + 1];
 static map_source_struct live_source;
+static char paired_center_rows[MAP_ROWS][MAP_COLS + 1];
+static map_source_struct paired_center_source;
+static uint8 paired_center_valid;
 static char snapshot_rows[MAP_ROWS][MAP_COLS + 1];
 static map_source_struct snapshot;
 static solve_result_struct result;
@@ -67,18 +74,12 @@ void drive_pose_reset(float x, float y, float yaw)
 void stop_motion(void) { }
 void reset_motion_segment(void) { }
 void set_motion(float vx, float vy) { (void)vx; (void)vy; }
-float limit_float(float value, float min_value, float max_value)
-{
-    if(value < min_value) return min_value;
-    if(value > max_value) return max_value;
-    return value;
-}
-
 void openart_request_player_center(void)
 {
     center_request_count++;
     center_count = 0;
     center_read = 0;
+    paired_center_valid = 0u;
 }
 void openart_request_observation(uint8 box_row, uint8 box_col)
 {
@@ -103,6 +104,10 @@ uint8 openart_get_requested_center_sample(uint16 *col_q, uint16 *row_q)
     return center_read;
 }
 const map_source_struct *openart_map_get(void) { return &live_source; }
+const map_source_struct *openart_get_requested_center_map(void)
+{
+    return (0u != paired_center_valid) ? &paired_center_source : 0;
+}
 uint32 openart_uart_get_frame_count(void) { return fake_frame_count; }
 void openart_uart_discard_pending(void) { }
 
@@ -146,6 +151,24 @@ void executor_start(const waypoint_struct *waypoints, uint16 count,
     fake_executor_state = EXEC_STATE_RUNNING;
 }
 void executor_stop(void) { fake_executor_state = EXEC_STATE_IDLE; }
+uint8 executor_start_position_correction(float target_x_cm, float target_y_cm)
+{
+    if((EXEC_STATE_RUNNING == fake_executor_state) ||
+       (EXEC_STATE_PAUSED == fake_executor_state)) return 0u;
+    position_correction_start_count++;
+    position_correction_target_x_cm = target_x_cm;
+    position_correction_target_y_cm = target_y_cm;
+    fake_executor_state = EXEC_STATE_RUNNING;
+    return 1u;
+}
+uint8 executor_start_position_correction_with_pose_reset(
+    float initial_x_cm, float initial_y_cm,
+    float target_x_cm, float target_y_cm)
+{
+    (void)initial_x_cm;
+    (void)initial_y_cm;
+    return executor_start_position_correction(target_x_cm, target_y_cm);
+}
 void executor_finish_done(void) { fake_executor_state = EXEC_STATE_DONE; }
 void executor_set_error(executor_error_enum error)
 {
@@ -159,13 +182,6 @@ uint8 executor_art_pre_push_pending(void) { return fake_pre_push_pending; }
 uint8 executor_get_pre_push_box_request(uint8 *box_row, uint8 *box_col)
 {
     if((0u == fake_pre_push_pending) || (0u == fake_pre_push_box_request)) return 0u;
-    *box_row = fake_pre_push_box_row;
-    *box_col = fake_pre_push_box_col;
-    return 1u;
-}
-uint8 executor_get_pre_push_box_prefetch_request(uint8 *box_row, uint8 *box_col)
-{
-    if(0u == fake_pre_push_box_prefetch_request) return 0u;
     *box_row = fake_pre_push_box_row;
     *box_col = fake_pre_push_box_col;
     return 1u;
@@ -229,9 +245,14 @@ uint8 executor_apply_art_player_center(uint16 col, uint16 row, uint32 sample)
     (void)col; (void)row;
     return (sample >= ART_CENTER_SAMPLE_COUNT) ? 1u : 0u;
 }
+
+void executor_reset_art_player_center_samples(void)
+{
+}
 executor_art_center_result_enum executor_commit_art_player_center(uint8 row, uint8 col)
 {
-    (void)row; (void)col;
+    last_commit_row = row;
+    last_commit_col = col;
     return EXEC_ART_CENTER_APPLIED;
 }
 uint8 executor_continue_after_pre_push_center(void)
@@ -287,6 +308,8 @@ static void feed_center(uint16 col0, uint16 row0,
     }
     center_count = ART_CENTER_SAMPLE_COUNT;
     center_read = 0;
+    map_source_snapshot(&paired_center_source, paired_center_rows, &live_source);
+    paired_center_valid = 1u;
 }
 
 static void feed_observation(uint16 car_col_q, uint16 car_row_q,
@@ -324,7 +347,6 @@ static void init_pre_push_box_test(art_replan_context_struct *context)
     fake_executor_error = EXEC_ERROR_NONE;
     fake_pre_push_pending = 1u;
     fake_pre_push_box_request = 1u;
-    fake_pre_push_box_prefetch_request = 0u;
     fake_pre_push_box_active = 0u;
     fake_error_on_box_active_query = 0u;
     fake_pre_push_box_row = 5u;
@@ -365,7 +387,7 @@ static uint8 pre_push_box_observation_flow(void)
     return (0 == strcmp(update.run_state, "Running")) ? 1u : 0u;
 }
 
-static uint8 pre_push_box_prefetch_freshness(void)
+static uint8 pre_push_box_requests_only_after_wait(void)
 {
     art_replan_context_struct context;
     art_replan_update_struct update;
@@ -374,37 +396,20 @@ static uint8 pre_push_box_prefetch_freshness(void)
 
     init_pre_push_box_test(&context);
     fake_pre_push_pending = 0u;
-    fake_pre_push_box_prefetch_request = 1u;
     request_before = observation_request_count;
     start_before = start_pre_push_box_count;
     art_replan_tick(&context, 1u, &update);
-    if(request_before + 1u != observation_request_count) return 0u;
-    feed_observation(450u, 550u, 550u, 550u);
-    art_replan_tick(&context, 1u, &update);
+    if(request_before != observation_request_count) return 0u;
 
     fake_pre_push_pending = 1u;
-    fake_pre_push_box_prefetch_request = 0u;
-    fake_time_ms += ART_BOX_OBSERVE_SAMPLE_MAX_AGE_MS;
     art_replan_tick(&context, 1u, &update);
     if((request_before + 1u != observation_request_count) ||
-       (start_before + 1u != start_pre_push_box_count) ||
-       (0 != strcmp(update.run_state, "BGap"))) return 0u;
-
-    init_pre_push_box_test(&context);
-    fake_pre_push_pending = 0u;
-    fake_pre_push_box_prefetch_request = 1u;
-    request_before = observation_request_count;
-    start_before = start_pre_push_box_count;
-    art_replan_tick(&context, 1u, &update);
+       (0 != strcmp(update.run_state, "BCtr"))) return 0u;
     feed_observation(450u, 550u, 550u, 550u);
     art_replan_tick(&context, 1u, &update);
-    fake_time_ms += ART_BOX_OBSERVE_SAMPLE_MAX_AGE_MS + 1u;
-    fake_pre_push_pending = 1u;
-    fake_pre_push_box_prefetch_request = 0u;
-    art_replan_tick(&context, 1u, &update);
-    return ((request_before + 2u == observation_request_count) &&
-            (start_before == start_pre_push_box_count) &&
-            (0 == strcmp(update.run_state, "BCtr"))) ? 1u : 0u;
+    return ((request_before + 1u == observation_request_count) &&
+            (start_before + 1u == start_pre_push_box_count) &&
+            (0 == strcmp(update.run_state, "BGap"))) ? 1u : 0u;
 }
 
 static uint8 pre_push_box_failures_follow_policy(void)
@@ -516,10 +521,16 @@ static uint8 run_test(void)
     if((solve_before != solve_count) || (0u != executor_error_count)) return 0;
 
     feed_center(260u, 550u, 259u, 550u, 261u, 550u);
+    live_rows[5][2] = '.';
+    live_rows[5][3] = 'C';
     art_replan_tick(&context, 1u, &update);
     if((1u != solve_count) || (1u != executor_start_count) ||
+       (2u != start_col) || ('C' != snapshot_rows[5][2]) ||
+       ('.' != snapshot_rows[5][3]) ||
        (fabsf(executor_initial_x_cm - 2.0f) > 0.01f) ||
        (fabsf(executor_initial_y_cm) > 0.01f)) return 0;
+    live_rows[5][3] = '.';
+    live_rows[5][2] = 'C';
 
     fake_sync_pending = 1;
     fake_sync_action = 'R';
@@ -533,8 +544,14 @@ static uint8 run_test(void)
     if((solve_before != solve_count) || (0u != executor_error_count)) return 0;
 
     feed_center(250u, 550u, 251u, 550u, 249u, 550u);
+    live_rows[5][2] = '.';
+    live_rows[5][3] = 'C';
     art_replan_tick(&context, 1u, &update);
-    if((2u != solve_count) || (2u != executor_start_count)) return 0;
+    if((2u != solve_count) || (2u != executor_start_count) ||
+       (2u != start_col) || ('C' != snapshot_rows[5][2]) ||
+       ('.' != snapshot_rows[5][3])) return 0;
+    live_rows[5][3] = '.';
+    live_rows[5][2] = 'C';
 
     live_rows[5][5] = '.';
     live_rows[5][6] = '.';
@@ -601,10 +618,15 @@ static uint8 run_test(void)
     fake_time_ms += 100u;
     art_replan_tick(&context, 1u, &update);
     feed_center(250u, 550u, 251u, 550u, 249u, 550u);
+    live_rows[5][2] = '.';
+    live_rows[5][3] = 'C';
     art_replan_tick(&context, 1u, &update);
     if((0u != fake_pre_push_pending) ||
        (1u != start_pre_push_alignment_count) ||
-       (0u != continue_pre_push_count)) return 0u;
+       (0u != continue_pre_push_count) ||
+       (5u != last_commit_row) || (2u != last_commit_col)) return 0u;
+    live_rows[5][3] = '.';
+    live_rows[5][2] = 'C';
 
     art_replan_cancel();
     fake_pre_push_pending = 1u;
@@ -641,8 +663,11 @@ static uint8 run_timeout_fallback_test(void)
 #endif
     uint16 error_before = executor_error_count;
 #if ART_CENTER_TIMEOUT_FALLBACK_ENABLE
-    uint8 tick;
+    uint16 correction_before = position_correction_start_count;
 #endif
+
+#define TIMEOUT_REQUIRE(condition, checkpoint) \
+    do { if(!(condition)) { printf("timeout-checkpoint-%u\n", (unsigned)(checkpoint)); return 0u; } } while(0)
 
     build_map();
     memset(&result, 0, sizeof(result));
@@ -664,40 +689,41 @@ static uint8 run_timeout_fallback_test(void)
     art_replan_begin_initial(&update);
     fake_time_ms = 5000u;
     art_replan_tick(&context, 1u, &update);
-    if((request_before + 1u != center_request_count) ||
-       (0 != strcmp(update.run_state, "WCTR"))) return 0u;
+    TIMEOUT_REQUIRE((request_before + 1u == center_request_count) &&
+                    (0 == strcmp(update.run_state, "WCTR")), 1u);
 
     fake_time_ms += EXEC_ART_SYNC_TIMEOUT_MS;
     art_replan_tick(&context, 1u, &update);
 #if ART_CENTER_TIMEOUT_FALLBACK_ENABLE
-    if(0 != strcmp(update.run_state, "LCH")) return 0u;
-    fake_pose.x_cm = ART_LAUNCH_FALLBACK_MOVE_CM;
-    for(tick = 0u; tick < EXEC_ARRIVAL_STABLE_TICKS; tick++)
-    {
-        art_replan_tick(&context, 1u, &update);
-    }
-    if(0 != strcmp(update.run_state, "WMAP")) return 0u;
+    TIMEOUT_REQUIRE((0 == strcmp(update.run_state, "LCH")) &&
+                    (correction_before + 1u == position_correction_start_count) &&
+                    (fabsf(position_correction_target_x_cm -
+                           ART_LAUNCH_FALLBACK_MOVE_CM) <= 0.01f) &&
+                    (fabsf(position_correction_target_y_cm) <= 0.01f), 2u);
+    fake_executor_state = EXEC_STATE_DONE;
+    art_replan_tick(&context, 1u, &update);
+    TIMEOUT_REQUIRE(0 == strcmp(update.run_state, "WMAP"), 3u);
 
     publish_stable_map(&context, &update);
-    if((request_before + 2u != center_request_count) ||
-       (0 != strcmp(update.run_state, "ICtr"))) return 0u;
+    TIMEOUT_REQUIRE((request_before + 2u == center_request_count) &&
+                    (0 == strcmp(update.run_state, "ICtr")), 4u);
     fake_time_ms += EXEC_ART_SYNC_TIMEOUT_MS;
     art_replan_tick(&context, 1u, &update);
-    if((solve_before + 1u != solve_count) ||
-       (start_before + 1u != executor_start_count) ||
-       (fabsf(executor_initial_x_cm) > 0.01f) ||
-       (fabsf(executor_initial_y_cm) > 0.01f)) return 0u;
+    TIMEOUT_REQUIRE((solve_before + 1u == solve_count) &&
+                    (start_before + 1u == executor_start_count) &&
+                    (fabsf(executor_initial_x_cm) <= 0.01f) &&
+                    (fabsf(executor_initial_y_cm) <= 0.01f), 5u);
 
     fake_sync_pending = 1u;
     fake_sync_action = 'R';
     art_replan_tick(&context, 1u, &update);
     publish_stable_map(&context, &update);
-    if((request_before + 3u != center_request_count) ||
-       (0 != strcmp(update.run_state, "RCtr"))) return 0u;
+    TIMEOUT_REQUIRE((request_before + 3u == center_request_count) &&
+                    (0 == strcmp(update.run_state, "RCtr")), 6u);
     fake_time_ms += EXEC_ART_SYNC_TIMEOUT_MS;
     art_replan_tick(&context, 1u, &update);
-    if((solve_before + 2u != solve_count) ||
-       (start_before + 2u != executor_start_count)) return 0u;
+    TIMEOUT_REQUIRE((solve_before + 2u == solve_count) &&
+                    (start_before + 2u == executor_start_count), 7u);
 
     live_rows[5][5] = '.';
     live_rows[5][6] = '.';
@@ -705,34 +731,39 @@ static uint8 run_timeout_fallback_test(void)
     fake_sync_action = 'R';
     art_replan_tick(&context, 1u, &update);
     publish_stable_map(&context, &update);
-    if((request_before + 4u != center_request_count) ||
-       (0 != strcmp(update.run_state, "RCtr"))) return 0u;
+    TIMEOUT_REQUIRE((request_before + 4u == center_request_count) &&
+                    (0 == strcmp(update.run_state, "RCtr")), 8u);
     fake_time_ms += EXEC_ART_SYNC_TIMEOUT_MS;
     art_replan_tick(&context, 1u, &update);
     fake_executor_state = EXEC_STATE_DONE;
     art_replan_tick(&context, 1u, &update);
-    if((request_before + 5u != center_request_count) ||
-       (0 != strcmp(update.run_state, "RetCtr"))) return 0u;
+    TIMEOUT_REQUIRE((request_before + 5u == center_request_count) &&
+                    (0 == strcmp(update.run_state, "RetCtr")), 9u);
 
     live_rows[5][2] = '.';
     fake_time_ms += EXEC_ART_SYNC_TIMEOUT_MS;
     art_replan_tick(&context, 1u, &update);
-    fake_pose.x_cm = -ART_LAUNCH_FALLBACK_MOVE_CM;
-    for(tick = 0u; tick < EXEC_ARRIVAL_STABLE_TICKS; tick++)
-    {
-        art_replan_tick(&context, 1u, &update);
-    }
-    if((request_before + 6u != center_request_count) ||
-       (0 != strcmp(update.run_state, "RetChk"))) return 0u;
+    TIMEOUT_REQUIRE((correction_before + 2u == position_correction_start_count) &&
+                    (fabsf(position_correction_target_x_cm +
+                           ART_LAUNCH_FALLBACK_MOVE_CM) <= 0.01f) &&
+                    (fabsf(position_correction_target_y_cm) <= 0.01f), 10u);
+    fake_executor_state = EXEC_STATE_DONE;
+    art_replan_tick(&context, 1u, &update);
+    TIMEOUT_REQUIRE((request_before + 6u == center_request_count) &&
+                    (0 == strcmp(update.run_state, "RetChk")), 11u);
     fake_time_ms += EXEC_ART_SYNC_TIMEOUT_MS;
     art_replan_tick(&context, 1u, &update);
-    return ((EXEC_STATE_DONE == fake_executor_state) &&
-            (0u != update.return_complete) &&
-            (error_before == executor_error_count)) ? 1u : 0u;
+    TIMEOUT_REQUIRE((EXEC_STATE_ERROR == fake_executor_state) &&
+                    (0u == update.return_complete) &&
+                    (error_before + 1u == executor_error_count) &&
+                    (0 == strcmp(update.run_state, "RetErr")), 12u);
+    return 1u;
 #else
     return ((error_before + 1u == executor_error_count) &&
             (0 == strcmp(update.run_state, "E:LCtr"))) ? 1u : 0u;
 #endif
+
+#undef TIMEOUT_REQUIRE
 }
 
 static uint8 host_completion_before_task_end_replans(void)
@@ -789,29 +820,100 @@ static uint8 host_completion_before_task_end_replans(void)
 
     publish_stable_map(&context, &update);
     if(0 != strcmp(update.run_state, "RCtr")) return 0u;
+    art_replan_get_debug_status(&status);
+    if((2u != status.confirmed_box_count) ||
+       (2u != status.confirmed_target_count)) return 0u;
     feed_center(250u, 550u, 251u, 550u, 249u, 550u);
+    live_rows[4][5] = 'B';
+    live_rows[4][6] = 'T';
     art_replan_tick(&context, 1u, &update);
     art_replan_get_debug_status(&status);
 
-    return ((2u == executor_start_count) &&
-            (EXEC_STATE_RUNNING == fake_executor_state) &&
-            (1u == status.confirmed_box_count) &&
-            (1u == status.confirmed_target_count)) ? 1u : 0u;
+    if((2u != executor_start_count) ||
+       (EXEC_STATE_RUNNING != fake_executor_state) ||
+       (1u != status.confirmed_box_count) ||
+       (1u != status.confirmed_target_count)) return 0u;
+
+    fake_pre_push_pending = 1u;
+    fake_pre_push_box_request = 1u;
+    art_replan_tick(&context, 1u, &update);
+    if(0 != strcmp(update.run_state, "BCtr")) return 0u;
+    live_rows[4][5] = '.';
+    live_rows[4][6] = '.';
+    live_rows[5][5] = '.';
+    live_rows[5][6] = '.';
+    fake_frame_count++;
+    art_replan_tick(&context, 1u, &update);
+    return ((EXEC_STATE_IDLE == fake_executor_state) &&
+            (0 == strcmp(update.run_state, "Host Sync"))) ? 1u : 0u;
+}
+
+static uint8 cross_cell_center_retries_without_resetting_timeout(void)
+{
+    art_replan_context_struct context;
+    art_replan_update_struct update;
+    uint16 request_before;
+#if ART_CENTER_TIMEOUT_FALLBACK_ENABLE
+    uint16 continue_before;
+#endif
+    uint16 error_before;
+
+    init_pre_push_box_test(&context);
+    fake_pre_push_box_request = 0u;
+    fake_center_requires_push_alignment = 0u;
+    request_before = center_request_count;
+#if ART_CENTER_TIMEOUT_FALLBACK_ENABLE
+    continue_before = continue_pre_push_count;
+#endif
+    error_before = executor_error_count;
+
+    art_replan_tick(&context, 1u, &update);
+    if((request_before + 1u != center_request_count) ||
+       (0 != strcmp(update.run_state, "PCtr"))) return 0u;
+
+    feed_center(350u, 550u, 351u, 550u, 349u, 550u);
+    art_replan_tick(&context, 1u, &update);
+    if((request_before + 2u != center_request_count) ||
+       (0 != strcmp(update.run_state, "PCtr")) ||
+       (0u == fake_pre_push_pending)) return 0u;
+
+    fake_time_ms += EXEC_ART_SYNC_TIMEOUT_MS;
+    art_replan_tick(&context, 1u, &update);
+#if ART_CENTER_TIMEOUT_FALLBACK_ENABLE
+    return ((continue_before + 1u == continue_pre_push_count) &&
+            (error_before == executor_error_count) &&
+            (0 == strcmp(update.run_state, "Running"))) ? 1u : 0u;
+#else
+    return ((error_before + 1u == executor_error_count) &&
+            (0 == strcmp(update.run_state, "E:Ctr"))) ? 1u : 0u;
+#endif
 }
 
 int main(void)
 {
-    uint8 passed = run_test();
+    uint8 all_passed = 1u;
+    uint8 passed;
+
+    passed = run_test();
     printf("request-driven-art-state      %s\n", (0 != passed) ? "PASS" : "FAIL");
-    passed &= run_timeout_fallback_test();
+    all_passed &= passed;
+    passed = run_timeout_fallback_test();
     printf("request-center-timeout-policy %s\n", (0 != passed) ? "PASS" : "FAIL");
-    passed &= host_completion_before_task_end_replans();
+    all_passed &= passed;
+    passed = host_completion_before_task_end_replans();
     printf("host-completion-replan        %s\n", (0 != passed) ? "PASS" : "FAIL");
-    passed &= pre_push_box_observation_flow();
+    all_passed &= passed;
+    passed = cross_cell_center_retries_without_resetting_timeout();
+    printf("center-cross-cell-retry       %s\n", (0 != passed) ? "PASS" : "FAIL");
+    all_passed &= passed;
+    passed = pre_push_box_observation_flow();
     printf("pre-push-box-observation      %s\n", (0 != passed) ? "PASS" : "FAIL");
-    passed &= pre_push_box_prefetch_freshness();
-    printf("pre-push-box-prefetch         %s\n", (0 != passed) ? "PASS" : "FAIL");
-    passed &= pre_push_box_failures_follow_policy();
+    all_passed &= passed;
+    passed = pre_push_box_requests_only_after_wait();
+    printf("pre-push-box-after-stop       %s\n", (0 != passed) ? "PASS" : "FAIL");
+    all_passed &= passed;
+    passed = pre_push_box_failures_follow_policy();
     printf("pre-push-box-failures         %s\n", (0 != passed) ? "PASS" : "FAIL");
-    return (0 != passed) ? 0 : 1;
+    all_passed &= passed;
+    return (0 != all_passed) ? 0 : 1;
 }

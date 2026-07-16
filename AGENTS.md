@@ -93,6 +93,12 @@ PLAYER_CENTER_GRID <col_q>,<row_q> <valid>
 MAP_END
 ```
 
+- OpenART 是 `C/+` 的唯一生成者；每张合法地图必须恰好一个 `C/+`。
+- `valid=1` 时 `PLAYER_CENTER_GRID` 必须位于该唯一 `C/+` 所在格；中心行缺失或 `valid=0` 不废弃地图，只表示本帧无精确中心。
+- OpenART 精确中心连续识别失败前两帧可沿用最近结果；第 3 帧必须清除历史并发送 `valid=0`，重新识别后不得混用旧坐标。
+- `CENTER_SAMPLE`、`OBSERVE_SAMPLE` 前必须各有一张新的规范地图；MCU 只校验和发布，不能依据中心再次移动 `C/+`。
+- 指定箱子的精确中心仅服务推箱前准备位，不改字符地图中的 `B`。
+
 RT1064 接受完整帧后回复：
 
 ```text

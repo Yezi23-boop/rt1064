@@ -99,7 +99,7 @@ Competition and Push Box user modules:
   Shared 16x12 map, solver result, action, and waypoint types.
 
 - `project/user/inc/map_utils.h` / `project/user/src/map_utils.c`
-  Map snapshot, comparison, player lookup, and object-count helpers shared by the UART, menu, solver, and replanning flow.
+  Map snapshot, comparison, strict player-center validation, object counts, and stable-frame tracking shared by the UART, menu, solver, and replanning flows.
 
 - `project/user/inc/maps.h` / `project/user/src/maps.c`  
   Test maps or map fixtures used by the Push Box workflow.
@@ -109,6 +109,9 @@ Competition and Push Box user modules:
 
 - `project/user/inc/executor.h` / `project/user/src/executor.c`
   Converts solver waypoints into 20 cm physical targets and advances the motion state machine from the 20ms control tick.
+
+- `project/user/inc/art_observation.h` / `project/user/src/art_observation.c`
+  Shared requested-center batches and requested-box observation sessions used by both subject-one replanning and subject-two runtime flows.
 
 - `project/user/inc/art_replan.h` / `project/user/src/art_replan.c`
   ART-source runtime flow: launch delay and center collection, launch movement, stable-map solving, task-end synchronization, replanning, and automatic return to the left launch area.
@@ -148,7 +151,7 @@ Current drive-control modules:
   Wheel order, 20ms control constants, 20 cm grid size, pose calibration, yaw/path PID defaults, ART synchronization settings, and launch/return configuration. This module has no `.c` file.
 
 - `project/user/inc/motion_math.h` / `project/user/src/motion_math.c`  
-  Pure control math: shortest yaw error, attitude PD, discrete command to `vx/vy/vz`, mecanum mix, wheel normalization, and wheel target count mapping.
+  Pure control math: shortest yaw error, attitude PD, path PID, shared small-sample median, mecanum mix, wheel normalization, and wheel target count mapping.
 
 - `project/user/inc/wheel_pid.h` / `project/user/src/wheel_pid.c`  
   Four-wheel incremental PID helper.

@@ -25,7 +25,7 @@
 #define OPENART_LINE_SIZE           (48u)
 #define OPENART_RX_TIMEOUT_MS       (1000u)
 #define OPENART_REQUESTED_CENTER_SAMPLE_COUNT (ART_CENTER_SAMPLE_COUNT)
-#define OPENART_OBSERVATION_SAMPLE_COUNT      (3u)
+#define OPENART_OBSERVATION_SAMPLE_COUNT      (ART_BOX_OBSERVE_SAMPLE_COUNT)
 
 typedef enum
 {
@@ -74,6 +74,9 @@ static uint8 observation_active;
 static uint8 observation_count;
 static uint8 observation_read_index;
 static openart_observation_sample_struct observation_samples[OPENART_OBSERVATION_SAMPLE_COUNT];
+static uint8 observation_request_row;
+static uint8 observation_request_col;
+static uint32 observation_last_map_frame;
 
 static void update_map_object_cache(void)
 {
@@ -178,66 +181,45 @@ static uint8 find_unique_staging_player(uint8 *player_row_out,
     return (1u == count) ? 1u : 0u;
 }
 
-static void normalize_staging_player_from_center(void)
+static uint8 validate_staging_player(void)
 {
     uint8 row;
     uint8 col;
-    uint8 center_row;
-    uint8 center_col;
-    uint8 center_on_target;
 
-    if(0 == staging_player_center_received)
+    if(0 == find_unique_staging_player(&row, &col))
     {
-        return;
+        return 0u;
     }
 
-    if(0 != staging_player_center_valid)
+    if((0 == staging_player_center_received) ||
+       (0 == staging_player_center_valid))
     {
-        if((staging_player_center_col_q >= (MAP_COLS * 100u)) ||
-           (staging_player_center_row_q >= (MAP_ROWS * 100u)))
-        {
-            return;
-        }
-        center_col = (uint8)(staging_player_center_col_q / 100u);
-        center_row = (uint8)(staging_player_center_row_q / 100u);
-    }
-    /* 普通周期帧不提供精确中心；只有唯一粗车格时才允许继承上一帧目标底色。 */
-    else if(0 == find_unique_staging_player(&center_row, &center_col))
-    {
-        return;
+        return 1u;
     }
 
-    center_on_target = (('T' == staging_map[center_row][center_col]) ||
-                        ('+' == staging_map[center_row][center_col]) ||
-                        ((0 != map_valid) &&
-                         (('T' == map_snapshot[center_row][center_col]) ||
-                          ('+' == map_snapshot[center_row][center_col])))) ? 1u : 0u;
-    for(row = 0; row < MAP_ROWS; row++)
+    if((staging_player_center_col_q >= (MAP_COLS * 100u)) ||
+       (staging_player_center_row_q >= (MAP_ROWS * 100u)))
     {
-        for(col = 0; col < MAP_COLS; col++)
-        {
-            if(('C' == staging_map[row][col]) || ('+' == staging_map[row][col]))
-            {
-                staging_map[row][col] = ((0 != map_valid) &&
-                                         ('+' == map_snapshot[row][col])) ? 'T' : '.';
-            }
-            else if((0 != map_valid) && ('+' == map_snapshot[row][col]) &&
-                    ('.' == staging_map[row][col]))
-            {
-                staging_map[row][col] = 'T';
-            }
-        }
+        return 0u;
     }
-    staging_map[center_row][center_col] = (0 != center_on_target) ? '+' : 'C';
+
+    return (((uint8)(staging_player_center_col_q / 100u) == col) &&
+            ((uint8)(staging_player_center_row_q / 100u) == row)) ? 1u : 0u;
 }
 
 static void accept_map(void)
 {
     uint8 row;
 
+    // OpenART 负责生成唯一 C/+；MCU 只校验，不再依据中心点重写字符地图。
+    if(0 == validate_staging_player())
+    {
+        error_count++;
+        return;
+    }
+
     // staging_map 只保存正在接收的帧；完整帧通过 MAP_END 校验后再一次性发布快照。
     // 这样屏幕和求解器不会读到半帧地图。
-    normalize_staging_player_from_center();
     for(row = 0; row < MAP_ROWS; row++)
     {
         memcpy(map_snapshot[row], staging_map[row], MAP_COLS + 1);
@@ -512,6 +494,8 @@ static void parse_observation_line(void)
 {
     uint16 values[5];
     openart_observation_sample_struct *sample;
+    int16 row_offset_q;
+    int16 col_offset_q;
 
     if((0u == observation_active) ||
        (0u == parse_observation_sample_line(values)))
@@ -528,11 +512,37 @@ static void parse_observation_line(void)
         return;
     }
 
+    if((0u == map_valid) ||
+       (0u == player_center_valid) ||
+       (frame_count == observation_last_map_frame) ||
+       (values[1] != player_center_col_q) ||
+       (values[2] != player_center_row_q) ||
+       (1u != player_count) ||
+       (observation_request_row >= MAP_ROWS) ||
+       (observation_request_col >= MAP_COLS) ||
+       ('B' != openart_map_source.rows[observation_request_row][observation_request_col]))
+    {
+        return;
+    }
+
+    col_offset_q = (int16)values[3] -
+                   (int16)(observation_request_col * 100u + 50u);
+    row_offset_q = (int16)values[4] -
+                   (int16)(observation_request_row * 100u + 50u);
+    if((col_offset_q < -(int16)ART_BOX_MATCH_MAX_OFFSET_Q) ||
+       (col_offset_q > (int16)ART_BOX_MATCH_MAX_OFFSET_Q) ||
+       (row_offset_q < -(int16)ART_BOX_MATCH_MAX_OFFSET_Q) ||
+       (row_offset_q > (int16)ART_BOX_MATCH_MAX_OFFSET_Q))
+    {
+        return;
+    }
+
     sample = &observation_samples[observation_count];
     sample->car_col_q = values[1];
     sample->car_row_q = values[2];
     sample->box_col_q = values[3];
     sample->box_row_q = values[4];
+    observation_last_map_frame = frame_count;
     observation_count++;
     if(observation_count >= OPENART_OBSERVATION_SAMPLE_COUNT)
     {
@@ -661,6 +671,9 @@ void openart_uart_init(void)
     observation_active = 0u;
     observation_count = 0u;
     observation_read_index = 0u;
+    observation_request_row = 0u;
+    observation_request_col = 0u;
+    observation_last_map_frame = 0u;
     memset(observation_samples, 0, sizeof(observation_samples));
     reset_frame_parser();
 
@@ -822,6 +835,9 @@ void openart_request_observation(uint8 box_row, uint8 box_col)
     observation_active = 1u;
     observation_count = 0u;
     observation_read_index = 0u;
+    observation_request_row = box_row;
+    observation_request_col = box_col;
+    observation_last_map_frame = frame_count;
     memset(observation_samples, 0, sizeof(observation_samples));
     while('\0' != *prefix)
     {

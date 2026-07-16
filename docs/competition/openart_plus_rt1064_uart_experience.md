@@ -301,11 +301,23 @@ GND -> GND
 
 ```text
 MAP_BEGIN
-16x12 grid payload
+12 行 16x12 grid payload（字符集 #.TBXC+）
+PLAYER_CENTER_GRID <col_q>,<row_q> <valid>
 MAP_END
 ```
 
-RT1064 端后续可以按行解析这张帧，并在收到完整 12 行后返回：
+OpenART 是唯一 `C/+` 的生成者：一张可发布地图必须恰好一个 `C/+`。当
+`valid=1` 时，中心所在格必须与该车格一致；中心行缺失或 `valid=0` 时，RT1064
+仍可发布这张地图，但不能把它当作精确中心。RT1064 只校验这条约束，不能再根据
+中心点移动字符地图里的 `C/+`。
+
+精确中心连续识别失败时，前两帧可沿用最近一次有效结果以过滤瞬时抖动；第 3 帧必须
+清除历史并发送 `PLAYER_CENTER_GRID 0,0 0`，重新识别后不再混用旧坐标。
+
+`CENTER_SAMPLE` 与 `OBSERVE_SAMPLE` 均须紧跟一张新的规范地图。观察样本中的
+箱子中心只用于推箱前准备位，不能修改地图中的 `B`。
+
+RT1064 端在收到完整合法帧后返回：
 
 ```text
 MAP_OK rows=12 cols=16

@@ -11,6 +11,7 @@ static float last_motion_vx;
 static float last_motion_vy;
 static uint16 reset_call_count;
 static uint16 stop_call_count;
+static uint8 dual_axis_motion_seen;
 static uint16 critical_disable_count;
 static uint16 critical_enable_count;
 static uint8 critical_depth;
@@ -56,6 +57,10 @@ void set_motion(float vx, float vy)
 {
     last_motion_vx = vx;
     last_motion_vy = vy;
+    if((fabsf(vx) > 0.0001f) && (fabsf(vy) > 0.0001f))
+    {
+        dual_axis_motion_seen = 1u;
+    }
     motion_call_count++;
 }
 
@@ -79,6 +84,7 @@ static void reset_fixture(void)
     last_motion_vy = 0.0f;
     reset_call_count = 0;
     stop_call_count = 0;
+    dual_axis_motion_seen = 0u;
     critical_disable_count = 0;
     critical_enable_count = 0;
     critical_depth = 0;
@@ -95,7 +101,7 @@ static uint8 run_case(const char *name, uint8 passed)
 
 static uint8 first_push_waits_before_motion(void)
 {
-    waypoint_struct waypoint = {5u, 6u, 'R', 0u, 1u, 0u, 1u};
+    waypoint_struct waypoint = {5u, 6u, 'R', 0u, 1u, 0u, 1u, 0u, 0u};
 
     reset_fixture();
     executor_start(&waypoint, 1u, 5u, 5u, 0.0f, 0.0f, 0u, 1u);
@@ -108,7 +114,7 @@ static uint8 first_push_waits_before_motion(void)
 
 static uint8 start_switch_is_atomic(void)
 {
-    waypoint_struct waypoint = {5u, 6u, 'r', 0u, 1u, 0u, 0u};
+    waypoint_struct waypoint = {5u, 6u, 'r', 0u, 1u, 0u, 0u, 0u, 0u};
 
     reset_fixture();
     observe_pose_reset = 1u;
@@ -122,7 +128,7 @@ static uint8 start_switch_is_atomic(void)
 
 static uint8 error_switch_is_atomic(void)
 {
-    waypoint_struct waypoint = {5u, 6u, 'r', 0u, 1u, 0u, 0u};
+    waypoint_struct waypoint = {5u, 6u, 'r', 0u, 1u, 0u, 0u, 0u, 0u};
 
     reset_fixture();
     executor_start(&waypoint, 1u, 5u, 5u, 0.0f, 0.0f, 0u, 0u);
@@ -140,7 +146,7 @@ static uint8 error_switch_is_atomic(void)
 
 static uint8 successful_correction_releases_same_push(void)
 {
-    waypoint_struct waypoint = {5u, 6u, 'R', 0u, 1u, 0u, 1u};
+    waypoint_struct waypoint = {5u, 6u, 'R', 0u, 1u, 0u, 1u, 0u, 0u};
 
     reset_fixture();
     executor_start(&waypoint, 1u, 5u, 5u, 0.0f, 0.0f, 0u, 1u);
@@ -158,7 +164,7 @@ static uint8 successful_correction_releases_same_push(void)
 
 static uint8 lowercase_turn_waits_without_push_alignment(void)
 {
-    waypoint_struct waypoint = {6u, 5u, 'd', 0u, 2u, 0u, 1u};
+    waypoint_struct waypoint = {6u, 5u, 'd', 0u, 2u, 0u, 1u, 0u, 0u};
 
     reset_fixture();
     executor_start(&waypoint, 1u, 5u, 5u, 0.0f, 0.0f, 0u, 1u);
@@ -181,7 +187,7 @@ static uint8 lowercase_turn_waits_without_push_alignment(void)
 
 static uint8 uppercase_center_requires_push_alignment(void)
 {
-    waypoint_struct waypoint = {5u, 6u, 'R', 0u, 1u, 0u, 1u};
+    waypoint_struct waypoint = {5u, 6u, 'R', 0u, 1u, 0u, 1u, 0u, 0u};
 
     reset_fixture();
     executor_start(&waypoint, 1u, 5u, 5u, 0.0f, 0.0f, 0u, 1u);
@@ -192,7 +198,7 @@ static uint8 uppercase_center_requires_push_alignment(void)
 
 static uint8 horizontal_push_aligns_only_y(void)
 {
-    waypoint_struct waypoint = {5u, 6u, 'R', 0u, 1u, 0u, 1u};
+    waypoint_struct waypoint = {5u, 6u, 'R', 0u, 1u, 0u, 1u, 0u, 0u};
 
     reset_fixture();
     executor_start(&waypoint, 1u, 5u, 5u, 0.0f, 3.0f, 0u, 1u);
@@ -211,7 +217,7 @@ static uint8 horizontal_push_aligns_only_y(void)
 
 static uint8 vertical_push_aligns_only_x(void)
 {
-    waypoint_struct waypoint = {4u, 5u, 'U', 0u, 1u, 0u, 1u};
+    waypoint_struct waypoint = {4u, 5u, 'U', 0u, 1u, 0u, 1u, 0u, 0u};
 
     reset_fixture();
     executor_start(&waypoint, 1u, 5u, 5u, 3.0f, 0.0f, 0u, 1u);
@@ -230,7 +236,7 @@ static uint8 vertical_push_aligns_only_x(void)
 
 static uint8 aligned_push_resumes_same_waypoint(void)
 {
-    waypoint_struct waypoint = {5u, 6u, 'R', 0u, 1u, 0u, 1u};
+    waypoint_struct waypoint = {5u, 6u, 'R', 0u, 1u, 0u, 1u, 0u, 0u};
     uint8 tick;
 
     reset_fixture();
@@ -258,7 +264,7 @@ static uint8 aligned_push_resumes_same_waypoint(void)
 
 static uint8 alignment_timeout_stops_with_center_error(void)
 {
-    waypoint_struct waypoint = {5u, 6u, 'R', 0u, 1u, 0u, 1u};
+    waypoint_struct waypoint = {5u, 6u, 'R', 0u, 1u, 0u, 1u, 0u, 0u};
     uint16 tick;
     uint16 timeout_ticks = (uint16)(EXEC_ART_SYNC_TIMEOUT_MS / CONTROL_PERIOD_MS + 1u);
 
@@ -281,7 +287,7 @@ static uint8 alignment_timeout_stops_with_center_error(void)
 
 static uint8 alignment_jitter_still_times_out(void)
 {
-    waypoint_struct waypoint = {5u, 6u, 'R', 0u, 1u, 0u, 1u};
+    waypoint_struct waypoint = {5u, 6u, 'R', 0u, 1u, 0u, 1u, 0u, 0u};
     uint16 tick;
     uint16 timeout_ticks = (uint16)(EXEC_ART_SYNC_TIMEOUT_MS / CONTROL_PERIOD_MS + 1u);
 
@@ -304,7 +310,7 @@ static uint8 alignment_jitter_still_times_out(void)
 
 static uint8 push_waypoints_do_not_wait(void)
 {
-    waypoint_struct waypoint = {5u, 6u, 'R', 0u, 1u, 1u, 0u};
+    waypoint_struct waypoint = {5u, 6u, 'R', 0u, 1u, 1u, 0u, 0u, 0u};
 
     reset_fixture();
     executor_start(&waypoint, 1u, 5u, 5u, 0.0f, 0.0f, 0u, 1u);
@@ -317,8 +323,8 @@ static uint8 push_waypoints_do_not_wait(void)
 
 static uint8 lowercase_and_offline_push_do_not_wait(void)
 {
-    waypoint_struct lowercase = {5u, 6u, 'r', 0u, 1u, 0u, 0u};
-    waypoint_struct offline_marked = {5u, 6u, 'R', 0u, 1u, 0u, 1u};
+    waypoint_struct lowercase = {5u, 6u, 'r', 0u, 1u, 0u, 0u, 0u, 0u};
+    waypoint_struct offline_marked = {5u, 6u, 'R', 0u, 1u, 0u, 1u, 0u, 0u};
     uint8 lowercase_ok;
 
     reset_fixture();
@@ -338,7 +344,7 @@ static uint8 lowercase_and_offline_push_do_not_wait(void)
 
 static uint8 center_error_stops_on_same_waypoint(void)
 {
-    waypoint_struct waypoint = {5u, 6u, 'R', 0u, 1u, 0u, 1u};
+    waypoint_struct waypoint = {5u, 6u, 'R', 0u, 1u, 0u, 1u, 0u, 0u};
 
     reset_fixture();
     executor_start(&waypoint, 1u, 5u, 5u, 0.0f, 0.0f, 0u, 1u);
@@ -353,7 +359,7 @@ static uint8 center_error_stops_on_same_waypoint(void)
 
 static uint8 art_center_uses_configured_fusion(void)
 {
-    waypoint_struct waypoint = {5u, 6u, 'r', 0u, 1u, 0u, 0u};
+    waypoint_struct waypoint = {5u, 6u, 'r', 0u, 1u, 0u, 0u, 0u, 0u};
     executor_art_center_result_enum result;
 
     reset_fixture();
@@ -372,7 +378,7 @@ static uint8 art_center_uses_configured_fusion(void)
 
 static uint8 art_center_uses_axis_deadband(void)
 {
-    waypoint_struct waypoint = {5u, 6u, 'r', 0u, 1u, 0u, 0u};
+    waypoint_struct waypoint = {5u, 6u, 'r', 0u, 1u, 0u, 0u, 0u, 0u};
     uint8 sample;
 
     reset_fixture();
@@ -390,7 +396,7 @@ static uint8 art_center_uses_axis_deadband(void)
 
 static uint8 art_center_accepts_offset_below_abnormal_limit(void)
 {
-    waypoint_struct waypoint = {5u, 6u, 'r', 0u, 1u, 0u, 0u};
+    waypoint_struct waypoint = {5u, 6u, 'r', 0u, 1u, 0u, 0u, 0u, 0u};
     uint8 sample;
 
     reset_fixture();
@@ -408,7 +414,7 @@ static uint8 art_center_accepts_offset_below_abnormal_limit(void)
 
 static uint8 art_center_rejects_axis_above_abnormal_limit(void)
 {
-    waypoint_struct waypoint = {5u, 6u, 'r', 0u, 1u, 0u, 0u};
+    waypoint_struct waypoint = {5u, 6u, 'r', 0u, 1u, 0u, 0u, 0u, 0u};
     uint8 sample;
 
     reset_fixture();
@@ -425,7 +431,7 @@ static uint8 art_center_rejects_axis_above_abnormal_limit(void)
 
 static uint8 art_center_samples_can_be_reset(void)
 {
-    waypoint_struct waypoint = {5u, 6u, 'r', 0u, 1u, 0u, 0u};
+    waypoint_struct waypoint = {5u, 6u, 'r', 0u, 1u, 0u, 0u, 0u, 0u};
 
     reset_fixture();
     executor_start(&waypoint, 1u, 5u, 5u, 0.0f, 0.0f, 0u, 1u);
@@ -438,7 +444,7 @@ static uint8 art_center_samples_can_be_reset(void)
 
 static uint8 art_center_median_read_does_not_consume_commit(void)
 {
-    waypoint_struct waypoint = {5u, 6u, 'r', 0u, 1u, 0u, 0u};
+    waypoint_struct waypoint = {5u, 6u, 'r', 0u, 1u, 0u, 0u, 0u, 0u};
     uint16 col_q = 0u;
     uint16 row_q = 0u;
     executor_art_center_result_enum result;
@@ -481,8 +487,8 @@ static uint8 collect_box_observation(uint16 car_col_q, uint16 car_row_q,
 static uint8 final_approach_requests_next_box(void)
 {
     waypoint_struct waypoints[2] = {
-        {5u, 5u, 'd', 0u, 1u, 0u, 1u},
-        {5u, 6u, 'R', 1u, 2u, 1u, 0u}
+        {5u, 5u, 'd', 0u, 1u, 0u, 1u, 0u, 0u},
+        {5u, 6u, 'R', 1u, 2u, 1u, 0u, 0u, 0u}
     };
     uint8 box_row = 0u;
     uint8 box_col = 0u;
@@ -496,12 +502,12 @@ static uint8 final_approach_requests_next_box(void)
             (5u == box_row) && (6u == box_col)) ? 1u : 0u;
 }
 
-static uint8 previous_waypoint_prefetches_next_box(void)
+static uint8 previous_waypoint_does_not_request_box(void)
 {
     waypoint_struct waypoints[3] = {
-        {6u, 5u, 'u', 0u, 1u, 0u, 0u},
-        {5u, 5u, 'u', 1u, 2u, 0u, 1u},
-        {5u, 6u, 'R', 2u, 3u, 1u, 0u}
+        {6u, 5u, 'u', 0u, 1u, 0u, 0u, 0u, 0u},
+        {5u, 5u, 'u', 1u, 2u, 0u, 1u, 0u, 0u},
+        {5u, 6u, 'R', 2u, 3u, 1u, 0u, 0u, 0u}
     };
     uint8 box_row = 0u;
     uint8 box_col = 0u;
@@ -509,14 +515,13 @@ static uint8 previous_waypoint_prefetches_next_box(void)
     reset_fixture();
     executor_start(waypoints, 3u, 7u, 5u, 0.0f, 0.0f, 0u, 1u);
 
-    return ((0u != executor_get_pre_push_box_prefetch_request(&box_row, &box_col)) &&
-            (5u == box_row) && (6u == box_col)) ? 1u : 0u;
+    return (0u == executor_get_pre_push_box_request(&box_row, &box_col)) ? 1u : 0u;
 }
 
 static uint8 retry_nudge_direction(char action, uint8 box_row, uint8 box_col,
                                    float expected_sign, uint8 x_axis)
 {
-    waypoint_struct waypoint = {box_row, box_col, action, 0u, 1u, 1u, 1u};
+    waypoint_struct waypoint = {box_row, box_col, action, 0u, 1u, 1u, 1u, 0u, 0u};
     uint8 tick;
 
     reset_fixture();
@@ -560,8 +565,8 @@ static uint8 retry_nudge_moves_away_in_all_directions(void)
 static uint8 box_preparation_aligns_and_consumes_approach(void)
 {
     waypoint_struct waypoints[2] = {
-        {5u, 5u, 'd', 0u, 1u, 0u, 1u},
-        {5u, 6u, 'R', 1u, 2u, 1u, 0u}
+        {5u, 5u, 'd', 0u, 1u, 0u, 1u, 0u, 0u},
+        {5u, 6u, 'R', 1u, 2u, 1u, 0u, 0u, 0u}
     };
     uint8 tick;
 
@@ -599,7 +604,7 @@ static uint8 box_preparation_aligns_and_consumes_approach(void)
 
 static uint8 short_gap_retreats_before_alignment(void)
 {
-    waypoint_struct waypoint = {5u, 6u, 'R', 0u, 1u, 1u, 1u};
+    waypoint_struct waypoint = {5u, 6u, 'R', 0u, 1u, 1u, 1u, 0u, 0u};
 
     reset_fixture();
     executor_start(&waypoint, 1u, 5u, 5u, 5.0f, 0.0f, 0u, 1u);
@@ -616,9 +621,103 @@ static uint8 short_gap_retreats_before_alignment(void)
             (0 == strcmp(executor_pre_push_box_state_name(), "BGap"))) ? 1u : 0u;
 }
 
+static uint8 near_box_move_uses_one_world_axis(void)
+{
+    waypoint_struct waypoint = {5u, 6u, 'r', 0u, 1u, 0u, 0u, 1u, 0u};
+    uint8 tick;
+
+    reset_fixture();
+    executor_start(&waypoint, 1u, 5u, 5u, 0.0f, 2.0f, 0u, 0u);
+    executor_update_20ms();
+    if((fabsf(last_motion_vx) > 0.0001f) || (last_motion_vy >= 0.0f) ||
+       (0u != dual_axis_motion_seen))
+    {
+        return 0u;
+    }
+
+    test_pose.y_cm = 0.0f;
+    for(tick = 0u; tick < EXEC_ARRIVAL_STABLE_TICKS; tick++)
+    {
+        executor_update_20ms();
+    }
+    executor_update_20ms();
+    if((last_motion_vx <= 0.0f) || (fabsf(last_motion_vy) > 0.0001f) ||
+       (0u != dual_axis_motion_seen))
+    {
+        return 0u;
+    }
+
+    test_pose.x_cm = GRID_SIZE_CM;
+    test_pose.y_cm = 2.0f;
+    executor_update_20ms();
+    if((fabsf(last_motion_vx) > 0.0001f) || (last_motion_vy >= 0.0f) ||
+       (0u != dual_axis_motion_seen))
+    {
+        return 0u;
+    }
+    test_pose.y_cm = 0.0f;
+    for(tick = 0u;
+        tick < (EXEC_ARRIVAL_STABLE_TICKS * 2u +
+                EXEC_SEGMENT_SETTLE_MS / CONTROL_PERIOD_MS + 3u);
+        tick++)
+    {
+        executor_update_20ms();
+    }
+    return ((EXEC_STATE_DONE == executor_get_state()) &&
+            (0u == dual_axis_motion_seen)) ? 1u : 0u;
+}
+
+static uint8 extra_gap_direction(char action, uint8 box_row, uint8 box_col,
+                                 uint16 box_col_q, uint16 box_row_q,
+                                 float expected_sign, uint8 x_axis)
+{
+    waypoint_struct waypoint = {box_row, box_col, action, 0u, 1u, 1u, 1u, 0u, 1u};
+
+    reset_fixture();
+    executor_start(&waypoint, 1u, 5u, 5u, 0.0f, 0.0f, 0u, 1u);
+    executor_update_20ms();
+    if((0u == collect_box_observation(550u, 550u, box_col_q, box_row_q)) ||
+       (EXEC_ART_BOX_PREP_STARTED != executor_start_pre_push_box_preparation()) ||
+       (0 != strcmp(executor_pre_push_box_state_name(), "BGap")))
+    {
+        return 0u;
+    }
+    executor_update_20ms();
+    if(0u != x_axis)
+    {
+        return (((last_motion_vx * expected_sign) > 0.0f) &&
+                (fabsf(last_motion_vy) < 0.0001f)) ? 1u : 0u;
+    }
+    return (((last_motion_vy * expected_sign) > 0.0f) &&
+            (fabsf(last_motion_vx) < 0.0001f)) ? 1u : 0u;
+}
+
+static uint8 extra_gap_targets_all_directions(void)
+{
+    return ((0u != extra_gap_direction('R', 5u, 6u, 650u, 550u, -1.0f, 1u)) &&
+            (0u != extra_gap_direction('L', 5u, 4u, 450u, 550u, 1.0f, 1u)) &&
+            (0u != extra_gap_direction('U', 4u, 5u, 550u, 450u, -1.0f, 0u)) &&
+            (0u != extra_gap_direction('D', 6u, 5u, 550u, 650u, 1.0f, 0u))) ? 1u : 0u;
+}
+
+static uint8 blocked_extra_gap_keeps_one_grid(void)
+{
+    waypoint_struct waypoint = {5u, 6u, 'R', 0u, 1u, 1u, 1u, 0u, 0u};
+
+    reset_fixture();
+    executor_start(&waypoint, 1u, 5u, 5u, 0.0f, 0.0f, 0u, 1u);
+    executor_update_20ms();
+    if((0u == collect_box_observation(550u, 550u, 650u, 550u)) ||
+       (EXEC_ART_BOX_PREP_STARTED != executor_start_pre_push_box_preparation()))
+    {
+        return 0u;
+    }
+    return (0 == strcmp(executor_pre_push_box_state_name(), "BAlign")) ? 1u : 0u;
+}
+
 static uint8 wrong_side_box_is_rejected(void)
 {
-    waypoint_struct waypoint = {5u, 6u, 'R', 0u, 1u, 1u, 1u};
+    waypoint_struct waypoint = {5u, 6u, 'R', 0u, 1u, 1u, 1u, 0u, 0u};
 
     reset_fixture();
     executor_start(&waypoint, 1u, 5u, 5u, 22.0f, 0.0f, 0u, 1u);
@@ -636,7 +735,7 @@ static uint8 wrong_side_box_is_rejected(void)
 
 static uint8 adjacent_box_cell_is_rejected(void)
 {
-    waypoint_struct waypoint = {5u, 6u, 'R', 0u, 1u, 1u, 1u};
+    waypoint_struct waypoint = {5u, 6u, 'R', 0u, 1u, 1u, 1u, 0u, 0u};
 
     reset_fixture();
     executor_start(&waypoint, 1u, 5u, 5u, 0.0f, 0.0f, 0u, 1u);
@@ -652,7 +751,7 @@ static uint8 adjacent_box_cell_is_rejected(void)
 
 static uint8 box_center_crossing_cell_boundary_is_accepted(void)
 {
-    waypoint_struct waypoint = {5u, 6u, 'R', 0u, 1u, 1u, 1u};
+    waypoint_struct waypoint = {5u, 6u, 'R', 0u, 1u, 1u, 1u, 0u, 0u};
 
     reset_fixture();
     executor_start(&waypoint, 1u, 5u, 5u, 0.0f, 0.0f, 0u, 1u);
@@ -668,7 +767,7 @@ static uint8 box_center_crossing_cell_boundary_is_accepted(void)
 
 static uint8 same_cell_diagonal_car_offset_is_accepted(void)
 {
-    waypoint_struct waypoint = {5u, 6u, 'R', 0u, 1u, 1u, 1u};
+    waypoint_struct waypoint = {5u, 6u, 'R', 0u, 1u, 1u, 1u, 0u, 0u};
 
     reset_fixture();
     executor_start(&waypoint, 1u, 5u, 5u, -9.0f, -9.0f, 0u, 1u);
@@ -689,7 +788,7 @@ static uint8 box_preparation_approach_direction(char action,
                                                 float expected_sign,
                                                 uint8 x_axis)
 {
-    waypoint_struct waypoint = {box_row, box_col, action, 0u, 1u, 1u, 1u};
+    waypoint_struct waypoint = {box_row, box_col, action, 0u, 1u, 1u, 1u, 0u, 0u};
     uint8 tick;
 
     reset_fixture();
@@ -744,8 +843,8 @@ static uint8 box_preparation_targets_all_directions(void)
 static uint8 step_box_preparation_pauses_before_push(void)
 {
     waypoint_struct waypoints[2] = {
-        {5u, 5u, 'd', 0u, 1u, 0u, 1u},
-        {5u, 6u, 'R', 1u, 2u, 1u, 0u}
+        {5u, 5u, 'd', 0u, 1u, 0u, 1u, 0u, 0u},
+        {5u, 6u, 'R', 1u, 2u, 1u, 0u, 0u, 0u}
     };
     uint8 tick;
 
@@ -771,8 +870,8 @@ static uint8 step_box_preparation_pauses_before_push(void)
 static uint8 run_push_chain_switches_without_stop(void)
 {
     waypoint_struct waypoints[2] = {
-        {5u, 6u, 'R', 0u, 1u, 0u, 1u},
-        {5u, 7u, 'R', 1u, 2u, 1u, 0u}
+        {5u, 6u, 'R', 0u, 1u, 0u, 1u, 0u, 0u},
+        {5u, 7u, 'R', 1u, 2u, 1u, 0u, 0u, 0u}
     };
     uint16 reset_before;
     uint16 motion_before;
@@ -807,8 +906,8 @@ static uint8 run_push_chain_switches_without_stop(void)
 static uint8 run_move_into_push_switches_without_stop(void)
 {
     waypoint_struct waypoints[2] = {
-        {5u, 6u, 'r', 0u, 1u, 0u, 0u},
-        {5u, 7u, 'R', 1u, 2u, 1u, 0u}
+        {5u, 6u, 'r', 0u, 1u, 0u, 0u, 0u, 0u},
+        {5u, 7u, 'R', 1u, 2u, 1u, 0u, 0u, 0u}
     };
     uint16 reset_before;
     uint16 motion_before;
@@ -829,9 +928,9 @@ static uint8 run_move_into_push_switches_without_stop(void)
 static uint8 run_push_chain_targets_straight_end(void)
 {
     waypoint_struct waypoints[3] = {
-        {5u, 6u, 'r', 0u, 1u, 0u, 0u},
-        {5u, 7u, 'R', 1u, 2u, 0u, 0u},
-        {5u, 8u, 'R', 2u, 3u, 1u, 0u}
+        {5u, 6u, 'r', 0u, 1u, 0u, 0u, 0u, 0u},
+        {5u, 7u, 'R', 1u, 2u, 0u, 0u, 0u, 0u},
+        {5u, 8u, 'R', 2u, 3u, 1u, 0u, 0u, 0u}
     };
 
     reset_fixture();
@@ -848,8 +947,8 @@ static uint8 run_push_chain_targets_straight_end(void)
 static uint8 lookahead_stops_at_task_end(void)
 {
     waypoint_struct waypoints[2] = {
-        {5u, 6u, 'R', 0u, 1u, 1u, 0u},
-        {5u, 7u, 'R', 1u, 2u, 1u, 0u}
+        {5u, 6u, 'R', 0u, 1u, 1u, 0u, 0u, 0u},
+        {5u, 7u, 'R', 1u, 2u, 1u, 0u, 0u, 0u}
     };
 
     reset_fixture();
@@ -865,8 +964,8 @@ static uint8 lookahead_stops_at_task_end(void)
 static uint8 push_turn_stops_before_next_waypoint(void)
 {
     waypoint_struct waypoints[2] = {
-        {5u, 6u, 'R', 0u, 1u, 0u, 0u},
-        {4u, 6u, 'U', 1u, 2u, 0u, 1u}
+        {5u, 6u, 'R', 0u, 1u, 0u, 0u, 0u, 0u},
+        {4u, 6u, 'U', 1u, 2u, 0u, 1u, 0u, 0u}
     };
     uint16 tick;
     uint16 settle_ticks = (uint16)(EXEC_SEGMENT_SETTLE_MS / CONTROL_PERIOD_MS + 2u);
@@ -897,8 +996,8 @@ static uint8 push_turn_stops_before_next_waypoint(void)
 static uint8 step_mode_still_pauses_after_first_push(void)
 {
     waypoint_struct waypoints[2] = {
-        {5u, 6u, 'R', 0u, 1u, 0u, 1u},
-        {5u, 7u, 'R', 1u, 2u, 1u, 0u}
+        {5u, 6u, 'R', 0u, 1u, 0u, 1u, 0u, 0u},
+        {5u, 7u, 'R', 1u, 2u, 1u, 0u, 0u, 0u}
     };
     uint16 tick;
     uint16 max_ticks = (uint16)(EXEC_ARRIVAL_STABLE_TICKS +
@@ -929,7 +1028,7 @@ static uint8 step_mode_still_pauses_after_first_push(void)
 
 static uint8 final_push_still_waits_for_art(void)
 {
-    waypoint_struct waypoint = {5u, 6u, 'R', 0u, 1u, 1u, 1u};
+    waypoint_struct waypoint = {5u, 6u, 'R', 0u, 1u, 1u, 1u, 0u, 0u};
     uint16 tick;
     uint16 max_ticks = (uint16)(EXEC_ARRIVAL_STABLE_TICKS +
                                 (EXEC_SEGMENT_SETTLE_MS / CONTROL_PERIOD_MS) + 3u);
@@ -982,10 +1081,13 @@ int main(void)
     passed &= run_case("art-samples-reset", art_center_samples_can_be_reset());
     passed &= run_case("art-median-read", art_center_median_read_does_not_consume_commit());
     passed &= run_case("box-request-next-waypoint", final_approach_requests_next_box());
-    passed &= run_case("box-prefetch-previous", previous_waypoint_prefetches_next_box());
+    passed &= run_case("box-request-after-stop", previous_waypoint_does_not_request_box());
     passed &= run_case("box-retry-nudge", retry_nudge_moves_away_in_all_directions());
     passed &= run_case("box-align-consumes-approach", box_preparation_aligns_and_consumes_approach());
     passed &= run_case("box-short-gap-retreat", short_gap_retreats_before_alignment());
+    passed &= run_case("near-box-axis-lock", near_box_move_uses_one_world_axis());
+    passed &= run_case("box-extra-gap-directions", extra_gap_targets_all_directions());
+    passed &= run_case("box-extra-gap-blocked", blocked_extra_gap_keeps_one_grid());
     passed &= run_case("box-wrong-side-rejected", wrong_side_box_is_rejected());
     passed &= run_case("box-adjacent-cell-rejected", adjacent_box_cell_is_rejected());
     passed &= run_case("box-boundary-offset", box_center_crossing_cell_boundary_is_accepted());

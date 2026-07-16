@@ -1,9 +1,11 @@
 #include "zf_common_headfile.h"
+#include "art_observation.h"
 #include "drive_config.h"
 #include "drive_control.h"
 #include "drive_pose.h"
 #include "executor.h"
 #include "map_utils.h"
+#include "motion_math.h"
 #include "openart_uart.h"
 #include "solver.h"
 #include "subject2.h"
@@ -19,26 +21,17 @@ typedef enum
 static subject2_state_enum subject2_state = SUBJECT2_IDLE;
 static subject2_object_struct box_objects[MAX_BOXES];
 static subject2_object_struct target_objects[MAX_BOXES];
-static subject2_binding_struct bindings[SUBJECT2_CLASS_COUNT];
 static uint8 box_object_count;
 static uint8 target_object_count;
 static subject2_observation_plan_struct current_observation;
 static subject2_classifier_struct classifier;
 static uint16 current_vision_request_id;
 static uint32 classify_start_ms;
-static uint16 center_col_samples[ART_CENTER_SAMPLE_COUNT];
-static uint16 center_row_samples[ART_CENTER_SAMPLE_COUNT];
-static uint8 center_sample_count;
-static char center_map_rows[MAP_ROWS][MAP_COLS + 1];
-static map_source_struct center_map_source;
+static art_center_batch_struct center_batch;
 static uint32 pre_push_center_start_ms;
 static uint8 pre_push_box_request_active;
 static uint8 pre_push_box_preparation_started;
-static uint8 pre_push_box_prefetch_active;
-static uint8 pre_push_box_prefetch_ready;
-static uint8 pre_push_box_prefetch_row;
-static uint8 pre_push_box_prefetch_col;
-static uint32 pre_push_box_prefetch_ready_ms;
+static art_box_observation_session_struct pre_push_box_session;
 static uint8 pre_push_box_retry_count;
 static uint8 pre_push_box_retry_moving;
 static uint8 pre_push_box_retry_settling;
@@ -49,6 +42,9 @@ static uint8 navigation_start_row;
 static uint8 navigation_start_col;
 static uint8 validation_retry_count;
 static uint8 active_class = SUBJECT2_INVALID_CLASS;
+static uint8 active_box_valid;
+static uint16 active_box_cell = INVALID_STATE;
+static uint16 active_target_cell = INVALID_STATE;
 static uint8 last_recognition_valid;
 static uint8 last_recognition_is_target;
 static uint8 last_recognition_class = SUBJECT2_INVALID_CLASS;
@@ -56,13 +52,14 @@ static solve_result_struct push_candidate_result;
 static uint16 task_start_boxes[MAX_BOXES];
 static uint8 task_start_box_count;
 static uint8 task_start_target_count;
+static char transit_overlap_rows[MAP_ROWS][MAP_COLS + 1];
+static map_source_struct transit_overlap_source;
+static uint16 transit_overlap_cell = INVALID_STATE;
+static uint8 transit_overlap_valid;
 static uint8 retry_active_only;
 static uint8 replan_center_for_return;
-static uint32 confirm_last_frame;
 static uint32 confirm_wait_start_ms;
-static char confirm_candidate_rows[MAP_ROWS][MAP_COLS + 1];
-static uint8 confirm_candidate_valid;
-static uint8 confirm_stable_count;
+static map_stability_tracker_struct confirm_tracker;
 static uint32 center_request_start_ms;
 static uint32 center_adjust_start_ms;
 static uint32 turn_start_ms;
@@ -83,6 +80,11 @@ static uint8 scan_plan_snapshot_pending;
 static void subject2_accept_confirmed_map(const subject2_context_struct *context,
                                           const map_source_struct *source,
                                           subject2_update_struct *update);
+static void subject2_begin_confirm_map(subject2_update_struct *update);
+static const map_source_struct *subject2_effective_map(
+    const subject2_context_struct *context,
+    const map_source_struct *source,
+    uint8 allow_infer);
 
 static void subject2_update_reset(subject2_update_struct *update)
 {
@@ -97,31 +99,10 @@ static float subject2_abs_float(float value)
     return (value < 0.0f) ? -value : value;
 }
 
-static uint16 subject2_median_u16(const uint16 *values)
+static uint8 subject2_get_center_median(uint16 *col_q, uint16 *row_q)
 {
-    uint16 sorted[ART_CENTER_SAMPLE_COUNT];
-    uint16 key;
-    uint8 i;
-    uint8 j;
-
-    for(i = 0u; i < ART_CENTER_SAMPLE_COUNT; i++)
-    {
-        sorted[i] = values[i];
-    }
-    for(i = 1u; i < ART_CENTER_SAMPLE_COUNT; i++)
-    {
-        key = sorted[i];
-        j = i;
-        while((0u < j) && (sorted[j - 1u] > key))
-        {
-            sorted[j] = sorted[j - 1u];
-            j--;
-        }
-        sorted[j] = key;
-    }
-    return sorted[ART_CENTER_SAMPLE_COUNT / 2u];
+    return art_center_batch_get_median(&center_batch, col_q, row_q);
 }
-
 static uint8 cells_equal(const uint16 *left, const uint16 *right, uint8 count)
 {
     uint8 index;
@@ -194,9 +175,8 @@ static void subject2_begin_scan_map_sync(subject2_update_struct *update)
 {
     executor_stop();
     vision_uart_cancel();
-    confirm_last_frame = openart_uart_get_frame_count();
-    confirm_candidate_valid = 0u;
-    confirm_stable_count = 0u;
+    map_stability_tracker_reset(&confirm_tracker,
+                                openart_uart_get_frame_count());
     center_request_start_ms = time_ms();
     scan_sync_phase = SUBJECT2_SCAN_SYNC_WAIT_MAP;
     subject2_state = SUBJECT2_SCAN_MAP_SYNC;
@@ -283,21 +263,21 @@ static void subject2_mark_observation_failed(subject2_update_struct *update)
 
 static uint8 subject2_collect_center(void)
 {
-    uint16 col_q;
-    uint16 row_q;
-    uint8 sample_index;
+    return art_center_batch_collect(&center_batch);
+}
 
-    while(0u != (sample_index = openart_get_requested_center_sample(&col_q, &row_q)))
+static void subject2_retry_center_request(const char *state_text,
+                                          subject2_update_struct *update)
+{
+    set_motion(0.0f, 0.0f);
+    art_center_batch_reset(&center_batch);
+    executor_reset_art_player_center_samples();
+    openart_request_player_center();
+    if(0 != update)
     {
-        (void)sample_index;
-        if(center_sample_count < ART_CENTER_SAMPLE_COUNT)
-        {
-            center_col_samples[center_sample_count] = col_q;
-            center_row_samples[center_sample_count] = row_q;
-            center_sample_count++;
-        }
+        update->run_state = state_text;
+        update->redraw = 1u;
     }
-    return (center_sample_count >= ART_CENTER_SAMPLE_COUNT) ? 1u : 0u;
 }
 
 static uint8 subject2_observation_map_matches(const map_source_struct *source)
@@ -321,7 +301,6 @@ static uint8 subject2_apply_center_from_cell(const subject2_context_struct *cont
                                              float *applied_x_cm,
                                              float *applied_y_cm)
 {
-    const drive_pose_struct *pose;
     uint16 col_q;
     uint16 row_q;
     char old_car_value;
@@ -334,8 +313,10 @@ static uint8 subject2_apply_center_from_cell(const subject2_context_struct *cont
         return 0u;
     }
 
-    col_q = subject2_median_u16(center_col_samples);
-    row_q = subject2_median_u16(center_row_samples);
+    if(0u == subject2_get_center_median(&col_q, &row_q))
+    {
+        return 0u;
+    }
     if((col_q >= (MAP_COLS * 100u)) || (row_q >= (MAP_ROWS * 100u)))
     {
         return 0u;
@@ -350,8 +331,6 @@ static uint8 subject2_apply_center_from_cell(const subject2_context_struct *cont
         return 0u;
     }
 
-    pose = drive_pose_get();
-    drive_pose_reset(offset_x_cm, offset_y_cm, pose->yaw_deg);
     current_pose_offset_x_cm = offset_x_cm;
     current_pose_offset_y_cm = offset_y_cm;
     navigation_start_row = reference_row;
@@ -407,8 +386,8 @@ static uint8 subject2_apply_center(const subject2_context_struct *context,
 #if ART_CENTER_TIMEOUT_FALLBACK_ENABLE
 static uint8 subject2_apply_map_cell_center(const subject2_context_struct *context)
 {
-    const map_source_struct *source = openart_map_get();
-    const drive_pose_struct *pose;
+    const map_source_struct *source =
+        subject2_effective_map(context, openart_map_get(), 0u);
     uint8 car_row;
     uint8 car_col;
 
@@ -416,8 +395,6 @@ static uint8 subject2_apply_map_cell_center(const subject2_context_struct *conte
     {
         return 0u;
     }
-    pose = drive_pose_get();
-    drive_pose_reset(0.0f, 0.0f, pose->yaw_deg);
     current_pose_offset_x_cm = 0.0f;
     current_pose_offset_y_cm = 0.0f;
     navigation_start_row = car_row;
@@ -516,7 +493,7 @@ static void subject2_begin_scan_center(subject2_update_struct *update)
     uint8 box_scan = (box_objects == current_objects()) ? 1u : 0u;
 
     set_motion(0.0f, 0.0f);
-    center_sample_count = 0u;
+    art_center_batch_reset(&center_batch);
     center_request_start_ms = time_ms();
     openart_request_player_center();
     subject2_state = (0u != box_scan) ?
@@ -610,18 +587,15 @@ static void subject2_tick_center(const subject2_context_struct *context,
         }
         return;
     }
-    center_col_q = subject2_median_u16(center_col_samples);
-    center_row_q = subject2_median_u16(center_row_samples);
+    (void)subject2_get_center_median(&center_col_q, &center_row_q);
     source = openart_get_requested_center_map();
-    if(0 == subject2_normalize_center_map(source,
-                                          center_col_q, center_row_q,
-                                          &center_map_source, center_map_rows,
-                                          &car_row, &car_col))
+    if(0 == map_validate_player_center(source,
+                                       center_col_q, center_row_q,
+                                       &car_row, &car_col))
     {
-        subject2_fail(EXEC_ERROR_ART_CENTER, "E:CRef", update);
+        subject2_retry_center_request("VCtr", update);
         return;
     }
-    source = &center_map_source;
     if(0 != subject2_map_objects_unchanged(source))
     {
         if((car_row == current_observation.row) &&
@@ -665,7 +639,10 @@ static void subject2_tick_center(const subject2_context_struct *context,
         return;
     }
 
-    if(0 == executor_start_position_correction(0.0f, 0.0f))
+    if(0 == executor_start_position_correction_with_pose_reset(
+                 current_pose_offset_x_cm,
+                 current_pose_offset_y_cm,
+                 0.0f, 0.0f))
     {
         subject2_fail(EXEC_ERROR_ART_CENTER, "E:CBsy", update);
         return;
@@ -746,7 +723,6 @@ static void subject2_tick_classify(subject2_update_struct *update)
     subject2_object_struct *objects = current_objects();
     uint8 confirmed_class = SUBJECT2_INVALID_CLASS;
     uint8 confirmed = 0u;
-    uint8 bound;
 
     while(0 != vision_uart_get_sample(&sample))
     {
@@ -767,24 +743,6 @@ static void subject2_tick_classify(subject2_update_struct *update)
     }
     if(0u != confirmed)
     {
-        bound = (objects == box_objects) ?
-            subject2_bind_box(bindings, confirmed_class,
-                              objects[current_observation.object_index].cell) :
-            subject2_bind_target(bindings, confirmed_class,
-                                 objects[current_observation.object_index].cell);
-        if(0u == bound)
-        {
-            if(0u == view_backoff_active)
-            {
-                subject2_begin_view_backoff(update);
-            }
-            else
-            {
-                vision_uart_cancel();
-                subject2_begin_view_return(0u, update);
-            }
-            return;
-        }
         vision_uart_ack(current_vision_request_id);
         objects[current_observation.object_index].class_id = confirmed_class;
         objects[current_observation.object_index].recognized = 1u;
@@ -964,50 +922,11 @@ static void subject2_tick_move(subject2_update_struct *update)
     }
 }
 
-static void clear_mismatched_bindings(uint8 *need_boxes, uint8 *need_targets)
+static void invalidate_mismatched_classes(uint8 *need_boxes, uint8 *need_targets)
 {
-    uint8 class_id;
-    uint8 index;
-
-    *need_boxes = 0u;
-    *need_targets = 0u;
-    for(class_id = 0u; class_id < SUBJECT2_CLASS_COUNT; class_id++)
-    {
-        if((0u != bindings[class_id].box_valid) &&
-           (0u == bindings[class_id].target_valid))
-        {
-            for(index = 0u; index < box_object_count; index++)
-            {
-                if(box_objects[index].class_id == class_id)
-                {
-                    box_objects[index].recognized = 0u;
-                    box_objects[index].class_id = SUBJECT2_INVALID_CLASS;
-                    box_objects[index].tried_observation_mask = 0u;
-                    break;
-                }
-            }
-            bindings[class_id].box_valid = 0u;
-            bindings[class_id].box_cell = INVALID_STATE;
-            *need_boxes = 1u;
-        }
-        else if((0u == bindings[class_id].box_valid) &&
-                (0u != bindings[class_id].target_valid))
-        {
-            for(index = 0u; index < target_object_count; index++)
-            {
-                if(target_objects[index].class_id == class_id)
-                {
-                    target_objects[index].recognized = 0u;
-                    target_objects[index].class_id = SUBJECT2_INVALID_CLASS;
-                    target_objects[index].tried_observation_mask = 0u;
-                    break;
-                }
-            }
-            bindings[class_id].target_valid = 0u;
-            bindings[class_id].target_cell = INVALID_STATE;
-            *need_targets = 1u;
-        }
-    }
+    subject2_invalidate_mismatched_classes(box_objects, box_object_count,
+                                           target_objects, target_object_count,
+                                           need_boxes, need_targets);
 }
 
 static void subject2_tick_validate(subject2_update_struct *update)
@@ -1015,7 +934,8 @@ static void subject2_tick_validate(subject2_update_struct *update)
     uint8 need_boxes;
     uint8 need_targets;
 
-    if(0 != subject2_binding_sets_match(bindings))
+    if(0 != subject2_object_class_counts_match(box_objects, box_object_count,
+                                                target_objects, target_object_count))
     {
         set_motion(0.0f, 0.0f);
         set_target_yaw(launch_yaw_deg);
@@ -1035,7 +955,7 @@ static void subject2_tick_validate(subject2_update_struct *update)
         subject2_fail(EXEC_ERROR_SUBJECT2_CLASS, "E:BSet", update);
         return;
     }
-    clear_mismatched_bindings(&need_boxes, &need_targets);
+    invalidate_mismatched_classes(&need_boxes, &need_targets);
     validation_retry_count++;
     if(0u != need_boxes)
     {
@@ -1102,41 +1022,27 @@ static void subject2_tick_select_push(const subject2_context_struct *context,
                                       subject2_update_struct *update)
 {
     map_scan_stats_struct stats;
-    uint16 best_actions = 0xFFFFu;
-    uint8 class_id;
-    uint8 selected = SUBJECT2_INVALID_CLASS;
+    subject2_push_plan_struct push_plan;
 
-    for(class_id = 0u; class_id < SUBJECT2_CLASS_COUNT; class_id++)
-    {
-        if((0u == bindings[class_id].box_valid) ||
-           (0u == bindings[class_id].target_valid) ||
-           (0u != bindings[class_id].completed) ||
-           ((0u != retry_active_only) && (class_id != active_class)))
-        {
-            continue;
-        }
-        if(0 != solve_bound_box_path(context->snapshot,
-                                     bindings[class_id].box_cell,
-                                     bindings[class_id].target_cell,
-                                     &push_candidate_result))
-        {
-            if((SUBJECT2_INVALID_CLASS == selected) ||
-               (push_candidate_result.action_count < best_actions))
-            {
-                selected = class_id;
-                best_actions = push_candidate_result.action_count;
-                memcpy(context->result, &push_candidate_result,
-                       sizeof(*context->result));
-            }
-        }
-    }
-    if(SUBJECT2_INVALID_CLASS == selected)
+    if(0u == subject2_select_push_plan(context->snapshot,
+                                       box_objects, box_object_count,
+                                       target_objects, target_object_count,
+                                       retry_active_only,
+                                       active_box_valid,
+                                       active_box_cell,
+                                       active_target_cell,
+                                       &push_plan,
+                                       &push_candidate_result))
     {
         subject2_fail(EXEC_ERROR_SUBJECT2_PLAN, "E:Plan", update);
         return;
     }
 
-    active_class = selected;
+    memcpy(context->result, &push_candidate_result, sizeof(*context->result));
+    active_class = push_plan.class_id;
+    active_box_cell = push_plan.box_cell;
+    active_target_cell = push_plan.target_cell;
+    active_box_valid = 1u;
     retry_active_only = 0u;
     if(0 == subject2_collect_cells(context->snapshot, 'B',
                                    task_start_boxes, &task_start_box_count))
@@ -1164,77 +1070,6 @@ static void subject2_tick_select_push(const subject2_context_struct *context,
     }
 }
 
-static void subject2_box_prefetch_clear(void)
-{
-    pre_push_box_prefetch_active = 0u;
-    pre_push_box_prefetch_ready = 0u;
-    pre_push_box_prefetch_row = 0u;
-    pre_push_box_prefetch_col = 0u;
-    pre_push_box_prefetch_ready_ms = 0u;
-}
-
-static uint8 subject2_box_observation_collect(void)
-{
-    openart_observation_sample_struct sample;
-
-    while(0u != openart_get_observation_sample(&sample))
-    {
-        if(0u != executor_apply_art_box_observation(sample.car_col_q,
-                                                    sample.car_row_q,
-                                                    sample.box_col_q,
-                                                    sample.box_row_q))
-        {
-            pre_push_box_prefetch_active = 0u;
-            pre_push_box_prefetch_ready = 1u;
-            pre_push_box_prefetch_ready_ms = time_ms();
-        }
-    }
-    return pre_push_box_prefetch_ready;
-}
-
-static uint8 subject2_box_prefetch_is_fresh(uint8 box_row, uint8 box_col)
-{
-    return ((0u != pre_push_box_prefetch_ready) &&
-            (box_row == pre_push_box_prefetch_row) &&
-            (box_col == pre_push_box_prefetch_col) &&
-            ((time_ms() - pre_push_box_prefetch_ready_ms) <=
-             ART_BOX_OBSERVE_SAMPLE_MAX_AGE_MS)) ? 1u : 0u;
-}
-
-static void subject2_box_observation_request(uint8 box_row, uint8 box_col)
-{
-    executor_reset_art_box_observation_samples();
-    openart_request_observation(box_row, box_col);
-    pre_push_box_prefetch_active = 1u;
-    pre_push_box_prefetch_ready = 0u;
-    pre_push_box_prefetch_row = box_row;
-    pre_push_box_prefetch_col = box_col;
-    pre_push_box_prefetch_ready_ms = 0u;
-}
-
-static void subject2_tick_box_prefetch(void)
-{
-    uint8 box_row;
-    uint8 box_col;
-
-    if(0u != pre_push_box_prefetch_active)
-    {
-        (void)subject2_box_observation_collect();
-    }
-    if(0 == executor_get_pre_push_box_prefetch_request(&box_row, &box_col))
-    {
-        return;
-    }
-    if(((0u != pre_push_box_prefetch_active) &&
-        (box_row == pre_push_box_prefetch_row) &&
-        (box_col == pre_push_box_prefetch_col)) ||
-       (0u != subject2_box_prefetch_is_fresh(box_row, box_col)))
-    {
-        return;
-    }
-    subject2_box_observation_request(box_row, box_col);
-}
-
 static void subject2_begin_pre_push_center(subject2_update_struct *update)
 {
     uint8 box_row;
@@ -1250,17 +1085,13 @@ static void subject2_begin_pre_push_center(subject2_update_struct *update)
     subject2_state = SUBJECT2_PRE_PUSH_CENTER;
     if(0 != executor_get_pre_push_box_request(&box_row, &box_col))
     {
-        if((0u == subject2_box_prefetch_is_fresh(box_row, box_col)) &&
-           ((0u == pre_push_box_prefetch_active) ||
-            (box_row != pre_push_box_prefetch_row) ||
-            (box_col != pre_push_box_prefetch_col)))
-        {
-            subject2_box_observation_request(box_row, box_col);
-        }
+        art_box_observation_session_request(&pre_push_box_session,
+                                            box_row, box_col);
         pre_push_box_request_active = 1u;
     }
     else
     {
+        art_center_batch_reset(&center_batch);
         executor_reset_art_player_center_samples();
         openart_request_player_center();
     }
@@ -1301,8 +1132,9 @@ static void subject2_tick_pre_push_box(subject2_update_struct *update)
 
         pre_push_box_retry_moving = 0u;
         pre_push_box_retry_settling = 0u;
-        subject2_box_observation_request(pre_push_box_prefetch_row,
-                                         pre_push_box_prefetch_col);
+        art_box_observation_session_request(&pre_push_box_session,
+                                            pre_push_box_session.box_row,
+                                            pre_push_box_session.box_col);
         pre_push_center_start_ms = time_ms();
         if(0 != update)
         {
@@ -1340,14 +1172,14 @@ static void subject2_tick_pre_push_box(subject2_update_struct *update)
         return;
     }
 
-    if(0u == subject2_box_observation_collect())
+    if(0u == art_box_observation_session_collect(&pre_push_box_session))
     {
         if((time_ms() - pre_push_center_start_ms) >= ART_BOX_OBSERVE_WAIT_MS)
         {
             if(pre_push_box_retry_count < ART_BOX_OBSERVE_MAX_RETRIES)
             {
-                pre_push_box_prefetch_active = 0u;
-                pre_push_box_prefetch_ready = 0u;
+                pre_push_box_session.active = 0u;
+                pre_push_box_session.ready = 0u;
                 executor_reset_art_box_observation_samples();
                 if(0 == executor_start_pre_push_box_retry_nudge(
                              ART_BOX_OBSERVE_RETRY_MOVE_CM))
@@ -1378,7 +1210,7 @@ static void subject2_tick_pre_push_box(subject2_update_struct *update)
     prep_result = executor_start_pre_push_box_preparation();
     if(EXEC_ART_BOX_PREP_STARTED != prep_result)
     {
-        subject2_box_prefetch_clear();
+        art_box_observation_session_reset(&pre_push_box_session);
         if(0 == executor_continue_after_pre_push_center())
         {
             subject2_fail(EXEC_ERROR_ART_CENTER, "E:CPsh", update);
@@ -1396,7 +1228,7 @@ static void subject2_tick_pre_push_box(subject2_update_struct *update)
         return;
     }
 
-    subject2_box_prefetch_clear();
+    art_box_observation_session_reset(&pre_push_box_session);
     pre_push_box_preparation_started = 1u;
     if(0 != update)
     {
@@ -1410,9 +1242,6 @@ static void subject2_tick_pre_push_center(const subject2_context_struct *context
 {
     const map_source_struct *source;
     executor_art_center_result_enum result;
-    uint16 col_q;
-    uint16 row_q;
-    uint8 sample_index;
     uint8 ready = 0u;
     uint8 car_row;
     uint8 car_col;
@@ -1425,12 +1254,9 @@ static void subject2_tick_pre_push_center(const subject2_context_struct *context
         return;
     }
 
-    while(0u != (sample_index = openart_get_requested_center_sample(&col_q, &row_q)))
+    if(0u != art_center_batch_collect(&center_batch))
     {
-        if(0 != executor_apply_art_player_center(col_q, row_q, sample_index))
-        {
-            ready = 1u;
-        }
+        ready = art_center_batch_apply_to_executor(&center_batch);
     }
     if(0u == ready)
     {
@@ -1458,16 +1284,20 @@ static void subject2_tick_pre_push_center(const subject2_context_struct *context
         return;
     }
     source = openart_get_requested_center_map();
-    if((0 == executor_get_art_player_center_median(&center_col_q, &center_row_q)) ||
-       (0 == subject2_normalize_center_map(source,
-                                           center_col_q, center_row_q,
-                                           &center_map_source, center_map_rows,
-                                           &car_row, &car_col)))
+    if((0 == art_center_batch_get_median(&center_batch,
+                                         &center_col_q, &center_row_q)) ||
+       (0 == map_validate_player_center(source,
+                                        center_col_q, center_row_q,
+                                        &car_row, &car_col)))
     {
-        subject2_fail(EXEC_ERROR_ART_CENTER, "E:CPsh", update);
+        subject2_retry_center_request("PCtr", update);
         return;
     }
-    source = &center_map_source;
+    if(0 == subject2_map_objects_unchanged(source))
+    {
+        subject2_begin_confirm_map(update);
+        return;
+    }
     result = executor_commit_art_player_center(car_row, car_col);
     if((EXEC_ART_CENTER_APPLIED != result) &&
        (EXEC_ART_CENTER_IGNORED != result))
@@ -1505,17 +1335,70 @@ static void subject2_tick_pre_push_center(const subject2_context_struct *context
 
 static void subject2_begin_confirm_map(subject2_update_struct *update)
 {
-    subject2_box_prefetch_clear();
-    confirm_last_frame = openart_uart_get_frame_count();
+    art_box_observation_session_reset(&pre_push_box_session);
+    map_stability_tracker_reset(&confirm_tracker,
+                                openart_uart_get_frame_count());
     confirm_wait_start_ms = time_ms();
-    confirm_candidate_valid = 0u;
-    confirm_stable_count = 0u;
     subject2_state = SUBJECT2_CONFIRM_MAP;
     if(0 != update)
     {
         update->run_state = "ART Wait";
         update->redraw = 1u;
     }
+}
+
+static const map_source_struct *subject2_effective_map(
+    const subject2_context_struct *context,
+    const map_source_struct *source,
+    uint8 allow_infer)
+{
+    map_scan_stats_struct stats;
+    uint8 overlap_row;
+    uint8 overlap_col;
+
+    if((0 == context) || (0 == source))
+    {
+        return source;
+    }
+    map_scan_stats(source, &stats);
+    if(0u != transit_overlap_valid)
+    {
+        overlap_row = map_cell_row(transit_overlap_cell);
+        overlap_col = map_cell_col(transit_overlap_cell);
+        if(('T' == source->rows[overlap_row][overlap_col]) &&
+           ((uint8)(stats.box_count + 1u) == stats.target_count))
+        {
+            map_source_snapshot(&transit_overlap_source,
+                                transit_overlap_rows, source);
+            transit_overlap_rows[overlap_row][overlap_col] =
+                MAP_BOX_ON_TARGET;
+            return &transit_overlap_source;
+        }
+        if((stats.box_count == stats.target_count) ||
+           (stats.target_count < task_start_target_count))
+        {
+            transit_overlap_valid = 0u;
+            transit_overlap_cell = INVALID_STATE;
+        }
+    }
+    if((0u == allow_infer) ||
+       ((uint8)(stats.box_count + 1u) != task_start_box_count) ||
+       (stats.target_count != task_start_target_count))
+    {
+        return source;
+    }
+    if(0u == subject2_normalize_transit_box_overlap(
+                  source, context->result,
+                  executor_get_current_step(),
+                  active_box_cell, active_target_cell,
+                  executor_get_art_sync_action(),
+                  transit_overlap_rows, &transit_overlap_source,
+                  &transit_overlap_cell))
+    {
+        return source;
+    }
+    transit_overlap_valid = 1u;
+    return &transit_overlap_source;
 }
 
 static uint8 subject2_handle_host_completion(subject2_update_struct *update)
@@ -1549,7 +1432,7 @@ static void subject2_begin_replan_center(uint8 for_return,
                                          subject2_update_struct *update)
 {
     replan_center_for_return = for_return;
-    center_sample_count = 0u;
+    art_center_batch_reset(&center_batch);
     center_request_start_ms = time_ms();
     openart_request_player_center();
     subject2_state = SUBJECT2_REPLAN_CENTER;
@@ -1567,7 +1450,6 @@ static void subject2_accept_confirmed_map(const subject2_context_struct *context
     map_scan_stats_struct stats;
     subject2_object_struct next_boxes[MAX_BOXES];
     subject2_object_struct next_targets[MAX_BOXES];
-    subject2_binding_struct next_bindings[SUBJECT2_CLASS_COUNT];
     subject2_sync_update_struct sync_update;
     subject2_sync_result_enum sync_result;
     uint8 next_box_count = box_object_count;
@@ -1581,20 +1463,12 @@ static void subject2_accept_confirmed_map(const subject2_context_struct *context
     }
     memcpy(next_boxes, box_objects, sizeof(next_boxes));
     memcpy(next_targets, target_objects, sizeof(next_targets));
-    memcpy(next_bindings, bindings, sizeof(next_bindings));
-    sync_result = subject2_reconcile_objects(
+    sync_result = subject2_reconcile_object_lists(
         source,
         next_boxes, &next_box_count,
         next_targets, &next_target_count,
-        next_bindings, 1u, active_class, &sync_update);
-    if((SUBJECT2_SYNC_RESCAN == sync_result) &&
-       (0u != sync_update.need_box_scan) &&
-       (0u == sync_update.need_target_scan))
-    {
-        subject2_begin_scan_map_sync(update);
-        return;
-    }
-    if((SUBJECT2_SYNC_OK != sync_result) ||
+        active_box_cell, active_target_cell, &sync_update);
+    if((SUBJECT2_SYNC_AMBIGUOUS == sync_result) ||
        ((stats.box_count > task_start_box_count) ||
         (stats.target_count > task_start_target_count)))
     {
@@ -1604,14 +1478,29 @@ static void subject2_accept_confirmed_map(const subject2_context_struct *context
 
     memcpy(box_objects, next_boxes, sizeof(box_objects));
     memcpy(target_objects, next_targets, sizeof(target_objects));
-    memcpy(bindings, next_bindings, sizeof(bindings));
     box_object_count = next_box_count;
     target_object_count = next_target_count;
-    retry_active_only = ((stats.box_count == task_start_box_count) &&
-                         (stats.target_count == task_start_target_count)) ? 1u : 0u;
+    active_box_valid = sync_update.active_box_valid;
+    active_box_cell = sync_update.active_box_cell;
+    if((0u != sync_update.active_target_removed) ||
+       (stats.box_count < task_start_box_count) ||
+       (stats.target_count < task_start_target_count))
+    {
+        retry_active_only = 0u;
+        active_target_cell = INVALID_STATE;
+    }
+    else
+    {
+        retry_active_only = 1u;
+    }
     map_source_snapshot(context->snapshot, context->snapshot_rows, source);
     *context->snapshot_valid = 1u;
     executor_stop();
+    if(SUBJECT2_SYNC_RESCAN == sync_result)
+    {
+        subject2_begin_scan_map_sync(update);
+        return;
+    }
     subject2_begin_replan_center((0u == stats.box_count) ? 1u : 0u, update);
 }
 
@@ -1621,6 +1510,7 @@ static void subject2_tick_confirm_map(const subject2_context_struct *context,
     const map_source_struct *source;
     map_scan_stats_struct stats;
     uint32 frame_count = openart_uart_get_frame_count();
+    map_stability_result_enum stability;
 
     if((time_ms() - confirm_wait_start_ms) >= EXEC_ART_SYNC_TIMEOUT_MS)
     {
@@ -1628,42 +1518,31 @@ static void subject2_tick_confirm_map(const subject2_context_struct *context,
         return;
     }
 
-    if(frame_count == confirm_last_frame)
-    {
-        if(0 != update) update->run_state = "ART Wait";
-        return;
-    }
-    confirm_last_frame = frame_count;
     source = openart_map_get();
     if(0 == source)
     {
         return;
     }
+    source = subject2_effective_map(context, source, 1u);
     map_scan_stats(source, &stats);
     if((1u != stats.car_count) ||
        (stats.box_count != stats.target_count) ||
        (stats.box_count > task_start_box_count) ||
        (stats.target_count > task_start_target_count))
     {
-        confirm_candidate_valid = 0u;
-        confirm_stable_count = 0u;
+        map_stability_tracker_reset_candidate(&confirm_tracker);
         if(0 != update) update->run_state = "ART Wait";
         return;
     }
-    if((0u == confirm_candidate_valid) ||
-       (0u == map_rows_equal(confirm_candidate_rows, source)))
-    {
-        map_copy_rows(confirm_candidate_rows, source);
-        confirm_candidate_valid = 1u;
-        confirm_stable_count = 1u;
-    }
-    else if(confirm_stable_count < EXEC_ART_STABLE_FRAMES)
-    {
-        confirm_stable_count++;
-    }
-    if(confirm_stable_count >= EXEC_ART_STABLE_FRAMES)
+    stability = map_stability_tracker_push(&confirm_tracker, frame_count,
+                                           source, EXEC_ART_STABLE_FRAMES);
+    if(MAP_STABILITY_READY == stability)
     {
         subject2_accept_confirmed_map(context, source, update);
+    }
+    else if(0 != update)
+    {
+        update->run_state = "ART Wait";
     }
 }
 
@@ -1674,7 +1553,6 @@ static void subject2_finish_scan_map_sync(
 {
     subject2_object_struct next_boxes[MAX_BOXES];
     subject2_object_struct next_targets[MAX_BOXES];
-    subject2_binding_struct next_bindings[SUBJECT2_CLASS_COUNT];
     subject2_sync_update_struct sync_update;
     subject2_sync_result_enum sync_result;
     uint8 next_box_count = box_object_count;
@@ -1682,12 +1560,11 @@ static void subject2_finish_scan_map_sync(
 
     memcpy(next_boxes, box_objects, sizeof(next_boxes));
     memcpy(next_targets, target_objects, sizeof(next_targets));
-    memcpy(next_bindings, bindings, sizeof(next_bindings));
-    sync_result = subject2_reconcile_objects(
+    sync_result = subject2_reconcile_object_lists(
         source,
         next_boxes, &next_box_count,
         next_targets, &next_target_count,
-        next_bindings, 0u, active_class, &sync_update);
+        active_box_cell, active_target_cell, &sync_update);
     if(SUBJECT2_SYNC_AMBIGUOUS == sync_result)
     {
         subject2_fail(EXEC_ERROR_SUBJECT2_TRACK, "E:Track", update);
@@ -1702,9 +1579,15 @@ static void subject2_finish_scan_map_sync(
 
     memcpy(box_objects, next_boxes, sizeof(box_objects));
     memcpy(target_objects, next_targets, sizeof(target_objects));
-    memcpy(bindings, next_bindings, sizeof(bindings));
     box_object_count = next_box_count;
     target_object_count = next_target_count;
+    active_box_valid = sync_update.active_box_valid;
+    active_box_cell = sync_update.active_box_cell;
+    if(0u != sync_update.active_target_removed)
+    {
+        retry_active_only = 0u;
+        active_target_cell = INVALID_STATE;
+    }
 
     if((0u == box_object_count) && (0u == target_object_count))
     {
@@ -1758,6 +1641,7 @@ static void subject2_tick_scan_map_sync(const subject2_context_struct *context,
     uint16 center_row_q;
     uint8 car_row;
     uint8 car_col;
+    map_stability_result_enum stability;
 
     if(SUBJECT2_SCAN_SYNC_WAIT_MAP == scan_sync_phase)
     {
@@ -1767,42 +1651,27 @@ static void subject2_tick_scan_map_sync(const subject2_context_struct *context,
             return;
         }
         frame_count = openart_uart_get_frame_count();
-        if(frame_count == confirm_last_frame)
-        {
-            if(0 != update)
-            {
-                update->run_state = "VSync";
-            }
-            return;
-        }
-        confirm_last_frame = frame_count;
         source = openart_map_get();
         if(0 == source)
         {
             return;
         }
-        if((0u == confirm_candidate_valid) ||
-           (0u == map_rows_equal(confirm_candidate_rows, source)))
-        {
-            map_copy_rows(confirm_candidate_rows, source);
-            confirm_candidate_valid = 1u;
-            confirm_stable_count = 1u;
-        }
-        else if(confirm_stable_count < EXEC_ART_STABLE_FRAMES)
-        {
-            confirm_stable_count++;
-        }
-        if(confirm_stable_count < EXEC_ART_STABLE_FRAMES)
-        {
-            return;
-        }
+        source = subject2_effective_map(context, source, 0u);
         map_scan_stats(source, &stats);
         if((1u != stats.car_count) || (stats.box_count != stats.target_count))
         {
-            subject2_fail(EXEC_ERROR_SUBJECT2_CLASS, "E:Map", update);
+            map_stability_tracker_reset_candidate(&confirm_tracker);
+            if(0 != update) update->run_state = "VSync";
             return;
         }
-        center_sample_count = 0u;
+        stability = map_stability_tracker_push(&confirm_tracker, frame_count,
+                                               source, EXEC_ART_STABLE_FRAMES);
+        if(MAP_STABILITY_READY != stability)
+        {
+            if(0 != update) update->run_state = "VSync";
+            return;
+        }
+        art_center_batch_reset(&center_batch);
         center_request_start_ms = time_ms();
         openart_request_player_center();
         scan_sync_phase = SUBJECT2_SCAN_SYNC_WAIT_CENTER;
@@ -1826,17 +1695,18 @@ static void subject2_tick_scan_map_sync(const subject2_context_struct *context,
                 subject2_fail(EXEC_ERROR_ART_CENTER, "E:CTmo", update);
                 return;
             }
+            source = subject2_effective_map(context, source, 0u);
             map_scan_stats(source, &stats);
             if(1u != stats.car_count)
             {
                 subject2_fail(EXEC_ERROR_ART_CENTER, "E:CTmo", update);
                 return;
             }
-            center_sample_count = ART_CENTER_SAMPLE_COUNT;
+            center_batch.count = ART_CENTER_SAMPLE_COUNT;
             for(index = 0u; index < ART_CENTER_SAMPLE_COUNT; index++)
             {
-                center_col_samples[index] = (uint16)(stats.car_col * 100u + 50u);
-                center_row_samples[index] = (uint16)(stats.car_row * 100u + 50u);
+                center_batch.col_q[index] = (uint16)(stats.car_col * 100u + 50u);
+                center_batch.row_q[index] = (uint16)(stats.car_row * 100u + 50u);
             }
             subject2_finish_scan_map_sync(context, source, update);
 #else
@@ -1850,18 +1720,17 @@ static void subject2_tick_scan_map_sync(const subject2_context_struct *context,
         return;
     }
 
-    center_col_q = subject2_median_u16(center_col_samples);
-    center_row_q = subject2_median_u16(center_row_samples);
+    (void)subject2_get_center_median(&center_col_q, &center_row_q);
     source = openart_get_requested_center_map();
-    if(0 == subject2_normalize_center_map(source,
-                                          center_col_q, center_row_q,
-                                          &center_map_source, center_map_rows,
-                                          &car_row, &car_col))
+    source = subject2_effective_map(context, source, 0u);
+    if(0 == map_validate_player_center(source,
+                                       center_col_q, center_row_q,
+                                       &car_row, &car_col))
     {
-        subject2_fail(EXEC_ERROR_ART_CENTER, "E:CRef", update);
+        subject2_retry_center_request("VSync", update);
         return;
     }
-    subject2_finish_scan_map_sync(context, &center_map_source, update);
+    subject2_finish_scan_map_sync(context, source, update);
 }
 
 static void subject2_tick_replan_center(const subject2_context_struct *context,
@@ -1896,15 +1765,23 @@ static void subject2_tick_replan_center(const subject2_context_struct *context,
     }
     else
     {
-        center_col_q = subject2_median_u16(center_col_samples);
-        center_row_q = subject2_median_u16(center_row_samples);
+        (void)subject2_get_center_median(&center_col_q, &center_row_q);
         source = openart_get_requested_center_map();
-        if((0 == subject2_normalize_center_map(source,
-                                               center_col_q, center_row_q,
-                                               &center_map_source, center_map_rows,
-                                               &car_row, &car_col)) ||
-           (0 == subject2_apply_center(context, &center_map_source,
-                                       0u, 0, 0)))
+        source = subject2_effective_map(context, source, 0u);
+        if(0 == map_validate_player_center(source,
+                                           center_col_q, center_row_q,
+                                           &car_row, &car_col))
+        {
+            subject2_retry_center_request(
+                replan_center_for_return ? "S2Ret" : "RCtr", update);
+            return;
+        }
+        if(0 == subject2_map_objects_unchanged(source))
+        {
+            subject2_begin_confirm_map(update);
+            return;
+        }
+        if(0 == subject2_apply_center(context, source, 0u, 0, 0))
         {
             subject2_fail(EXEC_ERROR_ART_CENTER, "E:CRpl", update);
             return;
@@ -1935,7 +1812,6 @@ static void subject2_tick_replan_center(const subject2_context_struct *context,
 
 static void subject2_tick_execute_push(subject2_update_struct *update)
 {
-    subject2_tick_box_prefetch();
     if(0 != executor_art_pre_push_pending())
     {
         subject2_begin_pre_push_center(update);
@@ -1984,20 +1860,23 @@ void subject2_begin(const subject2_context_struct *context,
         return;
     }
 
-    subject2_bindings_clear(bindings);
     subject2_classifier_reset(&classifier);
     current_pose_offset_x_cm = initial_pose_x_cm;
     current_pose_offset_y_cm = initial_pose_y_cm;
     validation_retry_count = 0u;
     active_class = SUBJECT2_INVALID_CLASS;
+    active_box_valid = 0u;
+    active_box_cell = INVALID_STATE;
+    active_target_cell = INVALID_STATE;
     last_recognition_valid = 0u;
     last_recognition_is_target = 0u;
     last_recognition_class = SUBJECT2_INVALID_CLASS;
     retry_active_only = 0u;
+    transit_overlap_valid = 0u;
+    transit_overlap_cell = INVALID_STATE;
     replan_center_for_return = 0u;
     launch_yaw_deg = context->launch_yaw_deg;
-    confirm_candidate_valid = 0u;
-    confirm_stable_count = 0u;
+    map_stability_tracker_reset(&confirm_tracker, 0u);
     confirm_wait_start_ms = 0u;
     scan_sync_phase = SUBJECT2_SCAN_SYNC_WAIT_MAP;
     scan_plan_snapshot_pending = 0u;
@@ -2113,24 +1992,28 @@ void subject2_cancel(void)
     target_object_count = 0u;
     current_vision_request_id = 0u;
     classify_start_ms = 0u;
-    center_sample_count = 0u;
+    art_center_batch_reset(&center_batch);
     pre_push_center_start_ms = 0u;
     pre_push_box_request_active = 0u;
     pre_push_box_preparation_started = 0u;
-    subject2_box_prefetch_clear();
+    art_box_observation_session_reset(&pre_push_box_session);
     pre_push_box_retry_count = 0u;
     pre_push_box_retry_moving = 0u;
     pre_push_box_retry_settling = 0u;
     pre_push_box_retry_settle_start_ms = 0u;
     validation_retry_count = 0u;
     active_class = SUBJECT2_INVALID_CLASS;
+    active_box_valid = 0u;
+    active_box_cell = INVALID_STATE;
+    active_target_cell = INVALID_STATE;
     last_recognition_valid = 0u;
     last_recognition_is_target = 0u;
     last_recognition_class = SUBJECT2_INVALID_CLASS;
     retry_active_only = 0u;
+    transit_overlap_valid = 0u;
+    transit_overlap_cell = INVALID_STATE;
     replan_center_for_return = 0u;
-    confirm_candidate_valid = 0u;
-    confirm_stable_count = 0u;
+    map_stability_tracker_reset(&confirm_tracker, 0u);
     confirm_wait_start_ms = 0u;
     center_request_start_ms = 0u;
     center_adjust_start_ms = 0u;

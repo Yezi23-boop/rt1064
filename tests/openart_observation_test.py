@@ -14,6 +14,7 @@ NAMES = {
     "FRAME_SCALE",
     "USE_VGA",
     "OBSERVATION_SAMPLE_COUNT",
+    "BOX_REQUEST_MATCH_MAX_OFFSET_Q",
     "observation_request_active",
     "observation_request_row",
     "observation_request_col",
@@ -38,10 +39,14 @@ FUNCTIONS = {
     "detect_box_centers",
     "select_box_center",
     "detect_box_center",
+    "resolve_requested_box_center",
+    "box_center_grid_matches_request",
     "parse_map_uart_line",
     "process_observation_request",
+    "send_map_uart",
 }
 nodes = []
+found_functions = set()
 for node in TREE.body:
     if isinstance(node, ast.Assign):
         if any(isinstance(target, ast.Name) and target.id in NAMES
@@ -49,9 +54,13 @@ for node in TREE.body:
             nodes.append(node)
     elif isinstance(node, ast.FunctionDef) and node.name in FUNCTIONS:
         nodes.append(node)
+        found_functions.add(node.name)
+
+assert FUNCTIONS.issubset(found_functions), "requested box center helpers are missing"
 
 namespace = {}
 exec(compile(ast.Module(body=nodes, type_ignores=[]), "main_see.py", "exec"), namespace)
+namespace["poll_map_uart_rx"] = lambda uart: None
 
 
 class FakeUart:
@@ -152,6 +161,20 @@ assert namespace["select_box_center"](
     adjacent_centers, grid_points, 6, 11) == (234, 132)
 assert namespace["select_box_center"](
     [(226, 130)], grid_points, 6, 10) == (226, 130)
+assert namespace["select_box_center"](
+    [(205, 130), (215, 130)], grid_points, 6, 10) is None
+
+assert namespace["resolve_requested_box_center"](
+    adjacent_adapter, grid_points, element_matrix, 6, 10) == (214, 132)
+matrix_without_requested_box = [["space" for _ in range(16)] for _ in range(12)]
+assert namespace["resolve_requested_box_center"](
+    adjacent_adapter, grid_points, matrix_without_requested_box, 6, 10) is None
+
+matches_request = namespace["box_center_grid_matches_request"]
+assert matches_request((1130, 650), 6, 10)
+assert matches_request((970, 650), 6, 10)
+assert not matches_request((1131, 650), 6, 10)
+assert not matches_request((969, 650), 6, 10)
 
 element_matrix = [["space" for _ in range(16)] for _ in range(12)]
 element_matrix[9][2] = "box"
@@ -188,23 +211,32 @@ observation_loop = SOURCE[
     SOURCE.index("        debug_box_centers = []")
 ]
 assert "element_matrix[observation_request_row][observation_request_col]" not in observation_loop
-assert "observation_box_center = detect_box_center(" in observation_loop
+assert "observation_box_center = resolve_requested_box_center(" in observation_loop
+assert "element_matrix," in observation_loop
 
 uart = FakeUart()
 process = namespace["process_observation_request"]
-process(uart, None, (850, 550))
+canonical_map = [["." for _ in range(16)] for _ in range(12)]
+canonical_map[5][7] = "C"
+canonical_map[5][8] = "B"
+process(uart, canonical_map, None, (850, 550))
 assert uart.tx == []
-process(uart, (750, 550), None)
+process(uart, canonical_map, (750, 550), None)
 assert uart.tx == []
-process(uart, (750, 550), (850, 550))
-process(uart, (751, 550), (851, 550))
-process(uart, (752, 551), (852, 551))
-process(uart, (753, 551), (853, 551))
-assert uart.tx == [
+process(uart, canonical_map, (750, 550), (850, 550))
+process(uart, canonical_map, (751, 550), (851, 550))
+process(uart, canonical_map, (752, 551), (852, 551))
+process(uart, canonical_map, (753, 551), (853, 551))
+sample_lines = [line for line in uart.tx if line.startswith("OBSERVE_SAMPLE ")]
+assert sample_lines == [
     "OBSERVE_SAMPLE 1,750,550,850,550\n",
     "OBSERVE_SAMPLE 2,751,550,851,550\n",
     "OBSERVE_SAMPLE 3,752,551,852,551\n",
 ]
+for sample_line in sample_lines:
+    sample_position = uart.tx.index(sample_line)
+    assert uart.tx[sample_position - 2].startswith("PLAYER_CENTER_GRID ")
+    assert uart.tx[sample_position - 1] == "MAP_END\n"
 assert namespace["observation_request_active"] is False
 
 namespace["parse_map_uart_line"]("OBSERVE_REQ 12,8")

@@ -455,6 +455,11 @@
               <FilePath>..\user\src\map_utils.c</FilePath>
             </File>
             <File>
+              <FileName>art_observation.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>..\user\src\art_observation.c</FilePath>
+            </File>
+            <File>
               <FileName>art_replan.c</FileName>
               <FileType>1</FileType>
               <FilePath>..\user\src\art_replan.c</FilePath>

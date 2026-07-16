@@ -92,9 +92,20 @@ void executor_start(const waypoint_struct *waypoints, uint16 count,
 /**
  * @brief 使用现有20ms位置环移动到当前局部坐标系中的任意 X/Y 目标。
  * @return 1 表示已启动；0 表示 executor 正在运行或暂停，未接管。
- * @note 不重置 pose 和 yaw，只用于科目二观察格的小车中心回正。
+ * @note 不重置 pose 和 yaw；发车、返航和科目二观察格回正均复用该接口。
  */
 uint8 executor_start_position_correction(float target_x_cm, float target_y_cm);
+
+/**
+ * @brief 原子重置局部 pose，并使用现有20ms位置环移动到指定目标。
+ * @return 1 表示已启动；0 表示 executor 正在运行或暂停，未接管。
+ * @note pose 重置、PID/到点状态清零、目标设置和 RUNNING 切换位于同一临界区。
+ */
+uint8 executor_start_position_correction_with_pose_reset(
+    float initial_x_cm,
+    float initial_y_cm,
+    float target_x_cm,
+    float target_y_cm);
 
 /**
  * @brief 停止执行器（急停）。
@@ -154,12 +165,6 @@ uint8 executor_start_pre_push_alignment(uint8 reference_row, uint8 reference_col
  * @return 1 表示应发送 `OBSERVE_REQ row,col`；0 表示仍走普通小车中心校正。
  */
 uint8 executor_get_pre_push_box_request(uint8 *box_row, uint8 *box_col);
-
-/**
- * @brief 在进入推箱准备等待前一个 waypoint 时预取下一箱子格。
- * @return 1 表示当前或下一 waypoint 将触发车箱准备，并已返回箱子格。
- */
-uint8 executor_get_pre_push_box_prefetch_request(uint8 *box_row, uint8 *box_col);
 
 /** 清空当前推箱准备的车箱配对观察样本。 */
 void executor_reset_art_box_observation_samples(void);

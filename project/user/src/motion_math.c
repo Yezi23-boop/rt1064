@@ -26,6 +26,34 @@ float limit_float(float value, float min_value, float max_value)
     return value;
 }
 
+uint16 median_u16_values(const uint16 *values, uint8 count)
+{
+    uint16 sorted[ART_CENTER_SAMPLE_COUNT];
+    uint8 i;
+    uint8 j;
+
+    if((0 == values) || (0u == count) || (count > ART_CENTER_SAMPLE_COUNT))
+    {
+        return 0u;
+    }
+    for(i = 0u; i < count; i++)
+    {
+        sorted[i] = values[i];
+    }
+    for(i = 1u; i < count; i++)
+    {
+        uint16 key = sorted[i];
+        j = i;
+        while((j > 0u) && (sorted[j - 1u] > key))
+        {
+            sorted[j] = sorted[j - 1u];
+            j--;
+        }
+        sorted[j] = key;
+    }
+    return sorted[count / 2u];
+}
+
 float shortest_angle_error(float target_yaw, float current_yaw)
 {
     float error = target_yaw - current_yaw;

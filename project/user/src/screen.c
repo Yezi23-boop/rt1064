@@ -228,6 +228,11 @@ static void parse_source(const map_source_struct *source, char grid[MAP_ROWS][MA
             {
                 add_cell(boxes, box_count, row, col);
             }
+            else if(MAP_BOX_ON_TARGET == value)
+            {
+                add_cell(boxes, box_count, row, col);
+                add_cell(targets, target_count, row, col);
+            }
             else if('T' == value)
             {
                 add_cell(targets, target_count, row, col);
@@ -527,10 +532,8 @@ static uint16 find_start_car(const map_source_struct *source)
 {
     uint8 row = 0;
     uint8 col = 0;
-    uint8 count = 0;
 
-    (void)map_find_car(source, &row, &col, &count);
-    if(0 != count)
+    if(0 != map_find_car(source, &row, &col, 0))
     {
         return map_cell_index(row, col);
     }
@@ -1023,11 +1026,7 @@ void screen_draw_execute(const screen_execute_view_struct *view)
         ips200_show_uint(152, LINE_H * 5, view->recognition_class, 1);
     }
 
-    if(0 != view->art_launch_pending)
-    {
-        show_hint("K3 Launch", "K4 Stop");
-    }
-    else if(EXEC_STATE_PAUSED == view->state)
+    if(EXEC_STATE_PAUSED == view->state)
     {
         show_hint("K3 Resume", "K4 Stop");
     }

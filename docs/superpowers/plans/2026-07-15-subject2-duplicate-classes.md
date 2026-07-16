@@ -1,309 +1,221 @@
-# Subject2 Duplicate Classes Implementation Plan
+# 科目二重复类别支持实施计划
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+## 目标
 
-**Goal:** 让科目二支持多个同类卡通箱子与多个同数字目标，并按同类别任意互配完成扫描、规划、ART 同步和重试。
+让科目二支持多个同类卡通箱子和多个同数字目标。同类箱子可与任意同类目标配对；RT1064 不为同类对象建立永久实例编号，而是以当前 ART 地图、对象所在格和类别数量为准进行扫描、规划、同步和重试。
 
-**Architecture:** 以 `box_objects[]` 和 `target_objects[]` 作为类别与位置的唯一事实来源，使用每类别数量校验代替单实例 `bindings[class]`。规划器枚举同类箱子与目标组合；ART 同步按目标剩余类别数量恢复箱子类别，无法唯一恢复时只局部重扫未匹配对象。
+## 当前仓库事实
 
-**Tech Stack:** C99、现有 `subject2` 状态机、Sokoban BFS、GCC 主机测试、Keil MDK。
+- `subject2_object_struct` 已能为每个箱子或目标独立保存 `cell/class_id/recognized`。
+- 当前 `bindings[SUBJECT2_CLASS_COUNT]` 每类只能保存一个箱子格和一个目标格，是重复类别失败的直接原因。
+- `subject2_tick_classify()` 会调用 `subject2_bind_box/target()`；第二个同类结果因此被拒绝。
+- `subject2_tick_select_push()` 当前每类只尝试一组固定 `box_cell -> target_cell`。
+- `subject2_reconcile_objects()` 当前依赖单实例 binding 恢复对象身份。
+- 当前求解器是逐箱贪心，不是多箱全局最优搜索；本次保持该架构边界。
 
----
+## 最终语义
 
-## File Structure
+```text
+识别阶段：
+  每个对象独立保存类别，允许重复
 
-- `project/user/inc/subject2_logic.h`：定义对象级类别校验与同步接口，移除单实例 binding API。
-- `project/user/src/subject2_logic.c`：实现按类别计数、异常类别失效和重复类别对象协调。
-- `project/user/src/subject2.c`：分类结果写入对象、动态配对、具体任务重试和同步状态集成。
-- `tests/subject2_logic_test.c`：纯逻辑重复类别与对象协调测试。
-- `tests/subject2_scan_test.c`：完整扫描、最短配对、重试和局部重扫状态测试。
-- `docs/superpowers/specs/2026-07-15-subject2-duplicate-classes-design.md`：实现后同步最终接口名称和错误语义。
+绑定校验：
+  所有对象都已识别
+  每个类别的箱子数量 == 目标数量
 
-### Task 1: 类别数量校验
+选择推箱：
+  枚举同类别 box x target
+  对每组调用现有 solve_bound_box_path()
+  选择当前动作数最少的可行组合
 
-**Files:**
-- Modify: `tests/subject2_logic_test.c`
-- Modify: `project/user/inc/subject2_logic.h`
-- Modify: `project/user/src/subject2_logic.c`
+ART 同步：
+  目标格消失是上位机完成任务的权威事实
+  由剩余目标的类别数量恢复剩余箱子类别
 
-- [ ] **Step 1: 写重复类别数量匹配的失败测试**
+重试：
+  固定 active_target_cell
+  active_box_cell 可唯一追踪时固定箱子
+  无法唯一追踪时允许从同类箱子中重新选择
+```
 
-构造两个 `class_id=8` 箱子和两个 `class_id=8` 目标，期望新接口返回匹配：
+同类实例本身不需要区分。两个同类箱子位置互换时，只要求类别数量正确且流程不中断，不要求恢复原来的物理实例身份。
+
+## 不变范围
+
+- 不修改 OpenART UART 文本协议。
+- 不修改 OpenART 脚本、分类模型和置信度规则。
+- 不修改 BFS、20cm 格距、PID、中心校正、发车和返航逻辑。
+- 不引入完整多箱 Sokoban 全局搜索。
+- 不增加屏幕调试字段。
+
+## Task 1：类别数量校验
+
+**文件**
+
+- `tests/subject2_logic_test.c`
+- `project/user/inc/subject2_logic.h`
+- `project/user/src/subject2_logic.c`
+
+1. 先写失败测试：
+   - 两个 class 8 箱子和两个 class 8 目标返回匹配。
+   - `box={8,8}`、`target={8}` 返回不匹配。
+   - 任一对象 `recognized=0` 返回不匹配。
+   - 任一类别越界返回不匹配。
+   - 空对象集合返回不匹配。
+2. 新增并实现：
 
 ```c
 uint8 subject2_object_class_counts_match(
-    const subject2_object_struct *boxes, uint8 box_count,
-    const subject2_object_struct *targets, uint8 target_count);
+    const subject2_object_struct *boxes,
+    uint8 box_count,
+    const subject2_object_struct *targets,
+    uint8 target_count);
 ```
 
-同时验证 `2 个 class 8 箱子 / 1 个 class 8 目标` 返回不匹配，存在未识别对象也返回不匹配。
-
-- [ ] **Step 2: 运行测试确认 RED**
-
-Run: `powershell -ExecutionPolicy Bypass -File tests/run_subject2_logic_test.ps1`
-
-Expected: 编译失败，提示 `subject2_object_class_counts_match` 尚未定义。
-
-- [ ] **Step 3: 实现最小类别计数校验**
-
-在 `subject2_logic.c` 使用两个固定数组统计类别：
-
-```c
-uint8 box_counts[SUBJECT2_CLASS_COUNT] = {0};
-uint8 target_counts[SUBJECT2_CLASS_COUNT] = {0};
-```
-
-任一对象未识别、类别越界、总数为零或任一类别数量不同都返回 `0`；其余返回 `1`。
-
-- [ ] **Step 4: 写异常类别局部失效的失败测试**
-
-新增接口：
+3. 新增异常类别局部失效接口及测试：
 
 ```c
 void subject2_invalidate_mismatched_classes(
-    subject2_object_struct *boxes, uint8 box_count,
-    subject2_object_struct *targets, uint8 target_count,
-    uint8 *need_box_scan, uint8 *need_target_scan);
+    subject2_object_struct *boxes,
+    uint8 box_count,
+    subject2_object_struct *targets,
+    uint8 target_count,
+    uint8 *need_box_scan,
+    uint8 *need_target_scan);
 ```
 
-测试 `box={8,8,3,5}`、`target={8,3,3,5}`：类别 3 和 8 的相关对象全部变为未识别；数量一致的类别 5 保持不变。每个被失效对象必须重置 `class_id` 和 `tried_observation_mask`。
-
-- [ ] **Step 5: 运行测试确认 RED，再实现并确认 GREEN**
-
-Run: `powershell -ExecutionPolicy Bypass -File tests/run_subject2_logic_test.ps1`
-
-Expected before implementation: FAIL。实现后所有逻辑测试 PASS，且 GCC 无警告。
-
-### Task 2: 重复类别 ART 对象协调
-
-**Files:**
-- Modify: `tests/subject2_logic_test.c`
-- Modify: `project/user/inc/subject2_logic.h`
-- Modify: `project/user/src/subject2_logic.c`
-
-- [ ] **Step 1: 定义对象级同步结果字段并写失败测试**
-
-扩展 `subject2_sync_update_struct`：
-
-```c
-uint8 active_box_valid;
-uint16 active_box_cell;
-```
-
-把协调接口改为对象级参数：
-
-```c
-subject2_sync_result_enum subject2_reconcile_objects(
-    const map_source_struct *source,
-    subject2_object_struct box_objects[MAX_BOXES], uint8 *box_count,
-    subject2_object_struct target_objects[MAX_BOXES], uint8 *target_count,
-    uint16 active_box_cell, uint16 active_target_cell,
-    subject2_sync_update_struct *update);
-```
-
-测试场景：两个 `class 8` 箱子和两个 `class 8` 目标，其中一对消失。期望剩余箱子仍为 `class 8`，`completed_count=1`，不要求区分同类实例。
-
-- [ ] **Step 2: 运行测试确认 RED**
-
-Run: `powershell -ExecutionPolicy Bypass -File tests/run_subject2_logic_test.ps1`
-
-Expected: 旧 binding 签名无法满足新调用或结果错误。
-
-- [ ] **Step 3: 实现目标按格继承**
-
-对每个新目标格：
+对箱子数与目标数不同的类别，两侧该类别的已识别对象全部重置为：
 
 ```text
-旧目标同格存在 -> 复制旧对象
-没有旧目标同格 -> 创建 recognized=0 的新目标对象并 need_target_scan=1
+recognized=0
+class_id=SUBJECT2_INVALID_CLASS
+tried_observation_mask=0
 ```
 
-`completed_count = old_target_count - new_target_count`；不再写 `binding.completed`。
+数量一致的其他类别保持不变。已有未识别对象只设置对应扫描标志，不得被误判为匹配。
 
-- [ ] **Step 4: 写箱子类别缺额恢复测试**
+4. 运行 `tests/run_subject2_logic_test.ps1`，确认先 RED、实现后 GREEN。
 
-覆盖以下用例：
+## Task 2：扫描状态机接受重复类别
 
-```text
-同类两个箱子交换位置 -> SYNC_OK，均保持同类
-一个未匹配箱子且只有 class 8 缺额 -> 自动赋 class 8
-两个未匹配箱子但缺额类别为 {3,8} -> SYNC_RESCAN，只失效未匹配箱子
-已完成箱子旧格被剩余同类箱子占用 -> 不继承已完成对象身份
-```
+**文件**
 
-- [ ] **Step 5: 实现按剩余目标数量恢复箱子类别**
+- `tests/subject2_scan_test.c`
+- `project/user/src/subject2.c`
 
-算法顺序固定为：
+1. 先写失败测试：两箱两目标均识别为同一类别，第二个同类结果必须 ACK，不进入 View Backoff，扫描最终进入绑定校验。
+2. `subject2_tick_classify()` 分类成功后直接写当前 `box_objects[]` 或 `target_objects[]`，不调用单实例 bind API。
+3. `subject2_tick_validate()` 改用对象类别数量校验。
+4. 数量不匹配时调用局部失效接口，并复用现有 BScan/TScan 路径重新识别；保留当前一次校验重试边界，第二次仍不一致才报 `E:BSet`。
+5. 回归分类超时、回退观察、恢复发车航向和唯一类别场景。
 
-```text
-统计剩余已识别目标的 required_count[class]
-原格匹配箱子在不超过 required_count[class] 时继承类别
-计算 assigned_count[class] 与 deficit[class]
-只有一个类别存在缺额 -> 所有未匹配箱子赋该类别
-多个类别存在缺额 -> 未匹配箱子标记未识别并返回 RESCAN
-```
+## Task 3：动态同类配对
 
-若活动箱原格仍存在，设置 `active_box_valid=1`。若活动箱原格消失但只有一个可对应的新箱子，也更新 `active_box_cell`；同类多个实例无法区分但类别已确定时不报错，后续重试可重新选择同类箱子。
+**文件**
 
-- [ ] **Step 6: 运行逻辑测试确认 GREEN**
+- `tests/subject2_logic_test.c`
+- `tests/subject2_scan_test.c`
+- `project/user/inc/subject2_logic.h`
+- `project/user/src/subject2_logic.c`
+- `project/user/src/subject2.c`
 
-Run: `powershell -ExecutionPolicy Bypass -File tests/run_subject2_logic_test.ps1`
-
-Expected: 所有旧的有效同步语义和新增重复类别用例 PASS。
-
-### Task 3: 分类与数量校验状态机
-
-**Files:**
-- Modify: `tests/subject2_scan_test.c`
-- Modify: `project/user/src/subject2.c`
-
-- [ ] **Step 1: 写第二个同类识别结果被接受的失败测试**
-
-构造两箱两目标地图，依次给两个箱子返回同一个类别、两个目标返回同一个类别。期望：
-
-```text
-第二个同类结果发送 VISION_ACK
-不进入 View Backoff
-全部扫描后进入绑定校验
-```
-
-- [ ] **Step 2: 运行测试确认 RED**
-
-Run: `powershell -ExecutionPolicy Bypass -File tests/run_subject2_scan_test.ps1`
-
-Expected: 第二个同类结果被 `subject2_bind_box/target` 拒绝并触发回退。
-
-- [ ] **Step 3: 分类成功直接写对象**
-
-删除 `subject2_tick_classify()` 对 `subject2_bind_box/target()` 的调用。确认分类后直接设置当前对象的 `class_id/recognized`，保留现有 ACK、最近识别显示和回退返回流程。
-
-- [ ] **Step 4: 用类别数量替换 binding 校验**
-
-`subject2_tick_validate()` 改用 `subject2_object_class_counts_match()`。数量不匹配时调用 `subject2_invalidate_mismatched_classes()`，并按 `need_box_scan/need_target_scan` 进入现有局部扫描；保留 `SUBJECT2_VALIDATION_MAX_RETRIES`。
-
-- [ ] **Step 5: 运行扫描测试确认 GREEN**
-
-Run: `powershell -ExecutionPolicy Bypass -File tests/run_subject2_scan_test.ps1`
-
-Expected: 重复类别扫描通过；原唯一类别、分类超时、回退和恢复航向测试继续 PASS。
-
-### Task 4: 动态同类配对与具体目标重试
-
-**Files:**
-- Modify: `tests/subject2_scan_test.c`
-- Modify: `project/user/src/subject2.c`
-
-- [ ] **Step 1: 写最短同类组合选择的失败测试**
-
-使用两个 `class 8` 箱子和两个 `class 8` 目标，构造只有交叉组合或其中一个组合动作更短的地图。完成扫描后调用选择状态，验证 executor 使用最短可行组合对应的起始箱子格和目标格。
-
-- [ ] **Step 2: 运行测试确认 RED**
-
-Run: `powershell -ExecutionPolicy Bypass -File tests/run_subject2_scan_test.ps1`
-
-Expected: 旧代码每类只尝试一个 binding，无法选择正确组合。
-
-- [ ] **Step 3: 实现箱子乘目标的候选枚举**
-
-`subject2_tick_select_push()` 双层遍历：
-
-```c
-for(box_index = 0; box_index < box_object_count; box_index++)
-for(target_index = 0; target_index < target_object_count; target_index++)
-```
-
-只对已识别且类别相同的组合调用 `solve_bound_box_path()`，按 `action_count` 选择最短结果。保存：
+1. 先写失败测试，覆盖：
+   - 两个 class 8 箱子与两个 class 8 目标选择当前最短可行组合。
+   - 不可达组合被跳过。
+   - 动作数相同时按对象数组顺序稳定选择，保证结果可复现。
+2. 新增纯逻辑选路接口，枚举所有已识别且类别相同的 `box x target` 组合，内部复用 `solve_bound_box_path()`。
+3. 状态机保存具体活动任务：
 
 ```c
 active_class
 active_box_cell
 active_target_cell
+active_box_valid
 ```
 
-- [ ] **Step 4: 写重复类别重试目标固定的失败测试**
+4. 普通选择从所有同类组合中取当前最短路径。
+5. 重试时始终限定 `target.cell == active_target_cell`：
+   - `active_box_valid=1` 时只尝试当前活动箱格。
+   - `active_box_valid=0` 时允许从同类别剩余箱子重新选择。
+6. 明确限制：当前最短配对仍是逐箱贪心，可能不是所有箱子的全局最优组合；每个任务结束后根据 ART 地图重新规划，不在本次增加全局匹配搜索。
 
-模拟推箱未完成并刷新 ART 地图。期望下一次规划仍只考虑 `active_target_cell`，不会切换到另一个同类目标；活动箱能够唯一跟踪时优先使用更新后的 `active_box_cell`。
+## Task 4：对象级 ART 同步
 
-- [ ] **Step 5: 实现具体任务重试**
+**文件**
 
-保留现有 `retry_active_only` 标志，但筛选条件改为：
+- `tests/subject2_logic_test.c`
+- `project/user/inc/subject2_logic.h`
+- `project/user/src/subject2_logic.c`
+
+### 4.1 原子提交
+
+同步函数只操作临时对象数组。只有结果为 `SYNC_OK` 或 `SYNC_RESCAN` 时，`subject2.c` 才提交新数组；`SYNC_AMBIGUOUS` 不得发布部分修改。
+
+### 4.2 目标处理
+
+目标在任务过程中不会移动，只会被上位机消除：
 
 ```text
-target.cell == active_target_cell
-box.class_id == active_class
-active_box_cell 仍存在时优先且只使用该格
-活动箱无法唯一跟踪时允许从同类箱子中重新选择，但目标格不变
+新目标格存在于旧目标列表 -> 继承原类别
+新目标格不在旧目标列表 -> 地图矛盾，SYNC_AMBIGUOUS
+旧目标格消失 -> 以上位机为准，计为对应类别完成一个
 ```
 
-任务完成或目标消失时清除重试限制。
+由剩余目标计算：
 
-- [ ] **Step 6: 运行扫描与 solver 测试确认 GREEN**
-
-Run:
-
-```powershell
-powershell -ExecutionPolicy Bypass -File tests/run_subject2_scan_test.ps1
-powershell -ExecutionPolicy Bypass -File tests/run_solver_navigation_test.ps1
+```c
+required_count[class_id]
 ```
 
-Expected: 重复类别最短组合与固定目标重试用例 PASS，原求解器用例不变。
+这组数量是恢复剩余箱子类别的权威配额。
 
-### Task 5: 状态机切换到对象级 ART 同步
+### 4.3 箱子处理
 
-**Files:**
-- Modify: `tests/subject2_scan_test.c`
-- Modify: `project/user/src/subject2.c`
+按以下固定顺序处理：
 
-- [ ] **Step 1: 写重复类别完成与局部重扫失败测试**
+1. 新旧箱子同格且旧对象已识别时，只有该类别尚未超过 `required_count[class]` 才继承类别。
+2. 统计已分配数量 `assigned_count[class]`。
+3. 计算 `deficit[class] = required_count[class] - assigned_count[class]`。
+4. 若只剩一个类别有缺额，且缺额总数等于未匹配箱子数，则把所有未匹配箱子恢复为该类别。
+5. 若多个类别同时有缺额，无法从几何状态判断实例类别，只把未匹配箱子标为未识别并返回 `SYNC_RESCAN`。
+6. 不得因为同类实例身份无法区分而报错；只要类别配额唯一即可继续。
 
-覆盖：
+### 4.4 活动任务跟踪
 
-```text
-两个 class 8 中完成一个 -> 剩余 class 8 继续规划
-两个同类箱子位置交换 -> 不报 E:Track
-class 3 与 class 8 的未匹配箱子同时变化 -> 只进入 BScan 重识别未匹配箱子
-B=0,T=0 -> 进入返航
-```
+- `active_target_cell` 已消失：当前或其他任务已经被上位机完成，清除重试限制并基于最新 ART 地图重新规划。
+- `active_target_cell` 仍存在且 B/T 总数未减少：进入 Push Retry，目标格保持不变。
+- 活动箱旧格仍有箱子且类别配额允许：`active_box_valid=1`。
+- 活动箱旧格消失，但只有一个未匹配箱子可对应活动类别：更新 `active_box_cell` 并保持有效。
+- 无法唯一确定活动箱时：`active_box_valid=0`，不报错；重试时重新选择同类箱子。
+- 任意非活动目标意外消失也以上位机为准，不要求重新识别已经能够由类别配额唯一恢复的对象。
 
-- [ ] **Step 2: 运行测试确认 RED**
+### 4.5 必测场景
 
-Run: `powershell -ExecutionPolicy Bypass -File tests/run_subject2_scan_test.ps1`
+- 两个 class 8 中完成一个，剩余 class 8 继续规划。
+- 两个同类箱子位置变化，不因实例不可区分报错。
+- 一个未匹配箱子且只有 class 8 缺额，自动恢复 class 8。
+- 两个未匹配箱子且缺额类别为 class 3 和 class 8，只重扫未匹配箱子。
+- 活动目标未消失且活动箱唯一移动，更新 `active_box_cell`。
+- 活动目标已消失，清除 Push Retry。
+- 非活动目标意外消失，接受 ART 结果并重规划。
+- `B=0,T=0` 正常进入返航。
 
-Expected: `subject2_accept_confirmed_map()` 和 `subject2_finish_scan_map_sync()` 仍依赖 binding，新增用例失败。
+## Task 5：状态机接入对象级同步
 
-- [ ] **Step 3: 切换两个同步入口**
+**文件**
 
-两个入口都复制临时对象数组并调用对象级 `subject2_reconcile_objects()`。只有 `SYNC_OK/RESCAN` 时提交；`RESCAN` 继续复用现有 `VSync -> CENTER_REQ -> BScan/TScan` 路径。
+- `tests/subject2_scan_test.c`
+- `project/user/src/subject2.c`
 
-同步提交后：
+1. 先写端到端失败测试：重复类别完成、Push Retry 固定目标、非活动目标意外消失、局部箱子重扫和全部完成返航。
+2. `subject2_accept_confirmed_map()` 与 `subject2_finish_scan_map_sync()` 都调用同一个对象级同步接口。
+3. ART 地图稳定且 B/T 合法后，目标消失优先于 MCU 旧任务判断；不得因为旧 `active_class` 不一致拒绝上位机结果。
+4. `SYNC_RESCAN` 复用现有 `VSync -> CENTER_REQ -> BScan/TScan`，只扫描失效对象。
+5. 初始中心、段末中心、推箱前中心和恢复航向流程保持不变。
 
-```text
-更新 box_objects/target_objects 及数量
-按 sync_update 更新 active_box_cell
-数量未减少 -> retry_active_only=1
-活动目标消失或数量减少 -> retry_active_only=0
-全部对象消失 -> 返航
-```
+## Task 6：删除旧单实例 binding 路径
 
-- [ ] **Step 4: 运行状态机测试确认 GREEN**
-
-Run: `powershell -ExecutionPolicy Bypass -File tests/run_subject2_scan_test.ps1`
-
-Expected: 超时宏开启和关闭两轮全部 PASS。
-
-### Task 6: 删除旧 binding 路径并完成验证
-
-**Files:**
-- Modify: `project/user/inc/subject2_logic.h`
-- Modify: `project/user/src/subject2_logic.c`
-- Modify: `project/user/src/subject2.c`
-- Modify: `tests/subject2_logic_test.c`
-- Modify: `tests/subject2_scan_test.c`
-- Modify: `docs/superpowers/specs/2026-07-15-subject2-duplicate-classes-design.md`
-
-- [ ] **Step 1: 删除本次迁移产生的旧接口孤儿**
-
-删除：
+对象级扫描、选路和同步测试全部通过后再删除：
 
 ```text
 subject2_binding_struct
@@ -312,40 +224,43 @@ subject2_bind_box
 subject2_bind_target
 subject2_binding_sets_match
 subject2_track_active_box
-subject2.c 的 bindings[]
+subject2.c 中的 bindings[]
 ```
 
-搜索确认无残留：
-
-Run: `rg -n "subject2_binding|subject2_bind_|subject2_track_active_box|bindings\[" project/user tests`
-
-Expected: 无运行时代码或测试引用。
-
-- [ ] **Step 2: 同步规格中的最终接口名称**
-
-检查设计文档与实际 `subject2_logic.h` 一致，不加入实现快照或临时调试字段。
-
-- [ ] **Step 3: 运行全量 C 主机测试**
-
-Run:
+搜索确认无运行时代码或测试残留：
 
 ```powershell
-Get-ChildItem tests -Filter "run_*.ps1" | ForEach-Object {
-    powershell -ExecutionPolicy Bypass -File $_.FullName
-    if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-}
+rg -n "subject2_binding|subject2_bind_|subject2_track_active_box|bindings\[" project/user tests
 ```
 
-Expected: 全部 PASS。
+不要在迁移中途让新对象逻辑与旧 binding 校验同时生效。
 
-- [ ] **Step 4: 运行 Keil 编译**
+## 验证
 
-Run: `D:\Keil_v5\UV4\UV4.exe -b "C:\Users\ye\Desktop\rt1064\project\mdk\rt1064.uvprojx"`
+每个任务均遵循“先失败测试，再最小实现，再回归测试”。最终执行：
 
-Expected: 构建日志包含 `0 Error(s), 0 Warning(s)`。
+```powershell
+powershell -ExecutionPolicy Bypass -File tests/run_subject2_logic_test.ps1
+powershell -ExecutionPolicy Bypass -File tests/run_subject2_scan_test.ps1
+powershell -ExecutionPolicy Bypass -File tests/run_solver_navigation_test.ps1
 
-- [ ] **Step 5: 最终静态检查**
+Get-ChildItem tests -Filter "run_*.ps1" | ForEach-Object {
+    powershell -ExecutionPolicy Bypass -File $_.FullName
+    if($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+}
 
-Run: `git diff --check`
+D:\Keil_v5\UV4\UV4.exe -b "C:\Users\ye\Desktop\rt1064\project\mdk\rt1064.uvprojx"
+git diff --check
+```
 
-Expected: 无空白错误；修改只涉及重复类别规格范围，未改变 UART、PID、BFS 或 OpenART 脚本。
+验收标准：
+
+- 重复类别扫描不会因第二个同类结果进入回退。
+- 每类别箱子数量必须与目标数量一致，未识别对象不能通过校验。
+- 同类对象选择当前最短可行组合。
+- ART 目标消失始终作为完成事实被接受。
+- 重试固定具体目标，不依赖永久箱子实例编号。
+- 多类别无法恢复时只局部重扫，不清空全部绑定结果。
+- 全量主机测试 PASS。
+- Keil `0 Error(s), 0 Warning(s)`。
+- 不改变 UART、OpenART、PID、BFS、发车和返航行为。

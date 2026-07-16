@@ -254,12 +254,6 @@ static void enter_run_mode_page(void)
 
 static void go_home(void)
 {
-    if(0 != art_replan_launch_pending())
-    {
-        // 普通返回只取消“等待 K3 发车”的 ART 待确认状态，不强行停止已经运行的执行器。
-        art_replan_cancel();
-        run_state = "Idle";
-    }
     candidate_mode = run_mode;
     enter_page(MENU_PAGE_HOME);
 }
@@ -491,24 +485,6 @@ static void apply_art_replan_update(const art_replan_update_struct *update)
     }
 }
 
-static uint8 confirm_art_launch_if_pending(void)
-{
-    art_replan_context_struct context;
-    art_replan_update_struct update;
-
-    if(0 == art_replan_launch_pending())
-    {
-        return 0;
-    }
-
-    build_art_replan_context(&context);
-    // 初次 ART 求解成功后必须由 K3 消费待启动标志；若没有待启动请求，
-    // K3 才继续按页面原本的 Resume/Run 语义处理。
-    art_replan_confirm_launch(&context, &update);
-    apply_art_replan_update(&update);
-    return 1;
-}
-
 static void move_cursor(int8 delta)
 {
     uint8 count = page_item_count(current_page);
@@ -595,8 +571,7 @@ static void handle_run_event(menu_key_event_enum event)
     }
     else if(MENU_KEY_EVENT_K3_SHORT == event)
     {
-        if((0 == confirm_art_launch_if_pending()) &&
-           (EXEC_STATE_PAUSED == executor_get_state()))
+        if(EXEC_STATE_PAUSED == executor_get_state())
         {
             executor_resume();
             run_state = "Running";
@@ -810,7 +785,10 @@ static void execute_current_selection(void)
 
             if(0 != last_solve_source_valid)
             {
-                (void)map_find_car(&last_solve_source, &exec_start_row, &exec_start_col, 0);
+                if(0 == map_find_car(&last_solve_source, &exec_start_row, &exec_start_col, 0))
+                {
+                    return;
+                }
             }
 
             executor_start(last_result.waypoints, last_result.waypoint_count,
@@ -914,7 +892,6 @@ static void build_execute_view(screen_execute_view_struct *view)
     view->start_col = exec_start_col;
     view->pose_x_cm = pose->x_cm;
     view->pose_y_cm = pose->y_cm;
-    view->art_launch_pending = art_replan_launch_pending();
     view->recognition_valid =
         subject2_get_last_recognition(&view->recognition_is_target,
                                       &view->recognition_class);
@@ -1052,8 +1029,7 @@ static void handle_execute_event(menu_key_event_enum event)
     switch(event)
     {
         case MENU_KEY_EVENT_K3_SHORT:
-            if((0 == confirm_art_launch_if_pending()) &&
-               (EXEC_STATE_PAUSED == executor_get_state()))
+            if(EXEC_STATE_PAUSED == executor_get_state())
             {
                 executor_resume();
                 run_state = "Running";

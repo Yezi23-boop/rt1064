@@ -29,7 +29,7 @@ uint8 solve_map(const map_source_struct *source, solve_result_struct *result);
 
 /**
  * @brief 求解指定箱子到指定目标的单箱任务。
- * @param[in] source 当前完整字符地图。
+ * @param[in] source 当前完整字符地图；MCU 内部允许 `*` 表示箱子站在目标上。
  * @param[in] box_cell 必须与地图中某个 `B` 坐标一致。
  * @param[in] target_cell 必须与地图中某个 `T` 坐标一致。
  * @param[out] result 单任务动作和 waypoint；最后一个 waypoint 标记 task_end。

@@ -37,7 +37,7 @@ static uint8 map_load(const map_source_struct *source, map_state_struct *map, so
     memset(map, 0, sizeof(*map));
     map->player = INVALID_STATE;
 
-    // 求解器和 OpenART/离线地图共用字符协议：+ 表示小车站在目标上。
+    // + 表示小车站在目标上；* 是 MCU 内部恢复出的“箱子站在目标上”。
     // 动态对象解析到 player/boxes/targets 后，grid 只保留静态障碍，便于推箱过程中更新箱子数组。
     for(row = 0; row < MAP_ROWS; row++)
     {
@@ -69,6 +69,17 @@ static uint8 map_load(const map_source_struct *source, map_state_struct *map, so
                     }
                     map->targets[map->target_count++] = map_cell_index(row, col);
                 }
+            }
+            else if(MAP_BOX_ON_TARGET == value)
+            {
+                if((MAX_BOXES <= map->box_count) ||
+                   (MAX_BOXES <= map->target_count))
+                {
+                    set_message(result, "Too many overlap cells");
+                    return 0;
+                }
+                map->boxes[map->box_count++] = map_cell_index(row, col);
+                map->targets[map->target_count++] = map_cell_index(row, col);
             }
             else if('B' == value)
             {
@@ -121,6 +132,71 @@ static uint8 cell_has_other_box(const map_state_struct *map, uint16 cell, uint8 
         }
     }
     return 0;
+}
+
+static uint8 cells_are_neighbors(uint16 left, uint16 right)
+{
+    int16 row_delta = (int16)map_cell_row(left) - (int16)map_cell_row(right);
+    int16 col_delta = (int16)map_cell_col(left) - (int16)map_cell_col(right);
+
+    if(row_delta < 0)
+    {
+        row_delta = -row_delta;
+    }
+    if(col_delta < 0)
+    {
+        col_delta = -col_delta;
+    }
+    return ((row_delta <= 1) && (col_delta <= 1)) ? 1u : 0u;
+}
+
+static uint8 cell_is_near_any_box(const map_state_struct *map,
+                                  uint16 cell,
+                                  uint16 selected_box_cell,
+                                  uint8 selected_box)
+{
+    uint8 index;
+
+    if(0u != cells_are_neighbors(cell, selected_box_cell))
+    {
+        return 1u;
+    }
+    for(index = 0u; index < map->box_count; index++)
+    {
+        if((index != selected_box) &&
+           (0u != cells_are_neighbors(cell, map->boxes[index])))
+        {
+            return 1u;
+        }
+    }
+    return 0u;
+}
+
+static uint8 source_cell_is_near_box(const map_source_struct *source, uint16 cell)
+{
+    int16 row;
+    int16 col;
+    int16 center_row = (int16)map_cell_row(cell);
+    int16 center_col = (int16)map_cell_col(cell);
+    char value;
+
+    for(row = center_row - 1; row <= center_row + 1; row++)
+    {
+        for(col = center_col - 1; col <= center_col + 1; col++)
+        {
+            if((row < 0) || (row >= MAP_ROWS) ||
+               (col < 0) || (col >= MAP_COLS))
+            {
+                continue;
+            }
+            value = source->rows[row][col];
+            if(('B' == value) || (MAP_BOX_ON_TARGET == value))
+            {
+                return 1u;
+            }
+        }
+    }
+    return 0u;
 }
 
 static uint8 cell_is_free_for_player(const map_state_struct *map, uint16 cell, uint16 selected_box_cell, uint8 selected_box)
@@ -354,7 +430,9 @@ static uint8 action_range_has_separator(const solve_result_struct *result, uint1
 static uint8 result_append_waypoint(solve_result_struct *result,
                                     uint16 player_cell,
                                     char action,
-                                    uint8 center_correct_before)
+                                    uint8 center_correct_before,
+                                    uint8 near_box_axis_lock,
+                                    uint8 pre_push_extra_gap)
 {
     uint16 last_index;
     uint16 action_index;
@@ -372,6 +450,7 @@ static uint8 result_append_waypoint(solve_result_struct *result,
         // 连续同方向、同类型动作合并为一个 waypoint，减少屏幕回放点数和后续底盘路径点压力。
         // 合并前检查 action 区间，保证 `|` 分隔的任务边界不会被吞掉。
         if((0 == center_correct_before) &&
+           (near_box_axis_lock == result->waypoints[last_index].near_box_axis_lock) &&
            (0 == action_range_has_separator(result, result->waypoints[last_index].action_end, action_index)) &&
            (0 != same_waypoint_run(result->waypoints[last_index].action, action)))
         {
@@ -396,6 +475,8 @@ static uint8 result_append_waypoint(solve_result_struct *result,
     result->waypoints[result->waypoint_count].action_end = result->action_count;
     result->waypoints[result->waypoint_count].task_end = 0;
     result->waypoints[result->waypoint_count].center_correct_before = center_correct_before;
+    result->waypoints[result->waypoint_count].near_box_axis_lock = near_box_axis_lock;
+    result->waypoints[result->waypoint_count].pre_push_extra_gap = pre_push_extra_gap;
     result->waypoint_count++;
     return 1;
 }
@@ -434,6 +515,8 @@ static uint8 apply_path_to_runtime(map_state_struct *map, uint8 box_index, uint8
     int8 col_delta;
     char action;
     uint8 center_correct_before;
+    uint8 near_box_axis_lock;
+    uint8 pre_push_extra_gap;
 
     // BFS 只返回动作串；这里把动作重放到运行态地图，作为多箱拆解后下一轮 BFS 的新起点。
     for(i = 0; i < path_len; i++)
@@ -476,6 +559,28 @@ static uint8 apply_path_to_runtime(map_state_struct *map, uint8 box_index, uint8
             box = next_box;
         }
 
+        near_box_axis_lock = 0u;
+        pre_push_extra_gap = 0u;
+        if(0 == action_is_push(action))
+        {
+            near_box_axis_lock =
+                ((0u != cell_is_near_any_box(map, player, box, box_index)) ||
+                 (0u != cell_is_near_any_box(map, next_player, box, box_index))) ? 1u : 0u;
+        }
+        else if((0u == i) ||
+                (0 == action_is_push(path[i - 1u])) ||
+                (0 != action_changes_direction(path[i - 1u], action)))
+        {
+            uint16 extra_cell;
+
+            if((0 != step_cell(player, (int8)-row_delta, (int8)-col_delta,
+                               &extra_cell)) &&
+               (0 != cell_is_free_for_player(map, extra_cell, box, box_index)))
+            {
+                pre_push_extra_gap = 1u;
+            }
+        }
+
         /* 普通转向仍在新段前校正；推箱链则提前到最后一个普通靠近动作前，
          * 避免车已到箱子相邻格后才做视觉小修。 */
         center_correct_before = ((0u < i) &&
@@ -505,7 +610,10 @@ static uint8 apply_path_to_runtime(map_state_struct *map, uint8 box_index, uint8
         {
             return 0;
         }
-        if(0 == result_append_waypoint(result, player, action, center_correct_before))
+        if(0 == result_append_waypoint(result, player, action,
+                                       center_correct_before,
+                                       near_box_axis_lock,
+                                       pre_push_extra_gap))
         {
             return 0;
         }
@@ -803,7 +911,10 @@ uint8 solve_navigation_path(const map_source_struct *source,
            (0 == result_append_waypoint(
                result, next_cell, action,
                ((0u < path_index) &&
-                (0 != action_changes_direction(previous_action, action))) ? 1u : 0u)))
+                (0 != action_changes_direction(previous_action, action))) ? 1u : 0u,
+               ((0u != source_cell_is_near_box(source, current_cell)) ||
+                (0u != source_cell_is_near_box(source, next_cell))) ? 1u : 0u,
+               0u)))
         {
             set_message(result, "Navigation output failed");
             return 0;

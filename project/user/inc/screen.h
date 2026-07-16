@@ -86,7 +86,6 @@ typedef struct
     uint8 start_col;                    /**< 执行起点列号，范围 0..MAP_COLS-1。 */
     float pose_x_cm;                    /**< 相对执行起点的 X 位移，单位 cm，右移为正。 */
     float pose_y_cm;                    /**< 相对执行起点的 Y 位移，单位 cm，前进为正。 */
-    uint8 art_launch_pending;           /**< 非 0 表示等待 K3 人工确认后再发车。 */
     uint8 art_player_enabled;           /**< 非 0 表示当前显示 ART 再识别车格。 */
     uint8 art_player_valid;             /**< 非 0 表示 ART 地图中恰好有一个 `C`。 */
     uint8 art_player_count;             /**< ART 地图中 `C` 的数量，用于诊断识别歧义。 */

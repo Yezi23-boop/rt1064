@@ -21,11 +21,13 @@
 #define MAX_TOTAL_ACTIONS       (1024)
 /** @brief 屏幕/执行层路径点上限，单位为格点。 */
 #define MAX_WAYPOINTS           (256)
+/** @brief MCU 内部复合格：箱子暂时站在目标上，OpenART 不直接发送该字符。 */
+#define MAP_BOX_ON_TARGET       ('*')
 /**
  * @brief 一张离线地图的只读来源。
  *
  * 地图统一使用 RT 字符：`#` 墙，`.` 空地，`B` 箱子，`T` 目标点，`C` 小车，
- * `+` 小车站在目标上，`X` 炸弹/障碍。
+ * `+` 小车站在目标上，`*` 箱子站在目标上，`X` 炸弹/障碍。
  * 地图内容在固件中以常量表保存，Flash 菜单只保存地图编号和模式，不保存整张地图数据。
  *
  * @note `rows` 指向的每行必须在调用期间保持有效；离线地图使用静态常量，
@@ -68,6 +70,8 @@ typedef struct
     uint16 action_end;                  /**< 该 waypoint 覆盖的尾后 action 下标，不包含 `|` 分隔符。 */
     uint8 task_end;                     /**< 1 表示该 waypoint 是当前单箱任务完成点，需要 ART 确认。 */
     uint8 center_correct_before;         /**< 1 表示在方向转折点停车后、执行该 waypoint 前做 ART 中心矫正。 */
+    uint8 near_box_axis_lock;           /**< 1 表示普通移动邻近箱子，世界坐标速度必须单轴输出。 */
+    uint8 pre_push_extra_gap;           /**< 1 表示推箱准备位后方有空间，可在1.5格距离横向对齐。 */
 } waypoint_struct;
 
 /**

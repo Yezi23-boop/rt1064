@@ -95,6 +95,9 @@ float path_pid_update(path_pid_struct *pid, float error, float dt_s);
  */
 float limit_float(float value, float min_value, float max_value);
 
+/** 对不超过 ART_CENTER_SAMPLE_COUNT 个 uint16 样本排序并返回中值。 */
+uint16 median_u16_values(const uint16 *values, uint8 count);
+
 /**
  * @brief 把上层离散运动命令转换为车体归一化运动分量。
  * @param[in] command 离散运动命令。
