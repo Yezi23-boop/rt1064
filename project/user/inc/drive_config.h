@@ -165,7 +165,7 @@
 /** 科目二观察转向最长时间，单位 ms。 */
 #define SUBJECT2_TURN_TIMEOUT_MS (5000u)
 /** 科目二观察完成后 ART yaw 不超过该偏差时只重建基准，不实际转向。 */
-#define SUBJECT2_POST_OBSERVE_YAW_IGNORE_DEG (2.0f)
+#define SUBJECT2_POST_OBSERVE_YAW_IGNORE_DEG (0.5f)
 /** 科目二观察完成后允许实际修正的最大 ART yaw 偏差。 */
 #define SUBJECT2_POST_OBSERVE_YAW_MAX_CORRECT_DEG (6.0f)
 /** 科目二观察完成后等待5帧 ART yaw 的最长时间，单位 ms。 */

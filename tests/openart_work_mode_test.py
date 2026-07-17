@@ -45,8 +45,8 @@ run_expected = {
     "DEBUG_PLAYER_CENTER_ENABLE": False,
     "DEBUG_PLAYER_HEADING_ENABLE": False,
     "DEBUG_OBSERVATION_ENABLE": False,
-    "SHOW_RECTIFIED_VIEW": False,
-    "USE_RECTIFIED_RECOGNITION": False,
+    "SHOW_RECTIFIED_VIEW": True,
+    "USE_RECTIFIED_RECOGNITION": True,
 }
 debug_expected = {
     "DEBUG_ENABLE": True,

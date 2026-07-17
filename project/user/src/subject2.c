@@ -1660,7 +1660,14 @@ static void subject2_tick_post_observe_yaw_fix(subject2_update_struct *update)
 
     if((now_ms - turn_start_ms) >= SUBJECT2_TURN_TIMEOUT_MS)
     {
-        subject2_finish_post_observe_yaw(1u, update);
+        /* 视觉小角修正超时不能把未完成的当前角度重锁成新基准；
+         * 恢复原发车目标后继续比赛，避免后续路径使用漂移后的 yaw 零点。 */
+        set_target_yaw(launch_yaw_deg);
+        subject2_finish_post_observe_yaw(0u, update);
+        if(0 != update)
+        {
+            update->run_state = "VFixTmo";
+        }
     }
     else if(0 != update)
     {
@@ -1696,9 +1703,11 @@ static void subject2_tick_restore_heading(subject2_update_struct *update)
     {
         if(0u != drive_control_is_healthy())
         {
-            drive_control_lock_yaw_and_reset_pose();
-            launch_yaw_deg = get_control_status()->target_yaw;
             subject2_enter_select_push(update);
+            if(0 != update)
+            {
+                update->run_state = "YawKeep";
+            }
         }
         else
         {

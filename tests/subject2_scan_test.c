@@ -140,6 +140,7 @@ void set_target_yaw(float yaw)
 {
     set_target_yaw_count++;
     last_target_yaw = yaw;
+    fake_control_status.target_yaw = yaw;
 }
 void drive_control_start_relative_yaw_correction(float delta_deg)
 {
@@ -1938,7 +1939,7 @@ static uint8 heading_restore_requires_new_continuous_window(void)
     return (SUBJECT2_SELECT_PUSH == subject2_get_state()) ? 1u : 0u;
 }
 
-static uint8 heading_restore_timeout_keeps_current_yaw(void)
+static uint8 heading_restore_timeout_keeps_original_target(void)
 {
     subject2_context_struct context;
     subject2_update_struct update;
@@ -1952,8 +1953,9 @@ static uint8 heading_restore_timeout_keeps_current_yaw(void)
     subject2_tick(&context, &update);
     return ((SUBJECT2_SELECT_PUSH == subject2_get_state()) &&
             (EXEC_STATE_ERROR != fake_executor_state) &&
-            (1u == yaw_rebase_count) &&
-            (0 == strcmp(update.run_state, "Bind"))) ? 1u : 0u;
+            (0u == yaw_rebase_count) &&
+            (fabsf(last_target_yaw - 23.0f) < 0.01f) &&
+            (0 == strcmp(update.run_state, "YawKeep"))) ? 1u : 0u;
 }
 
 static uint8 enter_post_observe_yaw(subject2_context_struct *context,
@@ -1980,7 +1982,7 @@ static uint8 post_observe_yaw_thresholds_and_bias(void)
     uint16 request_count_after_sample;
 
     if(0u == enter_post_observe_yaw(&context, &update, 1.0f)) return 0u;
-    feed_center_yaw(550u, 550u, 177.0f);
+    feed_center_yaw(550u, 550u, 179.5f);
     subject2_tick(&context, &update);
     if((SUBJECT2_SELECT_PUSH != subject2_get_state()) ||
        (1u != yaw_rebase_count) ||
@@ -2057,7 +2059,7 @@ static uint8 post_observe_yaw_fallbacks(void)
             (0u == yaw_rebase_count)) ? 1u : 0u;
 }
 
-static uint8 post_observe_yaw_fix_timeout_rebases(void)
+static uint8 post_observe_yaw_fix_timeout_keeps_original_target(void)
 {
     subject2_context_struct context;
     subject2_update_struct update;
@@ -2069,8 +2071,9 @@ static uint8 post_observe_yaw_fix_timeout_rebases(void)
     fake_time_ms += SUBJECT2_TURN_TIMEOUT_MS;
     subject2_tick(&context, &update);
     return ((SUBJECT2_SELECT_PUSH == subject2_get_state()) &&
-            (1u == yaw_rebase_count) &&
-            (0 == strcmp(update.run_state, "Bind"))) ? 1u : 0u;
+            (0u == yaw_rebase_count) &&
+            (fabsf(last_target_yaw - 23.0f) < 0.01f) &&
+            (0 == strcmp(update.run_state, "VFixTmo"))) ? 1u : 0u;
 }
 
 static uint8 map_change_syncs_scan(void)
@@ -2889,13 +2892,13 @@ int main(void)
     printf("subject3-center-map-check   %s\n", (0u != passed) ? "PASS" : "FAIL");
     passed &= heading_restore_requires_new_continuous_window();
     printf("subject2-home-yaw-stable    %s\n", (0u != passed) ? "PASS" : "FAIL");
-    passed &= heading_restore_timeout_keeps_current_yaw();
+    passed &= heading_restore_timeout_keeps_original_target();
     printf("subject2-home-yaw-timeout   %s\n", (0u != passed) ? "PASS" : "FAIL");
     passed &= post_observe_yaw_thresholds_and_bias();
     printf("subject2-post-yaw-threshold %s\n", (0u != passed) ? "PASS" : "FAIL");
     passed &= post_observe_yaw_fallbacks();
     printf("subject2-post-yaw-fallback  %s\n", (0u != passed) ? "PASS" : "FAIL");
-    passed &= post_observe_yaw_fix_timeout_rebases();
+    passed &= post_observe_yaw_fix_timeout_keeps_original_target();
     printf("subject2-post-yaw-timeout   %s\n", (0u != passed) ? "PASS" : "FAIL");
     passed &= map_change_syncs_scan();
     printf("subject2-scan-map-change    %s\n", (0u != passed) ? "PASS" : "FAIL");
