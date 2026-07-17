@@ -19,7 +19,8 @@ try
             "-DART_CENTER_TIMEOUT_FALLBACK_ENABLE=$fallback" `
             -I (Join-Path $root "tests\host") `
             -I (Join-Path $root "project\user\inc") `
-            (Join-Path $root "project\user\src\art_observation.c") `
+        (Join-Path $root "project\user\src\art_observation.c") `
+        (Join-Path $root "project\user\src\competition_flow.c") `
             (Join-Path $root "project\user\src\art_replan.c") `
             (Join-Path $root "project\user\src\motion_math.c") `
             (Join-Path $root "project\user\src\map_utils.c") `

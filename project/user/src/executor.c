@@ -19,6 +19,13 @@ typedef enum
     PRE_PUSH_BOX_APPROACH
 } pre_push_box_phase_enum;
 
+typedef enum
+{
+    PUSH_BOUNDARY_STOP_IDLE = 0,
+    PUSH_BOUNDARY_STOP_REQUESTED,
+    PUSH_BOUNDARY_STOP_REACHED
+} push_boundary_stop_state_enum;
+
 /* 执行器状态由主循环启动/停止、PIT_CH1 20ms 推进共同访问；
  * 这里不做阻塞等待，ART 同步等待交给主循环处理。 */
 static executor_state_enum exec_state = EXEC_STATE_IDLE; // 主循环查询、PIT_CH1 更新；非 IDLE 时底盘可能被执行器占用。
@@ -83,6 +90,10 @@ static float last_art_center_diff_cm = 0.0f;
 static uint8 position_correction_active = 0u;
 static float position_correction_target_x_cm = 0.0f;
 static float position_correction_target_y_cm = 0.0f;
+static push_boundary_stop_state_enum push_boundary_stop_state = PUSH_BOUNDARY_STOP_IDLE;
+static float push_boundary_target_x_cm = 0.0f;
+static float push_boundary_target_y_cm = 0.0f;
+static char push_boundary_action = '\0';
 
 /* 地图 row 向下增大，而本地物理 Y 约定前进为正，因此 row 差值需要取反。 */
 static void grid_to_physical(uint8 row, uint8 col, float *x_cm, float *y_cm)
@@ -104,6 +115,15 @@ void executor_init(void)
 {
     path_pid_init(&x_pid, PATH_KP, PATH_KI, PATH_KD, PATH_MAX_SPEED, PATH_MAX_INTEGRAL);
     path_pid_init(&y_pid, PATH_KP, PATH_KI, PATH_KD, PATH_MAX_SPEED, PATH_MAX_INTEGRAL);
+    push_boundary_stop_state = PUSH_BOUNDARY_STOP_IDLE;
+}
+
+static void executor_reset_push_boundary_stop(void)
+{
+    push_boundary_stop_state = PUSH_BOUNDARY_STOP_IDLE;
+    push_boundary_target_x_cm = 0.0f;
+    push_boundary_target_y_cm = 0.0f;
+    push_boundary_action = '\0';
 }
 
 static void executor_reset_segment_state(void)
@@ -450,6 +470,7 @@ void executor_start(const waypoint_struct *waypoints, uint16 count,
     uint32 primask;
 
     primask = interrupt_global_disable();
+    executor_reset_push_boundary_stop();
 
     if (waypoints == NULL || count == 0)
     {
@@ -499,6 +520,7 @@ static void executor_start_position_correction_locked(float target_x_cm,
     position_correction_target_y_cm = target_y_cm;
     position_correction_active = 1u;
     exec_error = EXEC_ERROR_NONE;
+    executor_reset_push_boundary_stop();
     executor_reset_segment_state();
     exec_state = EXEC_STATE_RUNNING;
 }
@@ -551,6 +573,7 @@ void executor_stop(void)
     art_sync_enabled = 0;
     position_correction_active = 0u;
     last_completed_action = '\0';
+    executor_reset_push_boundary_stop();
     executor_reset_segment_state();
     interrupt_global_enable(primask);
 }
@@ -575,6 +598,24 @@ uint8 executor_art_sync_pending(void)
 uint8 executor_art_pre_push_pending(void)
 {
     return ((EXEC_STATE_RUNNING == exec_state) && (0 != pre_push_center_waiting)) ? 1u : 0u;
+}
+
+uint8 executor_get_pre_push_wait_cell(uint8 *row, uint8 *col)
+{
+    uint8 valid = 0u;
+    uint32 primask = interrupt_global_disable();
+
+    if((0 != row) && (0 != col) &&
+       (EXEC_STATE_RUNNING == exec_state) &&
+       (0u != pre_push_center_waiting) &&
+       (0 != exec_waypoints) && (current_step < exec_waypoint_count))
+    {
+        *row = exec_waypoints[current_step].row;
+        *col = exec_waypoints[current_step].col;
+        valid = 1u;
+    }
+    interrupt_global_enable(primask);
+    return valid;
 }
 
 uint8 executor_center_requires_push_alignment(void)
@@ -680,6 +721,7 @@ void executor_finish_done(void)
     exec_error = EXEC_ERROR_NONE;
     exec_state = EXEC_STATE_DONE;
     position_correction_active = 0u;
+    executor_reset_push_boundary_stop();
     executor_reset_segment_state();
     interrupt_global_enable(primask);
 }
@@ -688,10 +730,16 @@ void executor_set_error(executor_error_enum error)
 {
     uint32 primask = interrupt_global_disable();
 
+    if((EXEC_STATE_ERROR == exec_state) && (EXEC_ERROR_NONE != exec_error))
+    {
+        interrupt_global_enable(primask);
+        return;
+    }
     stop_motion();
     exec_error = error;
     exec_state = EXEC_STATE_ERROR;
     position_correction_active = 0u;
+    executor_reset_push_boundary_stop();
     executor_reset_segment_state();
     interrupt_global_enable(primask);
 }
@@ -1386,6 +1434,159 @@ static uint16 executor_continuous_target_step(void)
     return target_step;
 }
 
+static float executor_nearest_grid_center(float value_cm, char direction)
+{
+    float grid_value = value_cm / GRID_SIZE_CM;
+
+    /* Host Sync 需要停在当前运动方向前方的下一个格中心，不能取几何上的
+     * “最近中心”，否则动作尚未过半格时会把车反向拉回。 */
+    if(('r' == direction) || ('u' == direction))
+    {
+        return (floorf(grid_value) + 1.0f) * GRID_SIZE_CM;
+    }
+    return (ceilf(grid_value) - 1.0f) * GRID_SIZE_CM;
+}
+
+uint8 executor_request_stop_after_current_push(void)
+{
+    const drive_pose_struct *pose;
+    const waypoint_struct *target_wp;
+    uint16 target_step;
+    uint16 step;
+    uint8 contains_push = 0u;
+    uint8 accepted = 0u;
+    float final_x_cm;
+    float final_y_cm;
+    char direction;
+    uint32 primask = interrupt_global_disable();
+
+    if((PUSH_BOUNDARY_STOP_REQUESTED == push_boundary_stop_state) ||
+       (PUSH_BOUNDARY_STOP_REACHED == push_boundary_stop_state))
+    {
+        accepted = 1u;
+        goto done;
+    }
+    if((EXEC_STATE_RUNNING != exec_state) ||
+       (0 == exec_waypoints) || (current_step >= exec_waypoint_count) ||
+       (0u != position_correction_active) ||
+       (0u != segment_waiting_art) ||
+       (0u != pre_push_center_waiting) ||
+       (0u != pre_push_alignment_active) ||
+       (PRE_PUSH_BOX_IDLE != pre_push_box_phase))
+    {
+        goto done;
+    }
+
+    target_step = executor_continuous_target_step();
+    for(step = current_step; step <= target_step; step++)
+    {
+        if(0u != action_is_push(exec_waypoints[step].action))
+        {
+            contains_push = 1u;
+            break;
+        }
+    }
+    if(0u == contains_push)
+    {
+        goto done;
+    }
+
+    target_wp = &exec_waypoints[target_step];
+    direction = action_direction(target_wp->action);
+    grid_to_physical(target_wp->row, target_wp->col,
+                     &final_x_cm, &final_y_cm);
+    pose = drive_pose_get();
+    push_boundary_target_x_cm = final_x_cm;
+    push_boundary_target_y_cm = final_y_cm;
+    if(0u != action_is_x_axis(direction))
+    {
+        push_boundary_target_x_cm =
+            executor_nearest_grid_center(pose->x_cm, direction);
+        if((('r' == direction) &&
+            (push_boundary_target_x_cm > final_x_cm)) ||
+           (('l' == direction) &&
+            (push_boundary_target_x_cm < final_x_cm)))
+        {
+            push_boundary_target_x_cm = final_x_cm;
+        }
+    }
+    else if(0u != action_is_y_axis(direction))
+    {
+        push_boundary_target_y_cm =
+            executor_nearest_grid_center(pose->y_cm, direction);
+        if((('u' == direction) &&
+            (push_boundary_target_y_cm > final_y_cm)) ||
+           (('d' == direction) &&
+            (push_boundary_target_y_cm < final_y_cm)))
+        {
+            push_boundary_target_y_cm = final_y_cm;
+        }
+    }
+    else
+    {
+        goto done;
+    }
+
+    push_boundary_action = direction;
+    push_boundary_stop_state = PUSH_BOUNDARY_STOP_REQUESTED;
+    arrival_stable_ticks = 0u;
+    path_pid_reset(&x_pid);
+    path_pid_reset(&y_pid);
+    accepted = 1u;
+
+done:
+    interrupt_global_enable(primask);
+    return accepted;
+}
+
+uint8 executor_stop_after_current_push_ready(void)
+{
+    uint8 ready;
+    uint32 primask = interrupt_global_disable();
+
+    ready = (PUSH_BOUNDARY_STOP_REACHED == push_boundary_stop_state) ? 1u : 0u;
+    interrupt_global_enable(primask);
+    return ready;
+}
+
+uint8 executor_force_current_push_stop(void)
+{
+    uint8 stopped = 0u;
+    uint32 primask = interrupt_global_disable();
+
+    if((EXEC_STATE_RUNNING == exec_state) &&
+       (PUSH_BOUNDARY_STOP_REQUESTED == push_boundary_stop_state))
+    {
+        stop_motion();
+        segment_settling = 0u;
+        segment_settle_elapsed_ms = 0u;
+        push_boundary_stop_state = PUSH_BOUNDARY_STOP_REACHED;
+        stopped = 1u;
+    }
+    interrupt_global_enable(primask);
+    return stopped;
+}
+
+uint8 executor_resume_after_current_push_stop(void)
+{
+    uint8 resumed = 0u;
+    uint32 primask = interrupt_global_disable();
+
+    if((EXEC_STATE_RUNNING == exec_state) &&
+       (PUSH_BOUNDARY_STOP_REACHED == push_boundary_stop_state))
+    {
+        executor_reset_push_boundary_stop();
+        arrival_stable_ticks = 0u;
+        segment_settling = 0u;
+        segment_settle_elapsed_ms = 0u;
+        path_pid_reset(&x_pid);
+        path_pid_reset(&y_pid);
+        resumed = 1u;
+    }
+    interrupt_global_enable(primask);
+    return resumed;
+}
+
 static uint8 executor_target_uses_near_box_axis_lock(uint16 target_step)
 {
     uint16 step;
@@ -1410,6 +1611,13 @@ static void executor_finish_segment_settle(void)
     if((0 != exec_waypoints) && (current_step < exec_waypoint_count))
     {
         wp = &exec_waypoints[current_step];
+    }
+
+    if(PUSH_BOUNDARY_STOP_REQUESTED == push_boundary_stop_state)
+    {
+        stop_motion();
+        push_boundary_stop_state = PUSH_BOUNDARY_STOP_REACHED;
+        return;
     }
 
     if((0 != art_sync_enabled) && (0 != waypoint_needs_art_sync(wp)))
@@ -1460,6 +1668,12 @@ void executor_update_20ms(void)
 {
     if (exec_state != EXEC_STATE_RUNNING)
     {
+        return;
+    }
+
+    if(PUSH_BOUNDARY_STOP_REACHED == push_boundary_stop_state)
+    {
+        reset_motion_segment();
         return;
     }
 
@@ -1523,14 +1737,29 @@ void executor_update_20ms(void)
     }
 #endif
 
-    target_step = executor_continuous_target_step();
-    target_wp = &exec_waypoints[target_step];
-    grid_to_physical(target_wp->row, target_wp->col, &target_x, &target_y);
-    apply_push_overshoot(&target_x, &target_y, target_wp->action);
-
-    if (0 != is_axis_arrived(target_x, target_y, target_wp->action))
+    if(PUSH_BOUNDARY_STOP_REQUESTED == push_boundary_stop_state)
     {
-        current_step = target_step;
+        target_step = current_step;
+        target_wp = wp;
+        target_x = push_boundary_target_x_cm;
+        target_y = push_boundary_target_y_cm;
+    }
+    else
+    {
+        target_step = executor_continuous_target_step();
+        target_wp = &exec_waypoints[target_step];
+        grid_to_physical(target_wp->row, target_wp->col, &target_x, &target_y);
+        apply_push_overshoot(&target_x, &target_y, target_wp->action);
+    }
+
+    if (0 != is_axis_arrived(target_x, target_y,
+                             (PUSH_BOUNDARY_STOP_REQUESTED == push_boundary_stop_state) ?
+                             push_boundary_action : target_wp->action))
+    {
+        if(PUSH_BOUNDARY_STOP_REQUESTED != push_boundary_stop_state)
+        {
+            current_step = target_step;
+        }
         reset_motion_segment();
         if (arrival_stable_ticks < EXEC_ARRIVAL_STABLE_TICKS)
         {
@@ -1545,14 +1774,17 @@ void executor_update_20ms(void)
     else
     {
         arrival_stable_ticks = 0;
-        if((0u != executor_target_uses_near_box_axis_lock(target_step)) &&
+        if((PUSH_BOUNDARY_STOP_REQUESTED != push_boundary_stop_state) &&
+           (0u != executor_target_uses_near_box_axis_lock(target_step)) &&
            (0 == action_is_push(wp->action)))
         {
             move_to_target_near_box(target_x, target_y, target_wp->action);
         }
         else
         {
-            move_to_target(target_x, target_y, target_wp->action);
+            move_to_target(target_x, target_y,
+                           (PUSH_BOUNDARY_STOP_REQUESTED == push_boundary_stop_state) ?
+                           push_boundary_action : target_wp->action);
         }
     }
 }
@@ -1594,6 +1826,49 @@ uint16 executor_get_current_step(void)
 uint16 executor_get_total_steps(void)
 {
     return exec_waypoint_count;
+}
+
+uint8 executor_get_current_grid_pose(uint8 *row,
+                                     uint8 *col,
+                                     float *offset_x_cm,
+                                     float *offset_y_cm)
+{
+    const drive_pose_struct *pose;
+    int16 col_delta;
+    int16 row_delta;
+    int16 current_col;
+    int16 current_row;
+    float row_grid;
+
+    if((0 == row) || (0 == col) || (0 == offset_x_cm) ||
+       (0 == offset_y_cm) || (0 == exec_waypoints) ||
+       (0u == exec_waypoint_count) ||
+       (start_row >= MAP_ROWS) || (start_col >= MAP_COLS) ||
+       (0u != position_correction_active))
+    {
+        return 0u;
+    }
+
+    pose = drive_pose_get();
+    col_delta = (int16)((pose->x_cm >= 0.0f) ?
+                        (pose->x_cm / GRID_SIZE_CM + 0.5f) :
+                        (pose->x_cm / GRID_SIZE_CM - 0.5f));
+    row_grid = -pose->y_cm / GRID_SIZE_CM;
+    row_delta = (int16)((row_grid >= 0.0f) ?
+                        (row_grid + 0.5f) : (row_grid - 0.5f));
+    current_col = (int16)start_col + col_delta;
+    current_row = (int16)start_row + row_delta;
+    if((current_col < 0) || (current_col >= MAP_COLS) ||
+       (current_row < 0) || (current_row >= MAP_ROWS))
+    {
+        return 0u;
+    }
+
+    *row = (uint8)current_row;
+    *col = (uint8)current_col;
+    *offset_x_cm = pose->x_cm - ((float)col_delta * GRID_SIZE_CM);
+    *offset_y_cm = pose->y_cm + ((float)row_delta * GRID_SIZE_CM);
+    return 1u;
 }
 
 void executor_get_debug_status(executor_debug_status_struct *status)

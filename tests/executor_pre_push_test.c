@@ -126,6 +126,41 @@ static uint8 start_switch_is_atomic(void)
             (0u != pose_reset_inside_critical)) ? 1u : 0u;
 }
 
+static uint8 current_grid_pose_maps_with_offsets(void)
+{
+    waypoint_struct waypoint = {5u, 6u, 'r', 0u, 1u, 0u, 0u, 0u, 0u};
+    uint8 row;
+    uint8 col;
+    float offset_x;
+    float offset_y;
+
+    reset_fixture();
+    executor_start(&waypoint, 1u, 5u, 5u, 0.0f, 0.0f, 0u, 0u);
+    test_pose.x_cm = 21.0f;
+    test_pose.y_cm = -19.0f;
+    if(0u == executor_get_current_grid_pose(&row, &col, &offset_x, &offset_y))
+    {
+        return 0u;
+    }
+
+    return ((6u == row) && (6u == col) &&
+            (fabsf(offset_x - 1.0f) < 0.01f) &&
+            (fabsf(offset_y - 1.0f) < 0.01f)) ? 1u : 0u;
+}
+
+static uint8 current_grid_pose_rejects_without_path(void)
+{
+    uint8 row;
+    uint8 col;
+    float offset_x;
+    float offset_y;
+
+    reset_fixture();
+    return (0u == executor_get_current_grid_pose(&row, &col,
+                                                  &offset_x, &offset_y)) ?
+           1u : 0u;
+}
+
 static uint8 error_switch_is_atomic(void)
 {
     waypoint_struct waypoint = {5u, 6u, 'r', 0u, 1u, 0u, 0u, 0u, 0u};
@@ -667,6 +702,19 @@ static uint8 near_box_move_uses_one_world_axis(void)
             (0u == dual_axis_motion_seen)) ? 1u : 0u;
 }
 
+static uint8 first_error_is_not_overwritten(void)
+{
+    waypoint_struct waypoint = {5u, 6u, 'r', 0u, 1u, 0u, 0u, 0u, 0u};
+
+    reset_fixture();
+    executor_start(&waypoint, 1u, 5u, 5u, 0.0f, 0.0f, 0u, 1u);
+    executor_set_error(EXEC_ERROR_MAP);
+    executor_set_error(EXEC_ERROR_SUBJECT2_CLASS);
+
+    return ((EXEC_STATE_ERROR == executor_get_state()) &&
+            (EXEC_ERROR_MAP == executor_get_error())) ? 1u : 0u;
+}
+
 static uint8 run_near_box_boundary_keeps_moving(void)
 {
     waypoint_struct waypoints[2] = {
@@ -1079,13 +1127,247 @@ static uint8 final_push_still_waits_for_art(void)
             (0u == executor_get_current_step())) ? 1u : 0u;
 }
 
+static uint8 host_change_stops_at_nearest_grid_center(void)
+{
+    waypoint_struct waypoints[2] = {
+        {5u, 6u, 'r', 0u, 1u, 0u, 0u, 0u, 0u},
+        {5u, 8u, 'R', 1u, 4u, 0u, 0u, 0u, 0u}
+    };
+    uint16 stop_before;
+    uint16 tick;
+    uint16 max_ticks = (uint16)(EXEC_ARRIVAL_STABLE_TICKS +
+                                (EXEC_SEGMENT_SETTLE_MS / CONTROL_PERIOD_MS) + 3u);
+
+    reset_fixture();
+    executor_start(waypoints, 2u, 5u, 5u, 0.0f, 0.0f, 0u, 1u);
+    drive_pose_reset(11.0f, 0.0f, 0.0f);
+    executor_update_20ms();
+    stop_before = stop_call_count;
+
+    if((0u == executor_request_stop_after_current_push()) ||
+       (stop_before != stop_call_count) ||
+       (0u != executor_stop_after_current_push_ready()))
+    {
+        return 0u;
+    }
+
+    executor_update_20ms();
+    if((last_motion_vx <= 0.0f) || (0u != executor_get_current_step()))
+    {
+        return 0u;
+    }
+
+    drive_pose_reset(GRID_SIZE_CM, 0.0f, 0.0f);
+    for(tick = 0u; tick < max_ticks; tick++)
+    {
+        executor_update_20ms();
+        if(0u != executor_stop_after_current_push_ready())
+        {
+            break;
+        }
+    }
+
+    return ((0u != executor_stop_after_current_push_ready()) &&
+            (stop_call_count > stop_before) &&
+            (EXEC_STATE_RUNNING == executor_get_state()) &&
+            (0u == executor_get_current_step()) &&
+            (0u == executor_art_sync_pending())) ? 1u : 0u;
+}
+
+static uint8 host_change_rejects_lowercase_only_path(void)
+{
+    waypoint_struct waypoint = {5u, 7u, 'r', 0u, 2u, 0u, 0u, 0u, 0u};
+
+    reset_fixture();
+    executor_start(&waypoint, 1u, 5u, 5u, 0.0f, 0.0f, 0u, 1u);
+    executor_update_20ms();
+
+    return ((0u == executor_request_stop_after_current_push()) &&
+            (0u == executor_stop_after_current_push_ready())) ? 1u : 0u;
+}
+
+static uint8 host_change_direction_reaches_grid(char action,
+                                                uint8 row, uint8 col,
+                                                float pose_x, float pose_y,
+                                                float target_x, float target_y,
+                                                float expected_vx_sign,
+                                                float expected_vy_sign)
+{
+    waypoint_struct waypoint = {row, col, action, 0u, 2u, 0u, 0u, 0u, 0u};
+    uint16 tick;
+    uint16 max_ticks = (uint16)(EXEC_ARRIVAL_STABLE_TICKS +
+                                (EXEC_SEGMENT_SETTLE_MS / CONTROL_PERIOD_MS) + 3u);
+
+    reset_fixture();
+    executor_start(&waypoint, 1u, 5u, 5u, 0.0f, 0.0f, 0u, 1u);
+    drive_pose_reset(pose_x, pose_y, 0.0f);
+    executor_update_20ms();
+    if(0u == executor_request_stop_after_current_push())
+    {
+        return 0u;
+    }
+    executor_update_20ms();
+    if(((0.0f != expected_vx_sign) &&
+        ((last_motion_vx * expected_vx_sign) <= 0.0f)) ||
+       ((0.0f != expected_vy_sign) &&
+        ((last_motion_vy * expected_vy_sign) <= 0.0f)))
+    {
+        return 0u;
+    }
+
+    drive_pose_reset(target_x, target_y, 0.0f);
+    for(tick = 0u; tick < max_ticks; tick++)
+    {
+        executor_update_20ms();
+        if(0u != executor_stop_after_current_push_ready())
+        {
+            break;
+        }
+    }
+    return executor_stop_after_current_push_ready();
+}
+
+static uint8 host_change_grid_stop_all_directions(void)
+{
+    return ((0u != host_change_direction_reaches_grid(
+                        'R', 5u, 7u, 11.0f, 0.0f,
+                        20.0f, 0.0f, 1.0f, 0.0f)) &&
+            (0u != host_change_direction_reaches_grid(
+                        'L', 5u, 3u, -11.0f, 0.0f,
+                        -20.0f, 0.0f, -1.0f, 0.0f)) &&
+            (0u != host_change_direction_reaches_grid(
+                        'U', 3u, 5u, 0.0f, 11.0f,
+                        0.0f, 20.0f, 0.0f, 1.0f)) &&
+            (0u != host_change_direction_reaches_grid(
+                        'D', 7u, 5u, 0.0f, -11.0f,
+                        0.0f, -20.0f, 0.0f, -1.0f))) ? 1u : 0u;
+}
+
+static uint8 host_change_starts_toward_next_center_before_half(void)
+{
+    waypoint_struct waypoint = {5u, 8u, 'R', 0u, 3u, 1u, 0u, 0u, 0u};
+
+    reset_fixture();
+    executor_start(&waypoint, 1u, 5u, 5u, 0.0f, 0.0f, 0u, 1u);
+    drive_pose_reset(5.0f, 0.0f, 0.0f);
+    executor_update_20ms();
+    if(0u == executor_request_stop_after_current_push())
+    {
+        return 0u;
+    }
+    executor_update_20ms();
+
+    return (last_motion_vx > 0.0f) ? 1u : 0u;
+}
+
+static uint8 host_change_request_clears_on_stop_and_error(void)
+{
+    waypoint_struct waypoint = {5u, 7u, 'R', 0u, 2u, 0u, 0u, 0u, 0u};
+
+    reset_fixture();
+    executor_start(&waypoint, 1u, 5u, 5u, 0.0f, 0.0f, 0u, 1u);
+    drive_pose_reset(11.0f, 0.0f, 0.0f);
+    executor_update_20ms();
+    if(0u == executor_request_stop_after_current_push())
+    {
+        return 0u;
+    }
+    executor_stop();
+    if(0u != executor_stop_after_current_push_ready())
+    {
+        return 0u;
+    }
+
+    executor_start(&waypoint, 1u, 5u, 5u, 0.0f, 0.0f, 0u, 1u);
+    drive_pose_reset(11.0f, 0.0f, 0.0f);
+    executor_update_20ms();
+    if(0u == executor_request_stop_after_current_push())
+    {
+        return 0u;
+    }
+    executor_set_error(EXEC_ERROR_MAP);
+
+    return (0u == executor_stop_after_current_push_ready()) ? 1u : 0u;
+}
+
+static uint8 host_change_resume_keeps_old_path(void)
+{
+    waypoint_struct waypoints[2] = {
+        {5u, 6u, 'r', 0u, 1u, 0u, 0u, 0u, 0u},
+        {5u, 8u, 'R', 1u, 4u, 1u, 0u, 0u, 0u}
+    };
+    uint16 tick;
+    uint16 max_ticks = (uint16)(EXEC_ARRIVAL_STABLE_TICKS +
+                                (EXEC_SEGMENT_SETTLE_MS / CONTROL_PERIOD_MS) + 3u);
+
+    reset_fixture();
+    executor_start(waypoints, 2u, 5u, 5u, 0.0f, 0.0f, 0u, 1u);
+    drive_pose_reset(11.0f, 0.0f, 0.0f);
+    executor_update_20ms();
+    if(0u == executor_request_stop_after_current_push())
+    {
+        return 0u;
+    }
+    drive_pose_reset(20.0f, 0.0f, 0.0f);
+    for(tick = 0u; tick < max_ticks; tick++)
+    {
+        executor_update_20ms();
+        if(0u != executor_stop_after_current_push_ready())
+        {
+            break;
+        }
+    }
+    if((0u == executor_stop_after_current_push_ready()) ||
+       (0u == executor_resume_after_current_push_stop()))
+    {
+        return 0u;
+    }
+
+    executor_update_20ms();
+    return ((0u == executor_stop_after_current_push_ready()) &&
+            (EXEC_STATE_RUNNING == executor_get_state()) &&
+            (0u == executor_get_current_step()) &&
+            (last_motion_vx > 0.0f)) ? 1u : 0u;
+}
+
+static uint8 host_change_force_stop_keeps_old_path(void)
+{
+    waypoint_struct waypoint = {5u, 8u, 'R', 0u, 3u, 1u, 0u, 0u, 0u};
+    uint16 stop_before;
+
+    reset_fixture();
+    executor_start(&waypoint, 1u, 5u, 5u, 0.0f, 0.0f, 0u, 1u);
+    drive_pose_reset(7.0f, 0.0f, 0.0f);
+    executor_update_20ms();
+    if(0u == executor_request_stop_after_current_push())
+    {
+        return 0u;
+    }
+    stop_before = stop_call_count;
+    if((0u == executor_force_current_push_stop()) ||
+       (0u == executor_stop_after_current_push_ready()) ||
+       (stop_call_count <= stop_before) ||
+       (0u == executor_resume_after_current_push_stop()))
+    {
+        return 0u;
+    }
+
+    executor_update_20ms();
+    return ((EXEC_STATE_RUNNING == executor_get_state()) &&
+            (0u == executor_get_current_step()) &&
+            (last_motion_vx > 0.0f)) ? 1u : 0u;
+}
+
 int main(void)
 {
     uint8 passed = 1u;
 
     passed &= run_case("first-push-waits", first_push_waits_before_motion());
     passed &= run_case("start-switch-atomic", start_switch_is_atomic());
+    passed &= run_case("current-grid-pose", current_grid_pose_maps_with_offsets());
+    passed &= run_case("current-grid-no-path", current_grid_pose_rejects_without_path());
     passed &= run_case("error-switch-atomic", error_switch_is_atomic());
+    passed &= run_case("first-error-preserved", first_error_is_not_overwritten());
     passed &= run_case("release-same-push", successful_correction_releases_same_push());
     passed &= run_case("turn-center-no-push-align", lowercase_turn_waits_without_push_alignment());
     passed &= run_case("push-center-needs-align", uppercase_center_requires_push_alignment());
@@ -1125,6 +1407,13 @@ int main(void)
     passed &= run_case("push-turn-stops-for-center", push_turn_stops_before_next_waypoint());
     passed &= run_case("step-still-pauses", step_mode_still_pauses_after_first_push());
     passed &= run_case("final-push-art-sync", final_push_still_waits_for_art());
+    passed &= run_case("host-change-grid-stop", host_change_stops_at_nearest_grid_center());
+    passed &= run_case("host-change-four-way", host_change_grid_stop_all_directions());
+    passed &= run_case("host-change-forward-before-half", host_change_starts_toward_next_center_before_half());
+    passed &= run_case("host-change-lower-reject", host_change_rejects_lowercase_only_path());
+    passed &= run_case("host-change-clear", host_change_request_clears_on_stop_and_error());
+    passed &= run_case("host-change-resume", host_change_resume_keeps_old_path());
+    passed &= run_case("host-change-force-stop", host_change_force_stop_keeps_old_path());
 
     return (0 != passed) ? 0 : 1;
 }

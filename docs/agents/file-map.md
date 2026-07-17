@@ -129,13 +129,19 @@ Competition and Push Box user modules:
   IPS200 rendering only; business state is assembled by `menu.c` before drawing.
 
 - `project/user/inc/competition_flow.h` / `project/user/src/competition_flow.c`
-  Stage coordinator for subject-one debug, subject-two debug, and the full subject-one -> return -> subject-two competition sequence.
+  Stage coordinator for three subject debug modes and the full subject-one -> subject-two -> subject-three competition sequence.
 
 - `project/user/inc/subject2.h` / `project/user/src/subject2.c`
   Subject-two runtime state machine: observation-point planning, requested center adjustment, ART #2 classification, class binding, bound pushes, map confirmation, and return requests.
 
 - `project/user/inc/subject2_logic.h` / `project/user/src/subject2_logic.c`
   Host-testable subject-two algorithms for object collection, observation selection, classification stability, box/target binding, and active-box tracking.
+
+- `project/user/inc/subject3.h` / `project/user/src/subject3.c`
+  Subject-three wrapper around subject two: blocked-plan bomb selection, bomb-path execution, two-frame ART blast confirmation, and recovery ownership.
+
+- `project/user/inc/subject3_logic.h` / `project/user/src/subject3_logic.c`
+  Host-testable subject-three map simulation, blast-map validation, and deterministic candidate ordering.
 
 - `project/user/inc/vision_uart.h` / `project/user/src/vision_uart.c`
   LPUART4 protocol for ART #2 mode selection, classification requests, samples, acknowledgements, cancellation, and optional board-level smoke testing.

@@ -1,5 +1,6 @@
 #include "zf_common_headfile.h"
 #include "map_utils.h"
+#include "motion_math.h"
 #include "solver.h"
 #include "subject2_logic.h"
 
@@ -27,6 +28,11 @@ static uint16 cell_distance(uint16 first, uint16 second)
 {
     return (uint16)(absolute_difference(map_cell_row(first), map_cell_row(second)) +
                     absolute_difference(map_cell_col(first), map_cell_col(second)));
+}
+
+static float absolute_float(float value)
+{
+    return (value < 0.0f) ? -value : value;
 }
 
 static uint8 cell_in_list(uint16 cell, const uint16 *cells, uint8 count)
@@ -123,10 +129,13 @@ uint8 subject2_collect_cells(const map_source_struct *source,
 uint8 subject2_select_observation(const map_source_struct *source,
                                   const subject2_object_struct *objects,
                                   uint8 object_count,
+                                  float current_yaw_deg,
                                   subject2_observation_plan_struct *plan,
                                   solve_result_struct *path)
 {
     uint16 best_actions = 0xFFFFu;
+    float best_turn_deg = 361.0f;
+    float candidate_turn_deg;
     uint16 object_cell;
     uint16 candidate_cell;
     int16 candidate_row;
@@ -194,10 +203,16 @@ uint8 subject2_select_observation(const map_source_struct *source,
             {
                 continue;
             }
-            if((0u == found) || (candidate_path.action_count < best_actions))
+            candidate_turn_deg = absolute_float(shortest_angle_error(
+                observation_target_yaw_deg[direction], current_yaw_deg));
+            if((0u == found) ||
+               (candidate_path.action_count < best_actions) ||
+               ((candidate_path.action_count == best_actions) &&
+                (candidate_turn_deg < best_turn_deg)))
             {
                 found = 1u;
                 best_actions = candidate_path.action_count;
+                best_turn_deg = candidate_turn_deg;
                 plan->object_index = object_index;
                 plan->observation_bit = observation_bits[direction];
                 plan->row = (uint8)candidate_row;
@@ -287,6 +302,80 @@ uint8 subject2_object_class_counts_match(
             return 0u;
         }
     }
+    return 1u;
+}
+
+uint8 subject2_infer_last_target_class(
+    const subject2_object_struct *box_objects,
+    uint8 box_count,
+    const subject2_object_struct *target_objects,
+    uint8 target_count,
+    uint8 *target_index,
+    uint8 *class_id)
+{
+    uint8 box_counts[SUBJECT2_CLASS_COUNT] = {0};
+    uint8 target_counts[SUBJECT2_CLASS_COUNT] = {0};
+    uint8 missing_target_index = 0u;
+    uint8 missing_target_count = 0u;
+    uint8 inferred_class = SUBJECT2_INVALID_CLASS;
+    uint8 total_deficit = 0u;
+    uint8 index;
+
+    if((0 == box_objects) || (0 == target_objects) ||
+       (0 == target_index) || (0 == class_id) ||
+       (0u == box_count) || (box_count != target_count))
+    {
+        return 0u;
+    }
+    for(index = 0u; index < box_count; index++)
+    {
+        if((0u == box_objects[index].recognized) ||
+           (SUBJECT2_CLASS_COUNT <= box_objects[index].class_id))
+        {
+            return 0u;
+        }
+        box_counts[box_objects[index].class_id]++;
+    }
+    for(index = 0u; index < target_count; index++)
+    {
+        if(0u == target_objects[index].recognized)
+        {
+            missing_target_index = index;
+            missing_target_count++;
+            continue;
+        }
+        if(SUBJECT2_CLASS_COUNT <= target_objects[index].class_id)
+        {
+            return 0u;
+        }
+        target_counts[target_objects[index].class_id]++;
+    }
+    if(1u != missing_target_count)
+    {
+        return 0u;
+    }
+    for(index = 0u; index < SUBJECT2_CLASS_COUNT; index++)
+    {
+        uint8 deficit;
+
+        if(target_counts[index] > box_counts[index])
+        {
+            return 0u;
+        }
+        deficit = (uint8)(box_counts[index] - target_counts[index]);
+        if(0u != deficit)
+        {
+            inferred_class = index;
+            total_deficit = (uint8)(total_deficit + deficit);
+        }
+    }
+    if((1u != total_deficit) || (SUBJECT2_INVALID_CLASS == inferred_class))
+    {
+        return 0u;
+    }
+
+    *target_index = missing_target_index;
+    *class_id = inferred_class;
     return 1u;
 }
 

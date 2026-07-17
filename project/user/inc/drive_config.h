@@ -103,6 +103,10 @@
 #define EXEC_NEAR_BOX_EXTRA_GAP_RATIO (0.5f)
 /** ART 等图、中心请求以及发车/返航/观察回中心动作的最长时间。 */
 #define EXEC_ART_SYNC_TIMEOUT_MS (5000u)
+/** 第二类错误等待恢复开始后新完整地图的单次窗口。 */
+#define RECOVERY_RESYNC_TIMEOUT_MS (3000u)
+/** 同一恢复键允许的自动同步次数；下一次相同失败升级为 fatal。 */
+#define RECOVERY_MAX_RETRIES (2u)
 /** CENTER_REQ 超时降级开关；1=按阶段使用安全兜底继续，0=严格停车报错。 */
 #ifndef ART_CENTER_TIMEOUT_FALLBACK_ENABLE
 #define ART_CENTER_TIMEOUT_FALLBACK_ENABLE (1)
@@ -123,20 +127,28 @@
 #define ART_BOX_OBSERVE_RETRY_SETTLE_MS (300u)
 /** 车箱观察最多自动恢复重试次数。 */
 #define ART_BOX_OBSERVE_MAX_RETRIES (1u)
-/** 比赛运行范围：只跑科目一、只跑科目二或一次 K3 完整连续运行。 */
+/** 比赛运行范围：科目一/二/三单项调试或一次 K3 完整连续运行。 */
 #define COMPETITION_MODE_SUBJECT1_DEBUG (1u)
 #define COMPETITION_MODE_SUBJECT2_DEBUG (2u)
 #define COMPETITION_MODE_FULL (3u)
-#define COMPETITION_MODE (COMPETITION_MODE_FULL)
+#define COMPETITION_MODE_SUBJECT3_DEBUG (4u)
+#define COMPETITION_MODE (COMPETITION_MODE_SUBJECT2_DEBUG)
+
+/** 科目三爆炸确认需要连续一致的新 ART 地图数量。 */
+#define SUBJECT3_BLAST_STABLE_FRAMES (2u)
 /** UART4 与 OpenART #2 板级自检；1=上电自动测试并禁止启动比赛，0=正常比赛。 */
 #define VISION_UART_BOARD_TEST_ENABLE (0)
 /** 科目二分类结果最低置信度，单位千分值。 */
 #define SUBJECT2_CLASS_CONFIDENCE_Q (750u)
+/** 最后一个未识别目标按箱子/目标类别计数消元；0=仍执行完整观察。 */
+#ifndef SUBJECT2_LAST_TARGET_ELIMINATION_ENABLE
+#define SUBJECT2_LAST_TARGET_ELIMINATION_ENABLE (1)
+#endif
 /** 科目二分类需要连续一致的有效样本数。 */
 #define SUBJECT2_CLASS_STABLE_SAMPLES (3u)
 /** 科目二单个视距等待分类结果的最长时间；超时后先后退扩大视野。 */
 #define SUBJECT2_VIEW_TIMEOUT_MS (3000u)
-/** 科目二观察到位后，周期中心距计划格中心不超过该值时跳过5帧精确校正。 */
+/** 科目二周期帧带精确中心时，距计划格中心不超过该值可跳过5帧校正。 */
 #define SUBJECT2_FAST_CENTER_TOLERANCE_CM (2.0f)
 /** 科目二观察到位后等待一张新周期中心帧的最长时间。 */
 #define SUBJECT2_FAST_CENTER_WAIT_MS (300u)
@@ -190,7 +202,7 @@
 #define ART_RETURN_HOME_TOLERANCE_Q (5u)
 /** 最终视觉复核未通过时允许的再次校正次数。 */
 #define ART_RETURN_MAX_CORRECTIONS (2u)
-/** ART waypoint 前中心矫正开关；只在实际运动方向发生变化的转折点采样。 */
+/** ART 推箱链首视觉准备开关；普通移动转弯不再请求中心。 */
 #define EXEC_ART_WAYPOINT_CENTER_CORRECT_ENABLE (1)
 /** 旧普通 waypoint 段末中心校正开关；请求式中心模式下保持关闭。 */
 #define EXEC_ART_CENTER_CORRECT_ENABLE (0)

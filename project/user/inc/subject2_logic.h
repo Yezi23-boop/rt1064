@@ -72,6 +72,7 @@ uint8 subject2_collect_cells(const map_source_struct *source,
 uint8 subject2_select_observation(const map_source_struct *source,
                                   const subject2_object_struct *objects,
                                   uint8 object_count,
+                                  float current_yaw_deg,
                                   subject2_observation_plan_struct *plan,
                                   solve_result_struct *path);
 
@@ -88,6 +89,13 @@ uint8 subject2_object_class_counts_match(
     uint8 box_count,
     const subject2_object_struct *target_objects,
     uint8 target_count);
+uint8 subject2_infer_last_target_class(
+    const subject2_object_struct *box_objects,
+    uint8 box_count,
+    const subject2_object_struct *target_objects,
+    uint8 target_count,
+    uint8 *target_index,
+    uint8 *class_id);
 void subject2_invalidate_mismatched_classes(
     subject2_object_struct *box_objects,
     uint8 box_count,

@@ -15,6 +15,7 @@
 #include "competition_flow.h"
 #include "drive_config.h"
 #include "subject2.h"
+#include "subject3.h"
 #include "vision_uart.h"
 
 #define MENU_KEY_SCAN_PERIOD_MS (5)
@@ -83,7 +84,7 @@ static uint8 need_redraw;                                    // 页面级重绘�
 static const char *run_state = "Idle";                       // Run 页短状态文本，指向常量字符串。
 static uint8 exec_start_row = 0;                             // executor 启动时的格点行，屏幕用来把 pose 映射回地图。
 static uint8 exec_start_col = 0;                             // executor 启动时的格点列，ART 重解算成功后会更新。
-static float competition_launch_yaw_deg = 0.0f;              // 当前科目发车校准后的 IMU 目标航向，供科目二 HYaw 回正。
+static float competition_launch_yaw_deg = 0.0f;              // 当前科目发车校准后的 IMU 目标航向，供分类科目 HYaw 回正。
 static char last_solve_rows[MAP_ROWS][MAP_COLS + 1];         // 最近求解地图快照的行缓存，避免 OpenART 实时帧覆盖执行底图。
 static map_source_struct last_solve_source =
 {
@@ -104,10 +105,39 @@ static map_source_struct last_solve_source =
     },
 };
 static uint8 last_solve_source_valid = 0;                    // 1 表示 `last_solve_source` 可用于 Run/Execute/Playback 显示。
+static char error_return_rows[MAP_ROWS][MAP_COLS + 1];       // 错误返航独立地图，保留原任务快照用于回放和诊断。
+static map_source_struct error_return_source =
+{
+    "ErrRet",
+    {
+        error_return_rows[0],
+        error_return_rows[1],
+        error_return_rows[2],
+        error_return_rows[3],
+        error_return_rows[4],
+        error_return_rows[5],
+        error_return_rows[6],
+        error_return_rows[7],
+        error_return_rows[8],
+        error_return_rows[9],
+        error_return_rows[10],
+        error_return_rows[11],
+    },
+};
+static uint8 error_return_source_valid = 0u;
+static uint8 error_return_active = 0u;
+static competition_fatal_reason_enum error_return_reason = COMPETITION_FATAL_NONE;
+static uint8 error_return_start_row = 0u;
+static uint8 error_return_start_col = 0u;
+static float error_return_offset_x_cm = 0.0f;
+static float error_return_offset_y_cm = 0.0f;
+static uint8 error_return_pose_valid = 0u;
 static uint8 subject2_active = 0;                            // 1 表示科目二接管 executor 和 ART 段末事件。
+static uint8 subject3_active = 0;                            // 1 表示科目三包装科目二并接管炸弹流程。
 
 static void draw_current_page(void);
 static void enter_run_mode_page(void);
+static void apply_art_replan_update(const art_replan_update_struct *update);
 static void draw_home_page(void);
 static void draw_run_page(void);
 static void draw_mode_page(void);
@@ -258,15 +288,30 @@ static void go_home(void)
     enter_page(MENU_PAGE_HOME);
 }
 
+static void reset_error_return_state(void)
+{
+    error_return_active = 0u;
+    error_return_reason = COMPETITION_FATAL_NONE;
+    error_return_start_row = 0u;
+    error_return_start_col = 0u;
+    error_return_offset_x_cm = 0.0f;
+    error_return_offset_y_cm = 0.0f;
+    error_return_pose_valid = 0u;
+    error_return_source_valid = 0u;
+}
+
 static void safe_go_home(void)
 {
     // K4 长按是全局安全出口：无论当前页面在哪，都取消 ART 等待并停止底盘执行。
     // 这条路径不能写 Flash，避免紧急退出时被慢速擦写拖住。
     art_replan_cancel();
+    subject3_cancel();
     subject2_cancel();
     vision_uart_cancel();
     competition_flow_cancel();
+    reset_error_return_state();
     subject2_active = 0u;
+    subject3_active = 0u;
     if(EXEC_STATE_IDLE != executor_get_state())
     {
         executor_stop();
@@ -289,10 +334,13 @@ static void go_parent(void)
 static void clear_result_state(void)
 {
     art_replan_cancel();
+    subject3_cancel();
     subject2_cancel();
     vision_uart_cancel();
     competition_flow_cancel();
+    reset_error_return_state();
     subject2_active = 0u;
+    subject3_active = 0u;
     if(EXEC_STATE_IDLE != executor_get_state())
     {
         executor_stop();
@@ -384,6 +432,9 @@ static void build_art_replan_context(art_replan_context_struct *context)
     context->elapsed_ms = &last_elapsed_ms;
     context->start_row = &exec_start_row;
     context->start_col = &exec_start_col;
+    context->error_return_snapshot = &error_return_source;
+    context->error_return_snapshot_rows = error_return_rows;
+    context->error_return_snapshot_valid = &error_return_source_valid;
     context->run_mode = run_mode;
 }
 
@@ -400,6 +451,7 @@ static void build_subject2_context(subject2_context_struct *context)
     context->launch_yaw_deg = competition_launch_yaw_deg;
     context->art_yaw_bias_valid =
         art_replan_get_launch_yaw_bias(&context->art_yaw_bias_deg);
+    context->allow_blast_fallback = 0u;
 }
 
 static void apply_subject2_update(const subject2_update_struct *update)
@@ -422,17 +474,43 @@ static void apply_subject2_update(const subject2_update_struct *update)
     }
 }
 
+static void begin_classification_return(
+    const art_replan_context_struct *art_context,
+    const subject2_update_struct *subject_update,
+    art_replan_update_struct *art_update)
+{
+    subject3_cancel();
+    subject2_cancel();
+    subject3_active = 0u;
+    subject2_active = 0u;
+
+    if(0 != art_replan_begin_return_home(
+                art_context, subject_update->return_pose_x_cm,
+                subject_update->return_pose_y_cm, art_update))
+    {
+        apply_art_replan_update(art_update);
+        return;
+    }
+
+    executor_set_error(EXEC_ERROR_ART_SYNC);
+    competition_flow_latch_fatal(COMPETITION_FATAL_RETURN);
+    run_state = competition_flow_fatal_text();
+    mark_redraw();
+}
+
 static void start_competition_action(competition_action_enum action,
                                      art_replan_update_struct *update)
 {
     subject2_active = 0u;
+    subject3_active = 0u;
     if(COMPETITION_ACTION_START_SUBJECT1 == action)
     {
         art_replan_begin_initial(update);
     }
-    else if(COMPETITION_ACTION_START_SUBJECT2 == action)
+    else if((COMPETITION_ACTION_START_SUBJECT2 == action) ||
+            (COMPETITION_ACTION_START_SUBJECT3 == action))
     {
-        art_replan_begin_subject2(update);
+        art_replan_begin_classification(update);
     }
     else
     {
@@ -443,6 +521,86 @@ static void start_competition_action(competition_action_enum action,
             update->run_state = "Done";
             update->redraw = 1u;
         }
+    }
+}
+
+static void menu_latch_return_failure(void)
+{
+    reset_error_return_state();
+    executor_stop();
+    competition_flow_clear_fatal();
+    competition_flow_latch_fatal(COMPETITION_FATAL_RETURN);
+    run_state = competition_flow_fatal_text();
+    mark_redraw();
+}
+
+static uint8 menu_begin_error_return(void)
+{
+    art_replan_context_struct context;
+    art_replan_update_struct update;
+    competition_fatal_reason_enum reason = competition_flow_get_fatal_reason();
+
+    if((0u != error_return_active) ||
+       (COMPETITION_FATAL_NONE == reason) ||
+       (COMPETITION_FATAL_RETURN == reason) ||
+       (0u == competition_flow_is_active()) ||
+       (MAP_SOURCE_ART != settings_get_source()) ||
+       (0u != art_replan_is_returning()))
+    {
+        return 0u;
+    }
+
+    error_return_reason = reason;
+    error_return_pose_valid = executor_get_current_grid_pose(
+        &error_return_start_row, &error_return_start_col,
+        &error_return_offset_x_cm, &error_return_offset_y_cm);
+    subject3_cancel();
+    subject2_cancel();
+    vision_uart_cancel();
+    subject3_active = 0u;
+    subject2_active = 0u;
+    executor_stop();
+    competition_flow_clear_fatal();
+    build_art_replan_context(&context);
+    error_return_active = 1u;
+    if(0u == art_replan_begin_error_return(
+                  &context,
+                  error_return_start_row,
+                  error_return_start_col,
+                  error_return_offset_x_cm,
+                  error_return_offset_y_cm,
+                  error_return_pose_valid,
+                  &update))
+    {
+        menu_latch_return_failure();
+        return 0u;
+    }
+    apply_art_replan_update(&update);
+    return 1u;
+}
+
+static void menu_tick_error_return(void)
+{
+    art_replan_context_struct context;
+    art_replan_update_struct update;
+    competition_action_enum action;
+
+    build_art_replan_context(&context);
+    art_replan_tick(&context, 1u, &update);
+    apply_art_replan_update(&update);
+    if(0u != competition_flow_is_fatal())
+    {
+        menu_latch_return_failure();
+        return;
+    }
+    if(0u != update.return_complete)
+    {
+        reset_error_return_state();
+        competition_flow_clear_fatal();
+        competition_flow_on_return_complete();
+        action = competition_flow_take_action();
+        start_competition_action(action, &update);
+        apply_art_replan_update(&update);
     }
 }
 
@@ -751,10 +909,13 @@ static void execute_current_selection(void)
 
     candidate_mode = run_mode;
     art_replan_cancel();
+    subject3_cancel();
     subject2_cancel();
     vision_uart_cancel();
     competition_flow_cancel();
+    reset_error_return_state();
     subject2_active = 0u;
+    subject3_active = 0u;
 
     if((MAP_SOURCE_ART == settings_get_source()) && (RUN_MODE_SOLVE != run_mode))
     {
@@ -1032,7 +1193,57 @@ static void handle_execute_event(menu_key_event_enum event)
     switch(event)
     {
         case MENU_KEY_EVENT_K3_SHORT:
-            if(EXEC_STATE_PAUSED == executor_get_state())
+            if(0u != error_return_active)
+            {
+                break;
+            }
+            if(0u != competition_flow_is_fatal())
+            {
+                uint8 recovered = 0u;
+
+                if(0u == drive_control_is_healthy())
+                {
+                    run_state = "F:Drive";
+                    mark_redraw();
+                    break;
+                }
+                if(0u != subject3_active)
+                {
+                    subject2_update_struct update;
+
+                    recovered = subject3_manual_recover(&update);
+                    if(0u != recovered)
+                    {
+                        apply_subject2_update(&update);
+                    }
+                }
+                else if(0u != subject2_active)
+                {
+                    subject2_update_struct update;
+
+                    recovered = subject2_manual_recover(&update);
+                    if(0u != recovered)
+                    {
+                        apply_subject2_update(&update);
+                    }
+                }
+                else
+                {
+                    art_replan_update_struct update;
+
+                    recovered = art_replan_manual_recover(&update);
+                    if(0u != recovered)
+                    {
+                        apply_art_replan_update(&update);
+                    }
+                }
+                if(0u != recovered)
+                {
+                    competition_flow_clear_fatal();
+                    mark_redraw();
+                }
+            }
+            else if(EXEC_STATE_PAUSED == executor_get_state())
             {
                 executor_resume();
                 run_state = "Running";
@@ -1043,10 +1254,13 @@ static void handle_execute_event(menu_key_event_enum event)
         case MENU_KEY_EVENT_K4_SHORT:
             // 执行页 K4 是人工停止路径：同时取消 ART 等待和 executor，防止返回后后台继续跑。
             art_replan_cancel();
+            subject3_cancel();
             subject2_cancel();
             vision_uart_cancel();
             competition_flow_cancel();
+            reset_error_return_state();
             subject2_active = 0u;
+            subject3_active = 0u;
             executor_stop();
             go_parent();
             break;
@@ -1096,6 +1310,7 @@ void menu_init(void)
     playback_last_ms = 0;
     dynamic_last_ms = time_ms();
     run_state = "Idle";
+    reset_error_return_state();
     clear_result(&last_result);
     mark_redraw();
     draw_current_page();
@@ -1116,32 +1331,73 @@ void menu_poll(void)
         dispatch_key_event(event);
     }
 
+    if((0u != competition_flow_is_active()) &&
+       (0u == error_return_active) &&
+       (0u == drive_control_is_healthy()) &&
+       (0u == competition_flow_is_fatal()))
+    {
+        if(EXEC_STATE_ERROR != executor_get_state())
+        {
+            executor_set_error(EXEC_ERROR_MAP);
+        }
+        competition_flow_latch_fatal(COMPETITION_FATAL_DRIVE);
+        run_state = competition_flow_fatal_text();
+        mark_redraw();
+    }
+
+    if((0u != competition_flow_is_fatal()) &&
+       (0u == error_return_active))
+    {
+        (void)menu_begin_error_return();
+    }
+
+    if(0u != error_return_active)
+    {
+        menu_tick_error_return();
+        if(0 != need_redraw)
+        {
+            draw_current_page();
+            dynamic_last_ms = time_ms();
+            need_redraw = 0;
+        }
+        refresh_current_page_dynamic();
+        return;
+    }
+
+    if(0u != competition_flow_is_fatal())
+    {
+        if(0 != need_redraw)
+        {
+            draw_current_page();
+            dynamic_last_ms = time_ms();
+            need_redraw = 0;
+        }
+        refresh_current_page_dynamic();
+        return;
+    }
+
     playback_tick();
     build_art_replan_context(&art_context);
-    if(0u != subject2_active)
+    if(0u != subject3_active)
+    {
+        build_subject2_context(&subject2_context);
+        subject3_tick(&subject2_context, &subject2_update);
+        apply_subject2_update(&subject2_update);
+        if(0u != subject2_update.return_requested)
+        {
+            begin_classification_return(&art_context, &subject2_update,
+                                        &art_update);
+        }
+    }
+    else if(0u != subject2_active)
     {
         build_subject2_context(&subject2_context);
         subject2_tick(&subject2_context, &subject2_update);
         apply_subject2_update(&subject2_update);
         if(0u != subject2_update.return_requested)
         {
-            if(0 != art_replan_begin_return_home(&art_context,
-                                                  subject2_update.return_pose_x_cm,
-                                                  subject2_update.return_pose_y_cm,
-                                                  &art_update))
-            {
-                subject2_cancel();
-                subject2_active = 0u;
-                apply_art_replan_update(&art_update);
-            }
-            else
-            {
-                subject2_cancel();
-                subject2_active = 0u;
-                executor_set_error(EXEC_ERROR_ART_SYNC);
-                run_state = "RetErr";
-                mark_redraw();
-            }
+            begin_classification_return(&art_context, &subject2_update,
+                                        &art_update);
         }
     }
     else
@@ -1150,15 +1406,28 @@ void menu_poll(void)
                         (MAP_SOURCE_ART == settings_get_source()) ? 1u : 0u,
                         &art_update);
         apply_art_replan_update(&art_update);
-        if(0u != art_update.subject2_map_ready)
+        if(0u != art_update.classification_map_ready)
         {
             competition_launch_yaw_deg = get_control_status()->target_yaw;
             build_subject2_context(&subject2_context);
-            subject2_begin(&subject2_context,
-                           art_update.initial_pose_x_cm,
-                           art_update.initial_pose_y_cm,
-                           &subject2_update);
-            subject2_active = (SUBJECT2_ERROR != subject2_get_state()) ? 1u : 0u;
+            if(3u == competition_flow_get_subject())
+            {
+                subject3_begin(&subject2_context,
+                               art_update.initial_pose_x_cm,
+                               art_update.initial_pose_y_cm,
+                               &subject2_update);
+                subject3_active =
+                    (SUBJECT3_ERROR != subject3_get_state()) ? 1u : 0u;
+            }
+            else
+            {
+                subject2_begin(&subject2_context,
+                               art_update.initial_pose_x_cm,
+                               art_update.initial_pose_y_cm,
+                               &subject2_update);
+                subject2_active =
+                    (SUBJECT2_ERROR != subject2_get_state()) ? 1u : 0u;
+            }
             apply_subject2_update(&subject2_update);
         }
         if(0u != art_update.return_complete)
@@ -1168,6 +1437,12 @@ void menu_poll(void)
             start_competition_action(action, &art_update);
             apply_art_replan_update(&art_update);
         }
+    }
+
+    if((0u != competition_flow_is_fatal()) &&
+       (0u == error_return_active))
+    {
+        (void)menu_begin_error_return();
     }
 
     if(0 != need_redraw)

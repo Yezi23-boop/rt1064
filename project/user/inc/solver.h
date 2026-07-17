@@ -53,4 +53,23 @@ uint8 solve_navigation_path(const map_source_struct *source,
                             uint8 target_col,
                             solve_result_struct *result);
 
+/**
+ * @brief 规划把指定炸弹推入指定内部墙格的最短路径。
+ * @param[in] source 当前完整字符地图。
+ * @param[in] bomb_cell 必须是地图中的 `X`。
+ * @param[in] blast_wall_cell 必须是非外圈 `#`。
+ * @param[out] result 输出供 executor 执行的小写动作和 waypoint。
+ * @param[out] push_count 路径中的推弹次数，可为 NULL。
+ * @param[out] turn_count 路径方向变化次数，可为 NULL。
+ * @param[out] final_car_cell 最后一次推动后的小车格，可为 NULL。
+ * @return 1 表示可将炸弹推入目标墙；0 表示参数或路径无效。
+ */
+uint8 solve_bomb_path(const map_source_struct *source,
+                      uint16 bomb_cell,
+                      uint16 blast_wall_cell,
+                      solve_result_struct *result,
+                      uint16 *push_count,
+                      uint16 *turn_count,
+                      uint16 *final_car_cell);
+
 #endif

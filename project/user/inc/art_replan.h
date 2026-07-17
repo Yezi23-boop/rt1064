@@ -34,6 +34,9 @@ typedef struct
     uint32 *elapsed_ms;                   /**< 输出：本次求解耗时，单位 ms。 */
     uint8 *start_row;                     /**< 输出：执行器起点行号，范围 0..MAP_ROWS-1。 */
     uint8 *start_col;                     /**< 输出：执行器起点列号，范围 0..MAP_COLS-1。 */
+    map_source_struct *error_return_snapshot; /**< 错误返航专用地图副本。 */
+    char (*error_return_snapshot_rows)[MAP_COLS + 1]; /**< 错误返航地图行缓存。 */
+    uint8 *error_return_snapshot_valid;   /**< 非 0 表示错误返航地图已构造。 */
     run_mode_enum run_mode;               /**< 输入：当前运行模式，决定是否单步启动执行器。 */
 } art_replan_context_struct;
 
@@ -48,10 +51,10 @@ typedef struct
     uint8 redraw;                         /**< 非 0 表示当前页面需要重绘。 */
     uint8 enter_execute;                  /**< 非 0 表示初次 ART 求解成功后应进入执行页。 */
     uint8 reset_playback_step;            /**< 非 0 表示新路径产生，回放步号应归零。 */
-    uint8 subject2_map_ready;             /**< 非 0 表示科目二发车后地图和初始 offset 已准备好。 */
+    uint8 classification_map_ready;       /**< 非 0 表示分类科目发车后地图和初始 offset 已准备好。 */
     uint8 return_complete;                /**< 非 0 表示本轮任务已完成精确返航。 */
-    float initial_pose_x_cm;              /**< 科目二初始 C 格内 X offset。 */
-    float initial_pose_y_cm;              /**< 科目二初始 C 格内 Y offset。 */
+    float initial_pose_x_cm;              /**< 分类科目初始 C 格内 X offset。 */
+    float initial_pose_y_cm;              /**< 分类科目初始 C 格内 Y offset。 */
     art_replan_playback_enum playback;    /**< 回放状态建议。 */
     const char *run_state;                /**< 可显示的运行状态文本；NULL 表示不更新。 */
 } art_replan_update_struct;
@@ -73,6 +76,8 @@ typedef struct
  * OpenART 地图，也不会修改已有求解结果。
  */
 void art_replan_cancel(void);
+uint8 art_replan_manual_recover(art_replan_update_struct *update);
+uint8 art_replan_is_active(void);
 
 /** 开始一轮新比赛前清除科目间共享的发车区 yaw 参考。 */
 void art_replan_reset_competition_yaw(void);
@@ -90,14 +95,26 @@ uint8 art_replan_get_launch_yaw_bias(float *bias_deg);
  */
 void art_replan_begin_initial(art_replan_update_struct *update);
 
-/** 使用现有发车流程获取科目二地图，但不调用科目一 solve_map。 */
-void art_replan_begin_subject2(art_replan_update_struct *update);
+/** 使用现有发车流程获取分类科目地图，但不调用科目一 solve_map。 */
+void art_replan_begin_classification(art_replan_update_struct *update);
 
 /** 使用现有 home 中心和网格返航算法开始返航。 */
 uint8 art_replan_begin_return_home(const art_replan_context_struct *context,
                                    float initial_pose_x_cm,
                                    float initial_pose_y_cm,
                                    art_replan_update_struct *update);
+
+/** 使用最近有效地图和 MCU 当前格开始错误返航；允许地图保留箱子和目标。 */
+uint8 art_replan_begin_error_return(const art_replan_context_struct *context,
+                                    uint8 current_row,
+                                    uint8 current_col,
+                                    float initial_pose_x_cm,
+                                    float initial_pose_y_cm,
+                                    uint8 current_pose_valid,
+                                    art_replan_update_struct *update);
+
+/** 返回当前 ART 状态机是否处于正常或错误返航阶段。 */
+uint8 art_replan_is_returning(void);
 
 /**
  * @brief 推进 ART 重解算状态机。

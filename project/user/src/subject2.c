@@ -1,5 +1,6 @@
 #include "zf_common_headfile.h"
 #include "art_observation.h"
+#include "competition_flow.h"
 #include "drive_config.h"
 #include "drive_control.h"
 #include "drive_pose.h"
@@ -17,6 +18,26 @@ typedef enum
     SUBJECT2_SCAN_SYNC_WAIT_MAP = 0,
     SUBJECT2_SCAN_SYNC_WAIT_CENTER
 } subject2_scan_sync_phase_enum;
+
+typedef enum
+{
+    SUBJECT2_RECOVERY_NONE = 0,
+    SUBJECT2_RECOVERY_MAP,
+    SUBJECT2_RECOVERY_CENTER,
+    SUBJECT2_RECOVERY_OBSERVE,
+    SUBJECT2_RECOVERY_YAW,
+    SUBJECT2_RECOVERY_TRACK,
+    SUBJECT2_RECOVERY_PLAN,
+    SUBJECT2_RECOVERY_CLASS,
+    SUBJECT2_RECOVERY_MOTION
+} subject2_recovery_reason_enum;
+
+typedef enum
+{
+    SUBJECT2_CONFIRM_STRICT = 0,
+    SUBJECT2_CONFIRM_HOST_CHANGE,
+    SUBJECT2_CONFIRM_TASK_END
+} subject2_confirm_mode_enum;
 
 static subject2_state_enum subject2_state = SUBJECT2_IDLE;
 static subject2_object_struct box_objects[MAX_BOXES];
@@ -52,6 +73,10 @@ static solve_result_struct push_candidate_result;
 static uint16 task_start_boxes[MAX_BOXES];
 static uint8 task_start_box_count;
 static uint8 task_start_target_count;
+static uint8 host_completion_waiting_boundary;
+static uint32 host_completion_start_ms;
+static uint8 host_path_preserved;
+static uint32 host_monitor_last_frame;
 static char transit_overlap_rows[MAP_ROWS][MAP_COLS + 1];
 static map_source_struct transit_overlap_source;
 static uint16 transit_overlap_cell = INVALID_STATE;
@@ -60,6 +85,10 @@ static uint8 retry_active_only;
 static uint8 replan_center_for_return;
 static uint32 confirm_wait_start_ms;
 static map_stability_tracker_struct confirm_tracker;
+static subject2_confirm_mode_enum confirm_mode;
+static uint8 confirm_retry_count;
+static uint8 confirm_map_seen;
+static uint32 confirm_start_frame;
 static uint32 center_request_start_ms;
 static uint32 center_adjust_start_ms;
 static uint32 scan_fast_center_after_frame;
@@ -82,11 +111,25 @@ static uint8 post_observe_yaw_done;
 static uint32 post_observe_yaw_start_ms;
 static subject2_scan_sync_phase_enum scan_sync_phase;
 static uint8 scan_plan_snapshot_pending;
+static char scan_sync_rows[MAP_ROWS][MAP_COLS + 1];
+static map_source_struct scan_sync_source;
+static uint8 scan_sync_source_valid;
+static uint32 center_request_frame;
+static uint32 pre_push_request_frame;
+static subject2_recovery_reason_enum recovery_reason;
+static subject2_state_enum recovery_origin_state;
+static uint8 recovery_count;
+static uint16 recovery_box_cell;
+static uint16 recovery_target_cell;
+static uint8 recovery_observation_bit;
+static subject2_block_reason_enum blocked_reason;
+static subject2_state_enum blocked_resume_state;
 
 static void subject2_accept_confirmed_map(const subject2_context_struct *context,
                                           const map_source_struct *source,
                                           subject2_update_struct *update);
-static void subject2_begin_confirm_map(subject2_update_struct *update);
+static void subject2_begin_confirm_map(subject2_confirm_mode_enum mode,
+                                       subject2_update_struct *update);
 static const map_source_struct *subject2_effective_map(
     const subject2_context_struct *context,
     const map_source_struct *source,
@@ -98,6 +141,10 @@ static uint8 subject2_try_fast_scan_center(
     uint8 center_valid,
     uint8 is_box_scan,
     subject2_update_struct *update);
+static void subject2_begin_recovery(subject2_recovery_reason_enum reason,
+                                    competition_fatal_reason_enum fatal_reason,
+                                    executor_error_enum final_error,
+                                    subject2_update_struct *update);
 
 static void subject2_update_reset(subject2_update_struct *update)
 {
@@ -164,12 +211,53 @@ static void subject2_fail(executor_error_enum error,
                           const char *state_text,
                           subject2_update_struct *update)
 {
+    competition_fatal_reason_enum reason = COMPETITION_FATAL_CLASS;
+
+    (void)state_text;
+    if((EXEC_ERROR_ART_TIMEOUT == error) || (EXEC_ERROR_ART_SYNC == error) ||
+       (EXEC_ERROR_ART_CENTER == error))
+    {
+        reason = COMPETITION_FATAL_ART1;
+    }
+    else if(EXEC_ERROR_SUBJECT2_TRACK == error)
+    {
+        reason = COMPETITION_FATAL_TRACK;
+    }
+    else if((EXEC_ERROR_SUBJECT2_PLAN == error) || (EXEC_ERROR_ART_PLAN == error) ||
+            (EXEC_ERROR_MAP == error))
+    {
+        reason = COMPETITION_FATAL_PLAN;
+    }
+    else if(EXEC_ERROR_SUBJECT2_YAW == error)
+    {
+        reason = COMPETITION_FATAL_DRIVE;
+    }
     vision_uart_cancel();
-    executor_set_error(error);
+    if(EXEC_STATE_ERROR != executor_get_state())
+    {
+        executor_set_error(error);
+    }
+    competition_flow_latch_fatal(reason);
     subject2_state = SUBJECT2_ERROR;
     if(0 != update)
     {
-        update->run_state = state_text;
+        update->run_state = competition_flow_fatal_text();
+        update->redraw = 1u;
+    }
+}
+
+static void subject2_wait_for_blast(subject2_block_reason_enum reason,
+                                    subject2_state_enum resume_state,
+                                    subject2_update_struct *update)
+{
+    blocked_reason = reason;
+    blocked_resume_state = resume_state;
+    subject2_state = SUBJECT2_WAIT_BLAST;
+    if(0 != update)
+    {
+        update->blast_requested = 1u;
+        update->block_reason = reason;
+        update->run_state = "S3Plan";
         update->redraw = 1u;
     }
 }
@@ -188,6 +276,7 @@ static void subject2_begin_scan_map_sync(subject2_update_struct *update)
 {
     executor_stop();
     vision_uart_cancel();
+    scan_sync_source_valid = 0u;
     map_stability_tracker_reset(&confirm_tracker,
                                 openart_uart_get_frame_count());
     center_request_start_ms = time_ms();
@@ -213,7 +302,9 @@ static void subject2_tick_vision_mode(subject2_update_struct *update)
     }
     else if((now_ms - vision_mode_start_ms) >= SUBJECT2_VISION_READY_TIMEOUT_MS)
     {
-        subject2_fail(EXEC_ERROR_SUBJECT2_CLASS, "E:VMod", update);
+        subject2_begin_recovery(SUBJECT2_RECOVERY_CLASS,
+                                COMPETITION_FATAL_ART2,
+                                EXEC_ERROR_SUBJECT2_CLASS, update);
         return;
     }
     else if((now_ms - vision_mode_last_send_ms) >= SUBJECT2_VISION_READY_RETRY_MS)
@@ -286,6 +377,7 @@ static void subject2_retry_center_request(const char *state_text,
     art_center_batch_reset(&center_batch);
     executor_reset_art_player_center_samples();
     openart_request_player_center();
+    center_request_frame = openart_uart_get_frame_count();
     scan_center_request_started = 1u;
     if(0 != update)
     {
@@ -398,15 +490,183 @@ static uint8 subject2_apply_center(const subject2_context_struct *context,
                                            applied_x_cm, applied_y_cm);
 }
 
+static uint8 subject2_fresh_grid_is_usable(uint32 after_frame,
+                                           uint8 require_observation,
+                                           uint8 require_pre_push_wait,
+                                           uint8 require_pre_push_box)
+{
+    const map_source_struct *source = openart_map_get();
+    map_scan_stats_struct stats;
+    uint8 wait_row;
+    uint8 wait_col;
+    char box_value;
+
+    if((openart_uart_get_frame_count() <= after_frame) || (0 == source) ||
+       (0u == drive_control_is_healthy()) ||
+       (EXEC_STATE_ERROR == executor_get_state()))
+    {
+        return 0u;
+    }
+    map_scan_stats(source, &stats);
+    if((1u != stats.car_count) || (stats.box_count != stats.target_count))
+    {
+        return 0u;
+    }
+    if((0u != require_observation) &&
+       (0u == subject2_observation_map_matches(source)))
+    {
+        return 0u;
+    }
+    if(0u != require_pre_push_wait)
+    {
+        if((0u == executor_get_pre_push_wait_cell(&wait_row, &wait_col)) ||
+           (stats.car_row != wait_row) || (stats.car_col != wait_col))
+        {
+            return 0u;
+        }
+    }
+    if(0u != require_pre_push_box)
+    {
+        if((pre_push_box_session.box_row >= MAP_ROWS) ||
+           (pre_push_box_session.box_col >= MAP_COLS))
+        {
+            return 0u;
+        }
+        box_value = source->rows[pre_push_box_session.box_row]
+                                [pre_push_box_session.box_col];
+        if(('B' != box_value) && (MAP_BOX_ON_TARGET != box_value))
+        {
+            return 0u;
+        }
+    }
+    return 1u;
+}
+
+static void subject2_reset_recovery(void)
+{
+    recovery_reason = SUBJECT2_RECOVERY_NONE;
+    recovery_count = 0u;
+    recovery_box_cell = INVALID_STATE;
+    recovery_target_cell = INVALID_STATE;
+    recovery_observation_bit = 0u;
+}
+
+static competition_fatal_reason_enum subject2_recovery_fatal_reason(void)
+{
+    switch(recovery_reason)
+    {
+        case SUBJECT2_RECOVERY_CENTER:
+        case SUBJECT2_RECOVERY_OBSERVE:
+            return COMPETITION_FATAL_ART1;
+        case SUBJECT2_RECOVERY_YAW:
+        case SUBJECT2_RECOVERY_MOTION:
+            return COMPETITION_FATAL_DRIVE;
+        case SUBJECT2_RECOVERY_TRACK:
+            return COMPETITION_FATAL_TRACK;
+        case SUBJECT2_RECOVERY_PLAN:
+            return COMPETITION_FATAL_PLAN;
+        case SUBJECT2_RECOVERY_CLASS:
+            return COMPETITION_FATAL_ART2;
+        default:
+            return COMPETITION_FATAL_MAP;
+    }
+}
+
+static executor_error_enum subject2_recovery_final_error(void)
+{
+    switch(recovery_reason)
+    {
+        case SUBJECT2_RECOVERY_CENTER:
+        case SUBJECT2_RECOVERY_OBSERVE:
+            return EXEC_ERROR_ART_CENTER;
+        case SUBJECT2_RECOVERY_YAW:
+        case SUBJECT2_RECOVERY_MOTION:
+            return EXEC_ERROR_SUBJECT2_YAW;
+        case SUBJECT2_RECOVERY_TRACK:
+            return EXEC_ERROR_SUBJECT2_TRACK;
+        case SUBJECT2_RECOVERY_PLAN:
+            return EXEC_ERROR_SUBJECT2_PLAN;
+        case SUBJECT2_RECOVERY_CLASS:
+            return EXEC_ERROR_SUBJECT2_CLASS;
+        default:
+            return EXEC_ERROR_ART_SYNC;
+    }
+}
+
+static void subject2_begin_recovery(subject2_recovery_reason_enum reason,
+                                    competition_fatal_reason_enum fatal_reason,
+                                    executor_error_enum final_error,
+                                    subject2_update_struct *update)
+{
+    subject2_state_enum origin = subject2_state;
+    uint8 observation_bit = current_observation.observation_bit;
+
+    if((SUBJECT2_SCAN_MAP_SYNC == subject2_state) &&
+       (SUBJECT2_RECOVERY_NONE != recovery_reason))
+    {
+        origin = recovery_origin_state;
+        observation_bit = recovery_observation_bit;
+    }
+    if((reason == recovery_reason) &&
+       ((origin == recovery_origin_state) ||
+        (SUBJECT2_RECOVERY_PLAN == reason)) &&
+       (active_box_cell == recovery_box_cell) &&
+       (active_target_cell == recovery_target_cell) &&
+       (observation_bit == recovery_observation_bit))
+    {
+        recovery_count++;
+    }
+    else
+    {
+        recovery_reason = reason;
+        recovery_origin_state = origin;
+        recovery_count = 1u;
+        recovery_box_cell = active_box_cell;
+        recovery_target_cell = active_target_cell;
+        recovery_observation_bit = observation_bit;
+    }
+
+    if((0u == drive_control_is_healthy()) ||
+       (recovery_count > RECOVERY_MAX_RETRIES))
+    {
+        if(0u == drive_control_is_healthy())
+        {
+            competition_flow_latch_fatal(COMPETITION_FATAL_DRIVE);
+        }
+        else
+        {
+            competition_flow_latch_fatal(fatal_reason);
+        }
+        vision_uart_cancel();
+        if(EXEC_STATE_ERROR != executor_get_state())
+        {
+            executor_set_error(final_error);
+        }
+        subject2_state = SUBJECT2_ERROR;
+        if(0 != update)
+        {
+            update->run_state = competition_flow_fatal_text();
+            update->redraw = 1u;
+        }
+        return;
+    }
+    subject2_begin_scan_map_sync(update);
+}
+
 #if ART_CENTER_TIMEOUT_FALLBACK_ENABLE
 static uint8 subject2_apply_map_cell_center(const subject2_context_struct *context)
 {
-    const map_source_struct *source =
-        subject2_effective_map(context, openart_map_get(), 0u);
+    const map_source_struct *source;
     uint8 car_row;
     uint8 car_col;
 
-    if((0 == source) || (0 == map_find_car(source, &car_row, &car_col, 0)))
+    if((0 == context) || (0 == context->snapshot) ||
+       (0 == context->snapshot_valid) || (0u == *context->snapshot_valid))
+    {
+        return 0u;
+    }
+    source = context->snapshot;
+    if(0 == map_find_car(source, &car_row, &car_col, 0))
     {
         return 0u;
     }
@@ -416,8 +676,6 @@ static uint8 subject2_apply_map_cell_center(const subject2_context_struct *conte
     navigation_start_col = car_col;
     *context->start_row = car_row;
     *context->start_col = car_col;
-    map_source_snapshot(context->snapshot, context->snapshot_rows, source);
-    *context->snapshot_valid = 1u;
     return 1u;
 }
 #endif
@@ -463,7 +721,16 @@ static void subject2_begin_view_backoff(subject2_update_struct *update)
                   (float)away_row * SUBJECT2_VIEW_BACKOFF_CM;
     if(0 == executor_start_position_correction(target_x_cm, target_y_cm))
     {
-        subject2_fail(EXEC_ERROR_SUBJECT2_CLASS, "E:Back", update);
+        if(EXEC_STATE_ERROR == executor_get_state())
+        {
+            subject2_fail(executor_get_error(), "E:Back", update);
+        }
+        else
+        {
+            subject2_begin_recovery(SUBJECT2_RECOVERY_MOTION,
+                                    COMPETITION_FATAL_DRIVE,
+                                    EXEC_ERROR_SUBJECT2_CLASS, update);
+        }
         return;
     }
 
@@ -488,7 +755,16 @@ static void subject2_begin_view_return(uint8 recognition_accepted,
     if(0 == executor_start_position_correction(view_backoff_origin_x_cm,
                                                view_backoff_origin_y_cm))
     {
-        subject2_fail(EXEC_ERROR_SUBJECT2_CLASS, "E:Back", update);
+        if(EXEC_STATE_ERROR == executor_get_state())
+        {
+            subject2_fail(executor_get_error(), "E:Back", update);
+        }
+        else
+        {
+            subject2_begin_recovery(SUBJECT2_RECOVERY_MOTION,
+                                    COMPETITION_FATAL_DRIVE,
+                                    EXEC_ERROR_SUBJECT2_CLASS, update);
+        }
         return;
     }
     view_backoff_recognition_accepted = recognition_accepted;
@@ -506,19 +782,13 @@ static void subject2_begin_view_return(uint8 recognition_accepted,
 static void subject2_begin_scan_center(subject2_update_struct *update)
 {
     uint8 box_scan = (box_objects == current_objects()) ? 1u : 0u;
-    uint8 periodic_center_valid;
 
     set_motion(0.0f, 0.0f);
     art_center_batch_reset(&center_batch);
     center_request_start_ms = time_ms();
-    scan_fast_center_after_frame = openart_get_player_center(
-        0, 0, &periodic_center_valid);
+    center_request_frame = openart_uart_get_frame_count();
+    scan_fast_center_after_frame = openart_get_player_center(0, 0, 0);
     scan_center_request_started = 0u;
-    if(0u == periodic_center_valid)
-    {
-        openart_request_player_center();
-        scan_center_request_started = 1u;
-    }
     subject2_state = (0u != box_scan) ?
                      SUBJECT2_SCAN_BOX_CENTER : SUBJECT2_SCAN_TARGET_CENTER;
     if(0 != update)
@@ -574,7 +844,20 @@ static void subject2_tick_turn(subject2_update_struct *update)
 
     if((now_ms - turn_start_ms) >= SUBJECT2_TURN_TIMEOUT_MS)
     {
-        subject2_fail(EXEC_ERROR_SUBJECT2_YAW, "E:Yaw", update);
+        if((0u != drive_control_is_healthy()) &&
+           (subject2_abs_float(status->yaw_error) <= 2.0f))
+        {
+            subject2_begin_classification(classify_state, update);
+            if(0 != update) update->run_state = "YawKeep";
+        }
+        else if(0u != drive_control_is_healthy())
+        {
+            subject2_mark_observation_failed(update);
+        }
+        else
+        {
+            subject2_fail(EXEC_ERROR_SUBJECT2_YAW, "E:Yaw", update);
+        }
     }
     else if(0 != update)
     {
@@ -611,12 +894,14 @@ static void subject2_tick_center(const subject2_context_struct *context,
                 return;
             }
             openart_request_player_center();
+            center_request_frame = openart_uart_get_frame_count();
             scan_center_request_started = 1u;
         }
         else if((time_ms() - center_request_start_ms) >=
                 SUBJECT2_FAST_CENTER_WAIT_MS)
         {
             openart_request_player_center();
+            center_request_frame = openart_uart_get_frame_count();
             scan_center_request_started = 1u;
         }
         else
@@ -634,7 +919,18 @@ static void subject2_tick_center(const subject2_context_struct *context,
         if((time_ms() - center_request_start_ms) >= EXEC_ART_SYNC_TIMEOUT_MS)
         {
 #if ART_CENTER_TIMEOUT_FALLBACK_ENABLE
-            subject2_begin_turn(update);
+            if(0u != subject2_fresh_grid_is_usable(center_request_frame,
+                                                    1u, 0u, 0u))
+            {
+                subject2_begin_turn(update);
+                if(0 != update) update->run_state = "CtrSkip";
+            }
+            else
+            {
+                subject2_begin_recovery(SUBJECT2_RECOVERY_CENTER,
+                                        COMPETITION_FATAL_ART1,
+                                        EXEC_ERROR_ART_CENTER, update);
+            }
 #else
             subject2_fail(EXEC_ERROR_ART_CENTER, "E:CTmo", update);
 #endif
@@ -662,7 +958,9 @@ static void subject2_tick_center(const subject2_context_struct *context,
         {
             if(0 == subject2_apply_center(context, source, 1u, 0, 0))
             {
-                subject2_fail(EXEC_ERROR_ART_CENTER, "E:CRef", update);
+                subject2_begin_recovery(SUBJECT2_RECOVERY_CENTER,
+                                        COMPETITION_FATAL_ART1,
+                                        EXEC_ERROR_ART_CENTER, update);
                 return;
             }
             center_applied = 1u;
@@ -671,7 +969,9 @@ static void subject2_tick_center(const subject2_context_struct *context,
         {
             if(0 == subject2_apply_center(context, source, 0u, 0, 0))
             {
-                subject2_fail(EXEC_ERROR_ART_CENTER, "E:CRef", update);
+                subject2_begin_recovery(SUBJECT2_RECOVERY_CENTER,
+                                        COMPETITION_FATAL_ART1,
+                                        EXEC_ERROR_ART_CENTER, update);
                 return;
             }
             subject2_state = (0u != is_box_scan) ?
@@ -694,7 +994,9 @@ static void subject2_tick_center(const subject2_context_struct *context,
     if((0u == center_applied) &&
        (0 == subject2_apply_center(context, source, 1u, 0, 0)))
     {
-        subject2_fail(EXEC_ERROR_ART_CENTER, "E:CRef", update);
+        subject2_begin_recovery(SUBJECT2_RECOVERY_CENTER,
+                                COMPETITION_FATAL_ART1,
+                                EXEC_ERROR_ART_CENTER, update);
         return;
     }
 
@@ -703,7 +1005,16 @@ static void subject2_tick_center(const subject2_context_struct *context,
                  current_pose_offset_y_cm,
                  0.0f, 0.0f))
     {
-        subject2_fail(EXEC_ERROR_ART_CENTER, "E:CBsy", update);
+        if(EXEC_STATE_ERROR == executor_get_state())
+        {
+            subject2_fail(executor_get_error(), "E:CBsy", update);
+        }
+        else
+        {
+            subject2_begin_recovery(SUBJECT2_RECOVERY_CENTER,
+                                    COMPETITION_FATAL_ART1,
+                                    EXEC_ERROR_ART_CENTER, update);
+        }
         return;
     }
 
@@ -732,12 +1043,36 @@ static void subject2_tick_center_adjust(subject2_update_struct *update)
     }
     if(EXEC_STATE_ERROR == executor_get_state())
     {
-        subject2_fail(EXEC_ERROR_ART_CENTER, "E:CExe", update);
+        if(EXEC_ERROR_ART_CENTER == executor_get_error())
+        {
+            subject2_begin_recovery(SUBJECT2_RECOVERY_CENTER,
+                                    COMPETITION_FATAL_ART1,
+                                    EXEC_ERROR_ART_CENTER, update);
+        }
+        else
+        {
+            subject2_fail(executor_get_error(), "E:CExe", update);
+        }
         return;
     }
     if((time_ms() - center_adjust_start_ms) >= EXEC_ART_SYNC_TIMEOUT_MS)
     {
-        subject2_fail(EXEC_ERROR_ART_CENTER, "E:CTim", update);
+        pose = drive_pose_get();
+        if((0u != drive_control_is_healthy()) &&
+           (subject2_abs_float(pose->x_cm) <= SUBJECT2_FAST_CENTER_TOLERANCE_CM) &&
+           (subject2_abs_float(pose->y_cm) <= SUBJECT2_FAST_CENTER_TOLERANCE_CM))
+        {
+            executor_stop();
+            current_pose_offset_x_cm = pose->x_cm;
+            current_pose_offset_y_cm = pose->y_cm;
+            subject2_begin_turn(update);
+        }
+        else
+        {
+            subject2_begin_recovery(SUBJECT2_RECOVERY_CENTER,
+                                    COMPETITION_FATAL_ART1,
+                                    EXEC_ERROR_ART_CENTER, update);
+        }
         return;
     }
     if(0 != update)
@@ -853,10 +1188,16 @@ static void subject2_tick_view_backoff(subject2_update_struct *update)
         }
         return;
     }
-    if((EXEC_STATE_ERROR == executor_get_state()) ||
-       ((time_ms() - view_motion_start_ms) >= EXEC_ART_SYNC_TIMEOUT_MS))
+    if(EXEC_STATE_ERROR == executor_get_state())
     {
-        subject2_fail(EXEC_ERROR_SUBJECT2_CLASS, "E:Back", update);
+        subject2_fail(executor_get_error(), "E:Back", update);
+        return;
+    }
+    if((time_ms() - view_motion_start_ms) >= EXEC_ART_SYNC_TIMEOUT_MS)
+    {
+        subject2_begin_recovery(SUBJECT2_RECOVERY_MOTION,
+                                COMPETITION_FATAL_DRIVE,
+                                EXEC_ERROR_SUBJECT2_CLASS, update);
         return;
     }
     if(0 != update)
@@ -889,10 +1230,16 @@ static void subject2_tick_view_return(subject2_update_struct *update)
         }
         return;
     }
-    if((EXEC_STATE_ERROR == executor_get_state()) ||
-       ((time_ms() - view_motion_start_ms) >= EXEC_ART_SYNC_TIMEOUT_MS))
+    if(EXEC_STATE_ERROR == executor_get_state())
     {
-        subject2_fail(EXEC_ERROR_SUBJECT2_CLASS, "E:Back", update);
+        subject2_fail(executor_get_error(), "E:Back", update);
+        return;
+    }
+    if((time_ms() - view_motion_start_ms) >= EXEC_ART_SYNC_TIMEOUT_MS)
+    {
+        subject2_begin_recovery(SUBJECT2_RECOVERY_MOTION,
+                                COMPETITION_FATAL_DRIVE,
+                                EXEC_ERROR_SUBJECT2_CLASS, update);
         return;
     }
     if(0 != update)
@@ -905,6 +1252,7 @@ static void subject2_tick_plan(const subject2_context_struct *context,
                                subject2_update_struct *update)
 {
     const map_source_struct *source;
+    const control_status_struct *control_status;
     subject2_object_struct *objects = current_objects();
     uint8 count = current_object_count();
     map_scan_stats_struct stats;
@@ -915,7 +1263,9 @@ static void subject2_tick_plan(const subject2_context_struct *context,
 
     if(0 == source)
     {
-        subject2_fail(EXEC_ERROR_SUBJECT2_CLASS, "E:Map", update);
+        subject2_begin_recovery(SUBJECT2_RECOVERY_MAP,
+                                COMPETITION_FATAL_MAP,
+                                EXEC_ERROR_ART_SYNC, update);
         return;
     }
     if(0 == subject2_map_objects_unchanged(source))
@@ -929,10 +1279,47 @@ static void subject2_tick_plan(const subject2_context_struct *context,
         *context->snapshot_valid = 1u;
     }
     scan_plan_snapshot_pending = 0u;
-    if(0 == subject2_select_observation(context->snapshot, objects, count,
-                                        &current_observation, context->result))
+#if SUBJECT2_LAST_TARGET_ELIMINATION_ENABLE
+    if(objects == target_objects)
     {
-        subject2_fail(EXEC_ERROR_SUBJECT2_CLASS, "E:VPos", update);
+        uint8 inferred_target_index;
+        uint8 inferred_class;
+
+        if(0u != subject2_infer_last_target_class(
+                      box_objects, box_object_count,
+                      target_objects, target_object_count,
+                      &inferred_target_index, &inferred_class))
+        {
+            target_objects[inferred_target_index].class_id = inferred_class;
+            target_objects[inferred_target_index].recognized = 1u;
+            subject2_state = SUBJECT2_VALIDATE_BINDINGS;
+            if(0 != update)
+            {
+                update->run_state = "Bind";
+                update->redraw = 1u;
+            }
+            return;
+        }
+    }
+#endif
+    control_status = get_control_status();
+    if(0 == subject2_select_observation(context->snapshot, objects, count,
+                                         control_status->current_yaw,
+                                         &current_observation, context->result))
+    {
+        if(0u != context->allow_blast_fallback)
+        {
+            subject2_wait_for_blast(
+                (objects == box_objects) ? SUBJECT2_BLOCK_OBSERVE_BOX :
+                                           SUBJECT2_BLOCK_OBSERVE_TARGET,
+                (objects == box_objects) ? SUBJECT2_SCAN_BOX_PLAN :
+                                           SUBJECT2_SCAN_TARGET_PLAN,
+                update);
+            return;
+        }
+        subject2_begin_recovery(SUBJECT2_RECOVERY_PLAN,
+                                COMPETITION_FATAL_PLAN,
+                                EXEC_ERROR_SUBJECT2_PLAN, update);
         return;
     }
     view_backoff_active = 0u;
@@ -973,7 +1360,7 @@ static void subject2_tick_move(subject2_update_struct *update)
     }
     else if(EXEC_STATE_ERROR == executor_get_state())
     {
-        subject2_fail(EXEC_ERROR_SUBJECT2_CLASS, "E:Move", update);
+        subject2_fail(executor_get_error(), "E:Move", update);
     }
     else if(0 != update)
     {
@@ -1011,7 +1398,9 @@ static void subject2_tick_validate(subject2_update_struct *update)
     }
     if(0u != validation_retry_count)
     {
-        subject2_fail(EXEC_ERROR_SUBJECT2_CLASS, "E:BSet", update);
+        subject2_begin_recovery(SUBJECT2_RECOVERY_CLASS,
+                                COMPETITION_FATAL_CLASS,
+                                EXEC_ERROR_SUBJECT2_CLASS, update);
         return;
     }
     invalidate_mismatched_classes(&need_boxes, &need_targets);
@@ -1028,7 +1417,9 @@ static void subject2_tick_validate(subject2_update_struct *update)
     }
     else
     {
-        subject2_fail(EXEC_ERROR_SUBJECT2_CLASS, "E:BSet", update);
+        subject2_begin_recovery(SUBJECT2_RECOVERY_CLASS,
+                                COMPETITION_FATAL_CLASS,
+                                EXEC_ERROR_SUBJECT2_CLASS, update);
         return;
     }
     if(0 != update)
@@ -1052,10 +1443,7 @@ static uint8 subject2_try_fast_scan_center(
     float offset_x_cm;
     float offset_y_cm;
 
-    if((0u == center_valid) ||
-       (0u == map_validate_player_center(source,
-                                         center_col_q, center_row_q,
-                                         &car_row, &car_col)) ||
+    if((0u == map_find_car(source, &car_row, &car_col, 0)) ||
        (0u == subject2_map_objects_unchanged(source)) ||
        (car_row != current_observation.row) ||
        (car_col != current_observation.col))
@@ -1063,16 +1451,31 @@ static uint8 subject2_try_fast_scan_center(
         return 0u;
     }
 
-    offset_x_cm = ((float)((int32)center_col_q -
-                           (int32)(car_col * 100u + 50u)) /
-                   100.0f) * GRID_SIZE_CM;
-    offset_y_cm = -((float)((int32)center_row_q -
-                            (int32)(car_row * 100u + 50u)) /
-                    100.0f) * GRID_SIZE_CM;
-    if((subject2_abs_float(offset_x_cm) > SUBJECT2_FAST_CENTER_TOLERANCE_CM) ||
-       (subject2_abs_float(offset_y_cm) > SUBJECT2_FAST_CENTER_TOLERANCE_CM))
+    if(0u != center_valid)
     {
-        return 0u;
+        if(0u == map_validate_player_center(source,
+                                             center_col_q, center_row_q,
+                                             &car_row, &car_col))
+        {
+            return 0u;
+        }
+        offset_x_cm = ((float)((int32)center_col_q -
+                               (int32)(car_col * 100u + 50u)) /
+                       100.0f) * GRID_SIZE_CM;
+        offset_y_cm = -((float)((int32)center_row_q -
+                                (int32)(car_row * 100u + 50u)) /
+                        100.0f) * GRID_SIZE_CM;
+        if((subject2_abs_float(offset_x_cm) > SUBJECT2_FAST_CENTER_TOLERANCE_CM) ||
+           (subject2_abs_float(offset_y_cm) > SUBJECT2_FAST_CENTER_TOLERANCE_CM))
+        {
+            return 0u;
+        }
+    }
+    else
+    {
+        /* 周期帧没有精确中心时，唯一 C 已匹配观察格，按格中心重建导航原点。 */
+        center_col_q = (uint16)(car_col * 100u + 50u);
+        center_row_q = (uint16)(car_row * 100u + 50u);
     }
     if(0u == subject2_apply_center_from_cell(context, source,
                                               car_row, car_col,
@@ -1088,7 +1491,16 @@ static uint8 subject2_try_fast_scan_center(
                   current_pose_offset_x_cm,
                   current_pose_offset_y_cm))
     {
-        subject2_fail(EXEC_ERROR_ART_CENTER, "E:CBsy", update);
+        if(EXEC_STATE_ERROR == executor_get_state())
+        {
+            subject2_fail(executor_get_error(), "E:CBsy", update);
+        }
+        else
+        {
+            subject2_begin_recovery(SUBJECT2_RECOVERY_CENTER,
+                                    COMPETITION_FATAL_ART1,
+                                    EXEC_ERROR_ART_CENTER, update);
+        }
         return 1u;
     }
 
@@ -1245,7 +1657,7 @@ static void subject2_tick_post_observe_yaw_fix(subject2_update_struct *update)
 
     if((now_ms - turn_start_ms) >= SUBJECT2_TURN_TIMEOUT_MS)
     {
-        subject2_fail(EXEC_ERROR_SUBJECT2_YAW, "E:Yaw", update);
+        subject2_finish_post_observe_yaw(1u, update);
     }
     else if(0 != update)
     {
@@ -1279,7 +1691,16 @@ static void subject2_tick_restore_heading(subject2_update_struct *update)
 
     if((now_ms - turn_start_ms) >= SUBJECT2_TURN_TIMEOUT_MS)
     {
-        subject2_fail(EXEC_ERROR_SUBJECT2_YAW, "E:HYaw", update);
+        if(0u != drive_control_is_healthy())
+        {
+            drive_control_lock_yaw_and_reset_pose();
+            launch_yaw_deg = get_control_status()->target_yaw;
+            subject2_enter_select_push(update);
+        }
+        else
+        {
+            subject2_fail(EXEC_ERROR_SUBJECT2_YAW, "E:HYaw", update);
+        }
     }
     else if(0 != update)
     {
@@ -1303,7 +1724,15 @@ static void subject2_tick_select_push(const subject2_context_struct *context,
                                        &push_plan,
                                        &push_candidate_result))
     {
-        subject2_fail(EXEC_ERROR_SUBJECT2_PLAN, "E:Plan", update);
+        if(0u != context->allow_blast_fallback)
+        {
+            subject2_wait_for_blast(SUBJECT2_BLOCK_PUSH,
+                                    SUBJECT2_SELECT_PUSH, update);
+            return;
+        }
+        subject2_begin_recovery(SUBJECT2_RECOVERY_PLAN,
+                                COMPETITION_FATAL_PLAN,
+                                EXEC_ERROR_SUBJECT2_PLAN, update);
         return;
     }
 
@@ -1316,7 +1745,9 @@ static void subject2_tick_select_push(const subject2_context_struct *context,
     if(0 == subject2_collect_cells(context->snapshot, 'B',
                                    task_start_boxes, &task_start_box_count))
     {
-        subject2_fail(EXEC_ERROR_SUBJECT2_TRACK, "E:Track", update);
+        subject2_begin_recovery(SUBJECT2_RECOVERY_TRACK,
+                                COMPETITION_FATAL_TRACK,
+                                EXEC_ERROR_SUBJECT2_TRACK, update);
         return;
     }
     task_start_target_count = task_start_box_count;
@@ -1331,6 +1762,7 @@ static void subject2_tick_select_push(const subject2_context_struct *context,
                    current_pose_offset_y_cm,
                    (RUN_MODE_STEP == context->run_mode) ? 1u : 0u,
                    1u);
+    subject2_reset_recovery();
     subject2_state = SUBJECT2_EXECUTE_PUSH;
     if(0 != update)
     {
@@ -1351,6 +1783,7 @@ static void subject2_begin_pre_push_center(subject2_update_struct *update)
     pre_push_box_retry_settling = 0u;
     pre_push_box_retry_settle_start_ms = 0u;
     pre_push_center_start_ms = time_ms();
+    pre_push_request_frame = openart_uart_get_frame_count();
     subject2_state = SUBJECT2_PRE_PUSH_CENTER;
     if(0 != executor_get_pre_push_box_request(&box_row, &box_col))
     {
@@ -1384,7 +1817,16 @@ static void subject2_tick_pre_push_box(subject2_update_struct *update)
         }
         if(EXEC_STATE_ERROR == executor_get_state())
         {
-            subject2_fail(EXEC_ERROR_ART_CENTER, "E:BTim", update);
+            if(EXEC_ERROR_ART_CENTER == executor_get_error())
+            {
+                subject2_begin_recovery(SUBJECT2_RECOVERY_OBSERVE,
+                                        COMPETITION_FATAL_ART1,
+                                        EXEC_ERROR_ART_CENTER, update);
+            }
+            else
+            {
+                subject2_fail(executor_get_error(), "E:BTim", update);
+            }
             return;
         }
         if(0u == pre_push_box_retry_settling)
@@ -1425,7 +1867,16 @@ static void subject2_tick_pre_push_box(subject2_update_struct *update)
         }
         if(EXEC_STATE_ERROR == executor_get_state())
         {
-            subject2_fail(EXEC_ERROR_ART_CENTER, "E:BTim", update);
+            if(EXEC_ERROR_ART_CENTER == executor_get_error())
+            {
+                subject2_begin_recovery(SUBJECT2_RECOVERY_OBSERVE,
+                                        COMPETITION_FATAL_ART1,
+                                        EXEC_ERROR_ART_CENTER, update);
+            }
+            else
+            {
+                subject2_fail(executor_get_error(), "E:BTim", update);
+            }
             return;
         }
 
@@ -1445,28 +1896,25 @@ static void subject2_tick_pre_push_box(subject2_update_struct *update)
     {
         if((time_ms() - pre_push_center_start_ms) >= ART_BOX_OBSERVE_WAIT_MS)
         {
-            if(pre_push_box_retry_count < ART_BOX_OBSERVE_MAX_RETRIES)
+            if((0u != subject2_fresh_grid_is_usable(pre_push_request_frame,
+                                                     0u, 1u, 1u)) &&
+               (0u != executor_continue_after_pre_push_center()))
             {
-                pre_push_box_session.active = 0u;
-                pre_push_box_session.ready = 0u;
-                executor_reset_art_box_observation_samples();
-                if(0 == executor_start_pre_push_box_retry_nudge(
-                             ART_BOX_OBSERVE_RETRY_MOVE_CM))
-                {
-                    subject2_fail(EXEC_ERROR_ART_CENTER, "E:BTim", update);
-                    return;
-                }
-                pre_push_box_retry_count++;
-                pre_push_box_retry_moving = 1u;
+                art_box_observation_session_reset(&pre_push_box_session);
+                pre_push_center_start_ms = 0u;
+                pre_push_box_request_active = 0u;
+                subject2_state = SUBJECT2_EXECUTE_PUSH;
                 if(0 != update)
                 {
-                    update->run_state = "BRetry";
+                    update->run_state = "GridPush";
                     update->redraw = 1u;
                 }
             }
             else
             {
-                subject2_fail(EXEC_ERROR_ART_CENTER, "E:BObs", update);
+                subject2_begin_recovery(SUBJECT2_RECOVERY_OBSERVE,
+                                        COMPETITION_FATAL_ART1,
+                                        EXEC_ERROR_ART_CENTER, update);
             }
         }
         else if(0 != update)
@@ -1477,6 +1925,14 @@ static void subject2_tick_pre_push_box(subject2_update_struct *update)
     }
 
     prep_result = executor_start_pre_push_box_preparation();
+    if(EXEC_ART_BOX_PREP_GEOMETRY_ERROR == prep_result)
+    {
+        art_box_observation_session_reset(&pre_push_box_session);
+        subject2_begin_recovery(SUBJECT2_RECOVERY_OBSERVE,
+                                COMPETITION_FATAL_ART1,
+                                EXEC_ERROR_ART_CENTER, update);
+        return;
+    }
     if(EXEC_ART_BOX_PREP_STARTED != prep_result)
     {
         art_box_observation_session_reset(&pre_push_box_session);
@@ -1532,16 +1988,20 @@ static void subject2_tick_pre_push_center(const subject2_context_struct *context
         if((time_ms() - pre_push_center_start_ms) >= EXEC_ART_SYNC_TIMEOUT_MS)
         {
 #if ART_CENTER_TIMEOUT_FALLBACK_ENABLE
-            if(0 == executor_continue_after_pre_push_center())
+            if((0u == subject2_fresh_grid_is_usable(pre_push_request_frame,
+                                                     0u, 1u, 0u)) ||
+               (0 == executor_continue_after_pre_push_center()))
             {
-                subject2_fail(EXEC_ERROR_ART_CENTER, "E:CPsh", update);
+                subject2_begin_recovery(SUBJECT2_RECOVERY_CENTER,
+                                        COMPETITION_FATAL_ART1,
+                                        EXEC_ERROR_ART_CENTER, update);
                 return;
             }
             pre_push_center_start_ms = 0u;
             subject2_state = SUBJECT2_EXECUTE_PUSH;
             if(0 != update)
             {
-                update->run_state = "S2Push";
+                update->run_state = "CtrSkip";
                 update->redraw = 1u;
             }
 #else
@@ -1564,7 +2024,7 @@ static void subject2_tick_pre_push_center(const subject2_context_struct *context
     }
     if(0 == subject2_map_objects_unchanged(source))
     {
-        subject2_begin_confirm_map(update);
+        subject2_begin_confirm_map(SUBJECT2_CONFIRM_STRICT, update);
         return;
     }
     result = executor_commit_art_player_center(car_row, car_col);
@@ -1602,12 +2062,22 @@ static void subject2_tick_pre_push_center(const subject2_context_struct *context
     }
 }
 
-static void subject2_begin_confirm_map(subject2_update_struct *update)
+static void subject2_begin_confirm_map(subject2_confirm_mode_enum mode,
+                                       subject2_update_struct *update)
 {
+    uint32 frame_count = openart_uart_get_frame_count();
+
     art_box_observation_session_reset(&pre_push_box_session);
-    map_stability_tracker_reset(&confirm_tracker,
-                                openart_uart_get_frame_count());
+    map_stability_tracker_reset(&confirm_tracker, frame_count);
     confirm_wait_start_ms = time_ms();
+    confirm_start_frame = frame_count;
+    confirm_mode = mode;
+    confirm_retry_count = 0u;
+    confirm_map_seen = 0u;
+    if(SUBJECT2_CONFIRM_HOST_CHANGE != mode)
+    {
+        host_path_preserved = 0u;
+    }
     subject2_state = SUBJECT2_CONFIRM_MAP;
     if(0 != update)
     {
@@ -1674,8 +2144,63 @@ static uint8 subject2_handle_host_completion(subject2_update_struct *update)
 {
     const map_source_struct *source = openart_map_get();
     map_scan_stats_struct stats;
+    uint32 frame_count = openart_uart_get_frame_count();
     uint8 box_reduction;
     uint8 target_reduction;
+
+    if(0u != host_completion_waiting_boundary)
+    {
+        if(0u != executor_stop_after_current_push_ready())
+        {
+            host_completion_waiting_boundary = 0u;
+            host_completion_start_ms = 0u;
+            host_path_preserved = 1u;
+            subject2_begin_confirm_map(SUBJECT2_CONFIRM_HOST_CHANGE, update);
+            if(0 != update)
+            {
+                update->run_state = "Host Sync";
+                update->redraw = 1u;
+            }
+        }
+        else if(EXEC_STATE_RUNNING != executor_get_state())
+        {
+            host_completion_waiting_boundary = 0u;
+            host_completion_start_ms = 0u;
+            return 0u;
+        }
+        else if((time_ms() - host_completion_start_ms) >=
+                RECOVERY_RESYNC_TIMEOUT_MS)
+        {
+            if(0u == executor_force_current_push_stop())
+            {
+                subject2_begin_recovery(SUBJECT2_RECOVERY_MOTION,
+                                        COMPETITION_FATAL_DRIVE,
+                                        EXEC_ERROR_SUBJECT2_PLAN, update);
+                return 1u;
+            }
+            host_completion_waiting_boundary = 0u;
+            host_completion_start_ms = 0u;
+            host_path_preserved = 1u;
+            subject2_begin_confirm_map(SUBJECT2_CONFIRM_HOST_CHANGE, update);
+            if(0 != update)
+            {
+                update->run_state = "Host Sync";
+                update->redraw = 1u;
+            }
+        }
+        else if(0 != update)
+        {
+            update->run_state = "Host Pend";
+            update->redraw = 1u;
+        }
+        return 1u;
+    }
+
+    if((0u == frame_count) || (frame_count == host_monitor_last_frame))
+    {
+        return 0u;
+    }
+    host_monitor_last_frame = frame_count;
 
     map_scan_stats(source, &stats);
     if((1u != stats.car_count) ||
@@ -1692,8 +2217,27 @@ static uint8 subject2_handle_host_completion(subject2_update_struct *update)
         return 0u;
     }
 
-    executor_stop();
-    subject2_begin_confirm_map(update);
+    if(0u != executor_request_stop_after_current_push())
+    {
+        host_completion_waiting_boundary = 1u;
+        host_completion_start_ms = time_ms();
+        if(0 != update)
+        {
+            update->run_state = "Host Pend";
+            update->redraw = 1u;
+        }
+        return 1u;
+    }
+
+    if(0u != executor_art_sync_pending())
+    {
+        subject2_begin_confirm_map(SUBJECT2_CONFIRM_TASK_END, update);
+    }
+    else
+    {
+        executor_stop();
+        subject2_begin_confirm_map(SUBJECT2_CONFIRM_STRICT, update);
+    }
     return 1u;
 }
 
@@ -1724,10 +2268,16 @@ static void subject2_accept_confirmed_map(const subject2_context_struct *context
     uint8 next_box_count = box_object_count;
     uint8 next_target_count = target_object_count;
 
+    host_path_preserved = 0u;
+    confirm_mode = SUBJECT2_CONFIRM_STRICT;
+    confirm_retry_count = 0u;
+    confirm_map_seen = 0u;
     map_scan_stats(source, &stats);
     if(1u != stats.car_count)
     {
-        subject2_fail(EXEC_ERROR_SUBJECT2_TRACK, "E:Track", update);
+        subject2_begin_recovery(SUBJECT2_RECOVERY_TRACK,
+                                COMPETITION_FATAL_TRACK,
+                                EXEC_ERROR_SUBJECT2_TRACK, update);
         return;
     }
     memcpy(next_boxes, box_objects, sizeof(next_boxes));
@@ -1741,7 +2291,9 @@ static void subject2_accept_confirmed_map(const subject2_context_struct *context
        ((stats.box_count > task_start_box_count) ||
         (stats.target_count > task_start_target_count)))
     {
-        subject2_fail(EXEC_ERROR_SUBJECT2_TRACK, "E:Track", update);
+        subject2_begin_recovery(SUBJECT2_RECOVERY_TRACK,
+                                COMPETITION_FATAL_TRACK,
+                                EXEC_ERROR_SUBJECT2_TRACK, update);
         return;
     }
 
@@ -1764,6 +2316,10 @@ static void subject2_accept_confirmed_map(const subject2_context_struct *context
     }
     map_source_snapshot(context->snapshot, context->snapshot_rows, source);
     *context->snapshot_valid = 1u;
+    if(SUBJECT2_RECOVERY_PLAN != recovery_reason)
+    {
+        subject2_reset_recovery();
+    }
     executor_stop();
     if(SUBJECT2_SYNC_RESCAN == sync_result)
     {
@@ -1773,46 +2329,263 @@ static void subject2_accept_confirmed_map(const subject2_context_struct *context
     subject2_begin_replan_center((0u == stats.box_count) ? 1u : 0u, update);
 }
 
+static uint8 subject2_complete_active_task_locally(
+    const subject2_context_struct *context,
+    subject2_update_struct *update)
+{
+    char predicted_rows[MAP_ROWS][MAP_COLS + 1];
+    map_source_struct predicted_source;
+    subject2_object_struct next_boxes[MAX_BOXES];
+    subject2_object_struct next_targets[MAX_BOXES];
+    subject2_sync_update_struct sync_update;
+    subject2_sync_result_enum sync_result;
+    map_scan_stats_struct stats;
+    const waypoint_struct *last_waypoint;
+    uint8 next_box_count = box_object_count;
+    uint8 next_target_count = target_object_count;
+    uint8 old_car_row;
+    uint8 old_car_col;
+    uint8 box_row;
+    uint8 box_col;
+    uint8 target_row;
+    uint8 target_col;
+    char value;
+
+    if((0 == context) || (0 == context->snapshot) ||
+       (0 == context->snapshot_rows) || (0 == context->snapshot_valid) ||
+       (0 == context->result) || (0 == context->start_row) ||
+       (0 == context->start_col) || (0u == *context->snapshot_valid) ||
+       (0u == context->result->waypoint_count) ||
+       (MAP_CELLS <= active_box_cell) ||
+       (MAP_CELLS <= active_target_cell))
+    {
+        return 0u;
+    }
+
+    last_waypoint = &context->result->waypoints[
+        context->result->waypoint_count - 1u];
+    if((last_waypoint->row >= MAP_ROWS) ||
+       (last_waypoint->col >= MAP_COLS))
+    {
+        return 0u;
+    }
+
+    map_source_snapshot(&predicted_source, predicted_rows, context->snapshot);
+    if(0 == map_find_car(&predicted_source, &old_car_row, &old_car_col, 0))
+    {
+        return 0u;
+    }
+    predicted_rows[old_car_row][old_car_col] =
+        ('+' == predicted_rows[old_car_row][old_car_col]) ? 'T' : '.';
+
+    box_row = map_cell_row(active_box_cell);
+    box_col = map_cell_col(active_box_cell);
+    target_row = map_cell_row(active_target_cell);
+    target_col = map_cell_col(active_target_cell);
+    value = predicted_rows[box_row][box_col];
+    if(('B' != value) && (MAP_BOX_ON_TARGET != value))
+    {
+        return 0u;
+    }
+    predicted_rows[box_row][box_col] =
+        (MAP_BOX_ON_TARGET == value) ? 'T' : '.';
+
+    if(active_target_cell == active_box_cell)
+    {
+        predicted_rows[target_row][target_col] = '.';
+    }
+    else
+    {
+        value = predicted_rows[target_row][target_col];
+        if(('T' != value) && ('+' != value) &&
+           (MAP_BOX_ON_TARGET != value))
+        {
+            return 0u;
+        }
+        predicted_rows[target_row][target_col] =
+            ('+' == value) ? 'C' : '.';
+    }
+
+    value = predicted_rows[last_waypoint->row][last_waypoint->col];
+    if(('T' == value) || ('+' == value))
+    {
+        predicted_rows[last_waypoint->row][last_waypoint->col] = '+';
+    }
+    else if(('.' == value) || ('C' == value))
+    {
+        predicted_rows[last_waypoint->row][last_waypoint->col] = 'C';
+    }
+    else
+    {
+        return 0u;
+    }
+
+    map_scan_stats(&predicted_source, &stats);
+    if((1u != stats.car_count) ||
+       (stats.box_count != stats.target_count) ||
+       ((uint8)(stats.box_count + 1u) != task_start_box_count) ||
+       ((uint8)(stats.target_count + 1u) != task_start_target_count))
+    {
+        return 0u;
+    }
+
+    memcpy(next_boxes, box_objects, sizeof(next_boxes));
+    memcpy(next_targets, target_objects, sizeof(next_targets));
+    sync_result = subject2_reconcile_object_lists(
+        &predicted_source,
+        next_boxes, &next_box_count,
+        next_targets, &next_target_count,
+        active_box_cell, active_target_cell, &sync_update);
+    if((SUBJECT2_SYNC_OK != sync_result) ||
+       (0u == sync_update.active_target_removed))
+    {
+        return 0u;
+    }
+
+    memcpy(box_objects, next_boxes, sizeof(box_objects));
+    memcpy(target_objects, next_targets, sizeof(target_objects));
+    box_object_count = next_box_count;
+    target_object_count = next_target_count;
+    map_source_snapshot(context->snapshot, context->snapshot_rows,
+                        &predicted_source);
+    *context->snapshot_valid = 1u;
+    *context->start_row = last_waypoint->row;
+    *context->start_col = last_waypoint->col;
+    navigation_start_row = last_waypoint->row;
+    navigation_start_col = last_waypoint->col;
+    current_pose_offset_x_cm = 0.0f;
+    current_pose_offset_y_cm = 0.0f;
+    active_class = SUBJECT2_INVALID_CLASS;
+    active_box_valid = 0u;
+    active_box_cell = INVALID_STATE;
+    active_target_cell = INVALID_STATE;
+    retry_active_only = 0u;
+    transit_overlap_valid = 0u;
+    transit_overlap_cell = INVALID_STATE;
+    host_path_preserved = 0u;
+    confirm_mode = SUBJECT2_CONFIRM_STRICT;
+    confirm_retry_count = 0u;
+    confirm_map_seen = 0u;
+    executor_stop();
+    subject2_reset_recovery();
+
+    if((0u == box_object_count) && (0u == target_object_count))
+    {
+        subject2_state = SUBJECT2_RETURN_REQUESTED;
+        if(0 != update)
+        {
+            update->return_requested = 1u;
+            update->return_pose_x_cm = 0.0f;
+            update->return_pose_y_cm = 0.0f;
+            update->run_state = "MCU Go";
+            update->redraw = 1u;
+        }
+    }
+    else
+    {
+        subject2_state = SUBJECT2_SELECT_PUSH;
+        if(0 != update)
+        {
+            update->run_state = "MCU Go";
+            update->redraw = 1u;
+        }
+    }
+    return 1u;
+}
+
 static void subject2_tick_confirm_map(const subject2_context_struct *context,
                                       subject2_update_struct *update)
 {
     const map_source_struct *source;
     map_scan_stats_struct stats;
     uint32 frame_count = openart_uart_get_frame_count();
+    uint32 timeout_ms = (SUBJECT2_CONFIRM_STRICT == confirm_mode) ?
+                        EXEC_ART_SYNC_TIMEOUT_MS :
+                        RECOVERY_RESYNC_TIMEOUT_MS;
     map_stability_result_enum stability;
 
-    if((time_ms() - confirm_wait_start_ms) >= EXEC_ART_SYNC_TIMEOUT_MS)
+    source = openart_map_get();
+    if(0 != source)
     {
-        subject2_fail(EXEC_ERROR_ART_TIMEOUT, "E:ATim", update);
-        return;
+        source = subject2_effective_map(context, source, 1u);
+        map_scan_stats(source, &stats);
+        /* 双 C 或数量变化仍是上位机发布了新场景的证据，不能盲续；
+         * 没有任何车证据的空帧则不应阻塞 MCU 路线兜底。 */
+        if((frame_count != confirm_start_frame) &&
+           (0u != stats.car_count))
+        {
+            confirm_map_seen = 1u;
+        }
+        if((1u != stats.car_count) ||
+           (stats.box_count != stats.target_count) ||
+           (stats.box_count > task_start_box_count) ||
+           (stats.target_count > task_start_target_count))
+        {
+            map_stability_tracker_reset_candidate(&confirm_tracker);
+        }
+        else
+        {
+            stability = map_stability_tracker_push(
+                &confirm_tracker, frame_count, source,
+                EXEC_ART_STABLE_FRAMES);
+            if(MAP_STABILITY_READY == stability)
+            {
+                subject2_accept_confirmed_map(context, source, update);
+                return;
+            }
+        }
     }
 
-    source = openart_map_get();
-    if(0 == source)
+    if((time_ms() - confirm_wait_start_ms) < timeout_ms)
     {
-        return;
-    }
-    source = subject2_effective_map(context, source, 1u);
-    map_scan_stats(source, &stats);
-    if((1u != stats.car_count) ||
-       (stats.box_count != stats.target_count) ||
-       (stats.box_count > task_start_box_count) ||
-       (stats.target_count > task_start_target_count))
-    {
-        map_stability_tracker_reset_candidate(&confirm_tracker);
         if(0 != update) update->run_state = "ART Wait";
         return;
     }
-    stability = map_stability_tracker_push(&confirm_tracker, frame_count,
-                                           source, EXEC_ART_STABLE_FRAMES);
-    if(MAP_STABILITY_READY == stability)
+
+    if((SUBJECT2_CONFIRM_STRICT != confirm_mode) &&
+       (0u == confirm_retry_count))
     {
-        subject2_accept_confirmed_map(context, source, update);
+        confirm_retry_count = 1u;
+        confirm_wait_start_ms = time_ms();
+        confirm_start_frame = frame_count;
+        map_stability_tracker_reset(&confirm_tracker, frame_count);
+        if(0 != update)
+        {
+            update->run_state = "ART Retry";
+            update->redraw = 1u;
+        }
+        return;
     }
-    else if(0 != update)
+
+    if((0u == confirm_map_seen) &&
+       (SUBJECT2_CONFIRM_HOST_CHANGE == confirm_mode) &&
+       (0u != host_path_preserved) &&
+       (0u != executor_resume_after_current_push_stop()))
     {
-        update->run_state = "ART Wait";
+        host_path_preserved = 0u;
+        confirm_mode = SUBJECT2_CONFIRM_STRICT;
+        confirm_retry_count = 0u;
+        subject2_state = SUBJECT2_EXECUTE_PUSH;
+        if(0 != update)
+        {
+            update->run_state = "MCU Go";
+            update->redraw = 1u;
+        }
+        return;
     }
+    if((0u == confirm_map_seen) &&
+       (SUBJECT2_CONFIRM_TASK_END == confirm_mode) &&
+       (0u != subject2_complete_active_task_locally(context, update)))
+    {
+        return;
+    }
+
+    host_path_preserved = 0u;
+    confirm_mode = SUBJECT2_CONFIRM_STRICT;
+    confirm_retry_count = 0u;
+    subject2_begin_recovery(SUBJECT2_RECOVERY_MAP,
+                            COMPETITION_FATAL_ART1,
+                            EXEC_ERROR_ART_TIMEOUT, update);
 }
 
 static void subject2_finish_scan_map_sync(
@@ -1836,13 +2609,21 @@ static void subject2_finish_scan_map_sync(
         active_box_cell, active_target_cell, &sync_update);
     if(SUBJECT2_SYNC_AMBIGUOUS == sync_result)
     {
-        subject2_fail(EXEC_ERROR_SUBJECT2_TRACK, "E:Track", update);
+        subject2_begin_recovery(SUBJECT2_RECOVERY_TRACK,
+                                COMPETITION_FATAL_TRACK,
+                                EXEC_ERROR_SUBJECT2_TRACK, update);
         return;
     }
     if(0 == subject2_apply_center(context, source, 0u, 0, 0))
     {
-        subject2_fail(EXEC_ERROR_ART_CENTER, "E:CRef", update);
+        subject2_begin_recovery(SUBJECT2_RECOVERY_CENTER,
+                                COMPETITION_FATAL_ART1,
+                                EXEC_ERROR_ART_CENTER, update);
         return;
+    }
+    if(SUBJECT2_RECOVERY_PLAN != recovery_reason)
+    {
+        subject2_reset_recovery();
     }
     scan_plan_snapshot_pending = 1u;
 
@@ -1914,9 +2695,13 @@ static void subject2_tick_scan_map_sync(const subject2_context_struct *context,
 
     if(SUBJECT2_SCAN_SYNC_WAIT_MAP == scan_sync_phase)
     {
-        if((time_ms() - center_request_start_ms) >= EXEC_ART_SYNC_TIMEOUT_MS)
+        if((time_ms() - center_request_start_ms) >= RECOVERY_RESYNC_TIMEOUT_MS)
         {
-            subject2_fail(EXEC_ERROR_SUBJECT2_CLASS, "E:Map", update);
+            subject2_begin_recovery(
+                (SUBJECT2_RECOVERY_NONE == recovery_reason) ?
+                SUBJECT2_RECOVERY_MAP : recovery_reason,
+                subject2_recovery_fatal_reason(),
+                subject2_recovery_final_error(), update);
             return;
         }
         frame_count = openart_uart_get_frame_count();
@@ -1940,8 +2725,9 @@ static void subject2_tick_scan_map_sync(const subject2_context_struct *context,
             if(0 != update) update->run_state = "VSync";
             return;
         }
+        map_source_snapshot(&scan_sync_source, scan_sync_rows, source);
+        scan_sync_source_valid = 1u;
         art_center_batch_reset(&center_batch);
-        center_request_start_ms = time_ms();
         openart_request_player_center();
         scan_sync_phase = SUBJECT2_SCAN_SYNC_WAIT_CENTER;
         if(0 != update)
@@ -1953,18 +2739,17 @@ static void subject2_tick_scan_map_sync(const subject2_context_struct *context,
 
     if(0 == subject2_collect_center())
     {
-        if((time_ms() - center_request_start_ms) >= EXEC_ART_SYNC_TIMEOUT_MS)
+        if((time_ms() - center_request_start_ms) >= RECOVERY_RESYNC_TIMEOUT_MS)
         {
 #if ART_CENTER_TIMEOUT_FALLBACK_ENABLE
             uint8 index;
 
-            source = openart_map_get();
+            source = (0u != scan_sync_source_valid) ? &scan_sync_source : 0;
             if(0 == source)
             {
                 subject2_fail(EXEC_ERROR_ART_CENTER, "E:CTmo", update);
                 return;
             }
-            source = subject2_effective_map(context, source, 0u);
             map_scan_stats(source, &stats);
             if(1u != stats.car_count)
             {
@@ -2047,7 +2832,7 @@ static void subject2_tick_replan_center(const subject2_context_struct *context,
         }
         if(0 == subject2_map_objects_unchanged(source))
         {
-            subject2_begin_confirm_map(update);
+            subject2_begin_confirm_map(SUBJECT2_CONFIRM_STRICT, update);
             return;
         }
         if(0 == subject2_apply_center(context, source, 0u, 0, 0))
@@ -2087,13 +2872,15 @@ static void subject2_tick_execute_push(subject2_update_struct *update)
     }
     else if(0 != executor_art_sync_pending())
     {
-        subject2_begin_confirm_map(update);
+        subject2_begin_confirm_map(SUBJECT2_CONFIRM_TASK_END, update);
     }
     else if(EXEC_STATE_ERROR == executor_get_state())
     {
         if(EXEC_ERROR_ART_CENTER == executor_get_error())
         {
-            subject2_fail(EXEC_ERROR_ART_CENTER, "E:CPsh", update);
+            subject2_begin_recovery(SUBJECT2_RECOVERY_OBSERVE,
+                                    COMPETITION_FATAL_ART1,
+                                    EXEC_ERROR_ART_CENTER, update);
         }
         else
         {
@@ -2250,6 +3037,12 @@ void subject2_tick(const subject2_context_struct *context,
         case SUBJECT2_REPLAN_CENTER:
             subject2_tick_replan_center(context, update);
             break;
+        case SUBJECT2_WAIT_BLAST:
+            if(0 != update)
+            {
+                update->run_state = "S3Plan";
+            }
+            break;
         case SUBJECT2_RETURN_REQUESTED:
             if(0 != update)
             {
@@ -2264,9 +3057,169 @@ void subject2_tick(const subject2_context_struct *context,
     }
 }
 
+subject2_block_reason_enum subject2_get_block_reason(void)
+{
+    return (SUBJECT2_WAIT_BLAST == subject2_state) ?
+           blocked_reason : SUBJECT2_BLOCK_NONE;
+}
+
+uint8 subject2_retry_blocked_plan(const map_source_struct *source,
+                                  solve_result_struct *result)
+{
+    subject2_observation_plan_struct observation;
+    subject2_push_plan_struct push_plan;
+
+    if((SUBJECT2_WAIT_BLAST != subject2_state) ||
+       (SUBJECT2_BLOCK_NONE == blocked_reason) ||
+       (0 == source) || (0 == result))
+    {
+        return 0u;
+    }
+    clear_result(result);
+    if(SUBJECT2_BLOCK_OBSERVE_BOX == blocked_reason)
+    {
+        return subject2_select_observation(
+            source, box_objects, box_object_count,
+            get_control_status()->current_yaw, &observation, result);
+    }
+    if(SUBJECT2_BLOCK_OBSERVE_TARGET == blocked_reason)
+    {
+        return subject2_select_observation(
+            source, target_objects, target_object_count,
+            get_control_status()->current_yaw, &observation, result);
+    }
+    if(SUBJECT2_BLOCK_PUSH == blocked_reason)
+    {
+        return subject2_select_push_plan(
+            source, box_objects, box_object_count,
+            target_objects, target_object_count,
+            retry_active_only, active_box_valid,
+            active_box_cell, active_target_cell,
+            &push_plan, result);
+    }
+    return 0u;
+}
+
+uint8 subject2_resume_after_blast(const subject2_context_struct *context,
+                                  const map_source_struct *source,
+                                  float pose_x_cm,
+                                  float pose_y_cm,
+                                  subject2_update_struct *update)
+{
+    map_scan_stats_struct stats;
+
+    subject2_update_reset(update);
+    if((SUBJECT2_WAIT_BLAST != subject2_state) ||
+       (SUBJECT2_BLOCK_NONE == blocked_reason) ||
+       (0 == context) || (0 == context->snapshot) ||
+       (0 == context->snapshot_rows) || (0 == context->snapshot_valid) ||
+       (0 == context->start_row) || (0 == context->start_col) ||
+       (0 == source))
+    {
+        return 0u;
+    }
+    map_scan_stats(source, &stats);
+    if(1u != stats.car_count)
+    {
+        return 0u;
+    }
+
+    map_source_snapshot(context->snapshot, context->snapshot_rows, source);
+    *context->snapshot_valid = 1u;
+    *context->start_row = stats.car_row;
+    *context->start_col = stats.car_col;
+    current_pose_offset_x_cm = pose_x_cm;
+    current_pose_offset_y_cm = pose_y_cm;
+    scan_plan_snapshot_pending = 0u;
+    subject2_state = blocked_resume_state;
+    blocked_reason = SUBJECT2_BLOCK_NONE;
+    blocked_resume_state = SUBJECT2_IDLE;
+    if(0 != update)
+    {
+        update->run_state = "S3Run";
+        update->redraw = 1u;
+    }
+    return 1u;
+}
+
+uint8 subject2_refresh_blocked_map(const subject2_context_struct *context,
+                                   const map_source_struct *source,
+                                   float pose_x_cm,
+                                   float pose_y_cm)
+{
+    map_scan_stats_struct stats;
+
+    if((SUBJECT2_WAIT_BLAST != subject2_state) ||
+       (SUBJECT2_BLOCK_NONE == blocked_reason) ||
+       (0 == context) || (0 == context->snapshot) ||
+       (0 == context->snapshot_rows) || (0 == context->snapshot_valid) ||
+       (0 == context->start_row) || (0 == context->start_col) ||
+       (0 == source))
+    {
+        return 0u;
+    }
+    map_scan_stats(source, &stats);
+    if(1u != stats.car_count)
+    {
+        return 0u;
+    }
+    map_source_snapshot(context->snapshot, context->snapshot_rows, source);
+    *context->snapshot_valid = 1u;
+    *context->start_row = stats.car_row;
+    *context->start_col = stats.car_col;
+    current_pose_offset_x_cm = pose_x_cm;
+    current_pose_offset_y_cm = pose_y_cm;
+    return 1u;
+}
+
+void subject2_get_pose_offset(float *pose_x_cm, float *pose_y_cm)
+{
+    if(0 != pose_x_cm)
+    {
+        *pose_x_cm = current_pose_offset_x_cm;
+    }
+    if(0 != pose_y_cm)
+    {
+        *pose_y_cm = current_pose_offset_y_cm;
+    }
+}
+
+void subject2_reject_blast_fallback(subject2_update_struct *update)
+{
+    subject2_update_reset(update);
+    if(SUBJECT2_WAIT_BLAST != subject2_state)
+    {
+        return;
+    }
+    subject2_state = blocked_resume_state;
+    blocked_reason = SUBJECT2_BLOCK_NONE;
+    blocked_resume_state = SUBJECT2_IDLE;
+    subject2_begin_recovery(SUBJECT2_RECOVERY_PLAN,
+                            COMPETITION_FATAL_PLAN,
+                            EXEC_ERROR_SUBJECT2_PLAN, update);
+}
+
+uint8 subject2_manual_recover(subject2_update_struct *update)
+{
+    subject2_update_reset(update);
+    if(SUBJECT2_ERROR != subject2_state)
+    {
+        return 0u;
+    }
+    executor_stop();
+    vision_uart_cancel();
+    subject2_reset_recovery();
+    subject2_begin_scan_map_sync(update);
+    return 1u;
+}
+
 void subject2_cancel(void)
 {
     subject2_state = SUBJECT2_IDLE;
+    host_completion_waiting_boundary = 0u;
+    host_completion_start_ms = 0u;
+    host_path_preserved = 0u;
+    host_monitor_last_frame = 0u;
     box_object_count = 0u;
     target_object_count = 0u;
     current_vision_request_id = 0u;
@@ -2294,6 +3247,10 @@ void subject2_cancel(void)
     replan_center_for_return = 0u;
     map_stability_tracker_reset(&confirm_tracker, 0u);
     confirm_wait_start_ms = 0u;
+    confirm_mode = SUBJECT2_CONFIRM_STRICT;
+    confirm_retry_count = 0u;
+    confirm_map_seen = 0u;
+    confirm_start_frame = 0u;
     center_request_start_ms = 0u;
     center_adjust_start_ms = 0u;
     scan_fast_center_after_frame = 0u;
@@ -2316,6 +3273,12 @@ void subject2_cancel(void)
     post_observe_yaw_start_ms = 0u;
     scan_sync_phase = SUBJECT2_SCAN_SYNC_WAIT_MAP;
     scan_plan_snapshot_pending = 0u;
+    scan_sync_source_valid = 0u;
+    center_request_frame = 0u;
+    pre_push_request_frame = 0u;
+    blocked_reason = SUBJECT2_BLOCK_NONE;
+    blocked_resume_state = SUBJECT2_IDLE;
+    subject2_reset_recovery();
 }
 
 subject2_state_enum subject2_get_state(void)

@@ -16,7 +16,7 @@ UART_RX_LINE_MAX = 48
 # ==================== USER_SWITCHES：现场最常改 ===================
 MODE_RUN = 0
 MODE_DEBUG = 1
-WORK_MODE = MODE_DEBUG
+WORK_MODE = MODE_RUN
 
 if WORK_MODE == MODE_RUN:
     DEBUG_ENABLE = False
@@ -26,8 +26,8 @@ if WORK_MODE == MODE_RUN:
     DEBUG_PLAYER_CENTER_ENABLE = False
     DEBUG_PLAYER_HEADING_ENABLE = False
     DEBUG_OBSERVATION_ENABLE = False
-    SHOW_RECTIFIED_VIEW = True
-    USE_RECTIFIED_RECOGNITION = True
+    SHOW_RECTIFIED_VIEW = False
+    USE_RECTIFIED_RECOGNITION = False
 else:
     DEBUG_ENABLE = True
     DEBUG_DRAW_ROI = True
@@ -1271,20 +1271,20 @@ def classify_element(img, row_idx, col_idx, x, y):
         if rr + gg + bb > r + g + b:
             r, g, b = rr, gg, bb
 
-    if (LAUNCH_PLAYER_WINDOW_ENABLE and
-            LAUNCH_PLAYER_ROW_MIN <= row_idx <= LAUNCH_PLAYER_ROW_MAX and
-            LAUNCH_PLAYER_COL_MIN <= col_idx <= LAUNCH_PLAYER_COL_MAX):
+    in_launch_player_window = (
+        LAUNCH_PLAYER_WINDOW_ENABLE and
+        LAUNCH_PLAYER_ROW_MIN <= row_idx <= LAUNCH_PLAYER_ROW_MAX and
+        LAUNCH_PLAYER_COL_MIN <= col_idx <= LAUNCH_PLAYER_COL_MAX)
+    if in_launch_player_window:
         if sample_player_color(img, x, y, r, g, b):
             return "player"
-        return "wall"
-
-    # 逐飞地图外圈固定为墙；左发车窗口只允许小车色块打破这条规则。
-    if (row_idx == 0 or row_idx == GRID_ROWS - 1 or
-            col_idx == 0 or col_idx == GRID_COLS - 1):
-        return "wall"
-
-    if sample_player_color(img, x, y, r, g, b):
-        return "player"
+    else:
+        # 逐飞地图外圈固定为墙；左发车窗口按普通格识别。
+        if (row_idx == 0 or row_idx == GRID_ROWS - 1 or
+                col_idx == 0 or col_idx == GRID_COLS - 1):
+            return "wall"
+        if sample_player_color(img, x, y, r, g, b):
+            return "player"
 
     rn, gn, bn, color_sum = normalize_color(r, g, b)
 
@@ -1512,6 +1512,8 @@ def parse_map_uart_line(line):
     global observation_request_generation
 
     if line == "CENTER_REQ":
+        observation_request_active = False
+        observation_request_sample_count = 0
         center_request_active = True
         center_request_sample_count = 0
         center_request_generation += 1
@@ -1528,6 +1530,8 @@ def parse_map_uart_line(line):
         if not (0 <= row_idx < GRID_ROWS and 0 <= col_idx < GRID_COLS):
             observation_request_active = False
             return
+        center_request_active = False
+        center_request_sample_count = 0
         observation_request_row = row_idx
         observation_request_col = col_idx
         observation_request_sample_count = 0
@@ -1573,9 +1577,13 @@ def process_center_request(uart, player_center_grid,
     if player_center_grid is None:
         return send_map_uart(uart, canonical_char_matrix, None)
 
+    request_generation = center_request_generation
     sample_index = center_request_sample_count + 1
     if not send_map_uart(uart, canonical_char_matrix, player_center_grid):
         return False
+    if (not center_request_active or
+            center_request_generation != request_generation):
+        return True
     yaw_q = 0
     yaw_valid = 0
     if player_yaw_deg is not None:
@@ -1604,9 +1612,13 @@ def process_observation_request(uart, canonical_char_matrix,
             canonical_char_matrix is None or
             player_center_grid is None or box_center_grid is None):
         return False
+    request_generation = observation_request_generation
     sample_index = observation_request_sample_count + 1
     if not send_map_uart(uart, canonical_char_matrix, player_center_grid):
         return False
+    if (not observation_request_active or
+            observation_request_generation != request_generation):
+        return True
     try:
         uart.write("OBSERVE_SAMPLE %d,%d,%d,%d,%d\n" %
                    (sample_index,
@@ -2008,7 +2020,6 @@ def main():
 
         if (UART_MAP_SEND_ENABLE and map_uart is not None and
                 canonical_char_matrix is not None and
-                not center_request_active and not observation_request_active and
                 time.ticks_diff(now_ms, last_uart_send_ms) >= UART_MAP_SEND_PERIOD_MS):
             periodic_center_grid = (precise_player_grid
                                     if player_count != 1 else None)

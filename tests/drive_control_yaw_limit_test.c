@@ -10,6 +10,7 @@
 
 #define PIT_CH1 (1)
 void pit_ms_init(int channel, uint32 period_ms);
+static uint8 fake_io_state;
 
 #include "../project/user/src/drive_control.c"
 
@@ -40,7 +41,7 @@ void command_to_velocity(motion_command_enum command, float move_speed,
 void drive_imu_init(void) { }
 void drive_output_init(void) { }
 void drive_pose_init(void) { }
-uint8 io_init(void) { return 0u; }
+uint8 io_init(void) { return fake_io_state; }
 void pit_ms_init(int channel, uint32 period_ms)
 {
     (void)channel;
@@ -130,10 +131,30 @@ static uint8 run_case(const char *name, uint8 passed)
     return passed;
 }
 
+static uint8 init_failure_is_latched(void)
+{
+    fake_io_state = 1u;
+    (void)control_init();
+    return ((0u == drive_control_is_healthy()) &&
+            (DRIVE_HEALTH_IMU_INIT == drive_control_get_health_fault())) ? 1u : 0u;
+}
+
+static uint8 healthy_init_is_reported(void)
+{
+    fake_io_state = 0u;
+    (void)control_init();
+    return ((0u != drive_control_is_healthy()) &&
+            (DRIVE_HEALTH_NONE == drive_control_get_health_fault())) ? 1u : 0u;
+}
+
 int main(void)
 {
     uint8 passed = 1u;
 
+    passed &= run_case("healthy-init", healthy_init_is_reported());
+    passed &= run_case("imu-init-fault-latched", init_failure_is_latched());
+    fake_io_state = 0u;
+    (void)control_init();
     passed &= run_case("turn-positive-limited",
                        output_matches(0.0f, 0.0f, 1.0f, 0.4f));
     passed &= run_case("turn-negative-limited",

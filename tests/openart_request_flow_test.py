@@ -38,6 +38,9 @@ assert "center_map_sent = process_center_request(" in main_body
 assert "canonical_char_matrix = build_canonical_player_map(" in main_body
 assert "send_map_uart(map_uart, canonical_char_matrix" in main_body
 assert "send_map_uart(map_uart, char_matrix" not in main_body
+periodic_send_body = main_body[main_body.index("if (UART_MAP_SEND_ENABLE"):]
+assert "not center_request_active" not in periodic_send_body
+assert "not observation_request_active" not in periodic_send_body
 assert "DEBUG_PLAYER_CENTER_ENABLE =" in OPENMV_SOURCE
 assert "player_count != 1" in main_body
 assert "resolve_player_center(" in main_body
@@ -73,17 +76,26 @@ tree = ast.parse(OPENMV_SOURCE)
 selected_nodes = []
 selected_names = {
     "UART_MAP_RX_ENABLE",
+    "GRID_COLS",
+    "GRID_ROWS",
     "CENTER_SAMPLE_COUNT",
+    "OBSERVATION_SAMPLE_COUNT",
     "UART_RX_LINE_MAX",
     "center_request_active",
     "center_request_sample_count",
     "center_request_generation",
+    "observation_request_active",
+    "observation_request_row",
+    "observation_request_col",
+    "observation_request_sample_count",
+    "observation_request_generation",
     "map_uart_rx_line",
 }
 selected_functions = {
     "parse_map_uart_line",
     "poll_map_uart_rx",
     "process_center_request",
+    "process_observation_request",
     "send_map_uart",
 }
 for node in tree.body:
@@ -102,6 +114,7 @@ class FakeUart:
     def __init__(self):
         self.rx = bytearray()
         self.tx = []
+        self.inject_after_map_end = None
 
     def any(self):
         return len(self.rx)
@@ -113,6 +126,9 @@ class FakeUart:
 
     def write(self, text):
         self.tx.append(text)
+        if text == "MAP_END\n" and self.inject_after_map_end is not None:
+            self.rx.extend(self.inject_after_map_end)
+            self.inject_after_map_end = None
 
 
 uart = FakeUart()
@@ -152,6 +168,30 @@ assert namespace["center_request_generation"] == first_generation + 1
 namespace["process_center_request"](uart, (580, 560), char_matrix, 90.0)
 assert uart.tx[-1] == "CENTER_SAMPLE 1,580,560,9000,1\n"
 
+namespace["parse_map_uart_line"]("OBSERVE_REQ 5,6")
+assert namespace["observation_request_active"] is True
+assert namespace["center_request_active"] is False
+namespace["parse_map_uart_line"]("CENTER_REQ")
+assert namespace["center_request_active"] is True
+assert namespace["observation_request_active"] is False
+
+uart.tx = []
+uart.inject_after_map_end = b"OBSERVE_REQ 5,6\n"
+namespace["process_center_request"](uart, (580, 560), char_matrix, 90.0)
+assert any(line == "MAP_END\n" for line in uart.tx)
+assert not any(line.startswith("CENTER_SAMPLE ") for line in uart.tx)
+assert namespace["center_request_active"] is False
+assert namespace["observation_request_active"] is True
+
+uart.tx = []
+uart.inject_after_map_end = b"CENTER_REQ\n"
+namespace["process_observation_request"](
+    uart, char_matrix, (580, 560), (650, 550))
+assert any(line == "MAP_END\n" for line in uart.tx)
+assert not any(line.startswith("OBSERVE_SAMPLE ") for line in uart.tx)
+assert namespace["observation_request_active"] is False
+assert namespace["center_request_active"] is True
+
 begin_body = function_body(
     ART_REPLAN_SOURCE,
     "static void art_replan_begin(",
@@ -186,10 +226,12 @@ assert "openart_request_observation" in ART_OBSERVATION_SOURCE
 assert "art_box_observation_session_collect" in pre_push_box_body
 assert "openart_get_observation_sample" in ART_OBSERVATION_SOURCE
 assert "executor_start_pre_push_box_preparation" in pre_push_box_body
-assert '"E:BObs"' in pre_push_box_body
+assert '"GridPush"' in pre_push_box_body
 assert '"E:BGeo"' not in pre_push_box_body
 assert "executor_continue_after_pre_push_center()" in pre_push_box_body
-assert '"E:BTim"' in pre_push_box_body
+assert "art_replan_fail_pre_push_box" in pre_push_box_body
+assert '"E:BObs"' not in pre_push_box_body
+assert '"E:BTim"' not in pre_push_box_body
 assert "executor_get_pre_push_box_prefetch_request" not in ART_REPLAN_SOURCE
 assert "subject2_tick_box_prefetch" not in SUBJECT2_SOURCE
 assert "ART_REPLAN_INITIAL_CENTER" in ART_REPLAN_SOURCE
@@ -209,7 +251,7 @@ return_center_body = function_body(
     "static void art_replan_tick_return_axis",
 )
 assert "EXEC_ART_SYNC_TIMEOUT_MS" in wait_center_body
-assert "EXEC_ART_SYNC_TIMEOUT_MS" in return_center_body
+assert "RECOVERY_RESYNC_TIMEOUT_MS" in return_center_body
 
 launch_move_body = function_body(
     ART_REPLAN_SOURCE,

@@ -22,6 +22,13 @@ typedef struct
     float signed_pwm[WHEEL_COUNT];           /**< 四轮 signed PWM 输出。 */
 } control_status_struct;
 
+typedef enum
+{
+    DRIVE_HEALTH_NONE = 0,
+    DRIVE_HEALTH_IMU_INIT,
+    DRIVE_HEALTH_FEEDBACK_INVALID
+} drive_health_fault_enum;
+
 /**
  * @brief 初始化底盘硬件、姿态环、四轮 PID 和 20ms 控制周期任务。
  * @return 0 表示 IMU 可用；非 0 仅表示 IMU 初始化失败。
@@ -101,5 +108,11 @@ void stop_motion(void);
  * @note 状态在中断中更新，主循环读取时用于显示和调试，不保证跨字段原子快照。
  */
 const control_status_struct *get_control_status(void);
+
+/** 返回1表示当前底盘控制基础可用于自动恢复。 */
+uint8 drive_control_is_healthy(void);
+
+/** 返回首次锁存的底盘健康故障。 */
+drive_health_fault_enum drive_control_get_health_fault(void);
 
 #endif

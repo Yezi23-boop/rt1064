@@ -7,7 +7,9 @@
 #include "map_utils.h"
 #include "openart_uart.h"
 #include "subject2.h"
+#include "subject3.h"
 #include "vision_uart.h"
+#include "competition_flow.h"
 
 #ifndef ART_CENTER_TIMEOUT_FALLBACK_ENABLE
 #define ART_CENTER_TIMEOUT_FALLBACK_ENABLE (1)
@@ -16,6 +18,11 @@
 static uint32 fake_time_ms;
 static executor_state_enum fake_executor_state;
 static executor_error_enum fake_executor_error;
+static uint8 fake_push_boundary_ready;
+static uint8 fake_push_boundary_requested;
+static uint16 push_boundary_request_count;
+static uint16 force_push_stop_count;
+static uint16 resume_push_stop_count;
 static drive_pose_struct fake_pose;
 static control_status_struct fake_control_status;
 static uint16 set_motion_count;
@@ -80,6 +87,8 @@ static uint32 fake_frame_count;
 static uint16 periodic_center_col_q;
 static uint16 periodic_center_row_q;
 static uint8 periodic_center_valid;
+static uint8 periodic_center_auto_invalid_frame;
+static uint16 periodic_center_read_count;
 static uint8 executor_target_row;
 static uint8 executor_target_col;
 static char live_rows[MAP_ROWS][MAP_COLS + 1];
@@ -95,6 +104,13 @@ static uint32 elapsed_ms;
 static uint8 start_row;
 static uint8 start_col;
 
+static uint8 complete_current_box_observation(
+    subject2_context_struct *context,
+    subject2_update_struct *update);
+static uint8 complete_current_target_observation(
+    subject2_context_struct *context,
+    subject2_update_struct *update);
+
 uint32 time_ms(void) { return fake_time_ms; }
 const drive_pose_struct *drive_pose_get(void) { return &fake_pose; }
 void drive_pose_reset(float x, float y, float yaw)
@@ -108,6 +124,11 @@ void stop_motion(void) { }
 const control_status_struct *get_control_status(void)
 {
     return &fake_control_status;
+}
+uint8 drive_control_is_healthy(void) { return 1u; }
+drive_health_fault_enum drive_control_get_health_fault(void)
+{
+    return DRIVE_HEALTH_NONE;
 }
 void set_motion(float vx, float vy)
 {
@@ -156,6 +177,39 @@ void executor_stop(void)
     fake_executor_error = EXEC_ERROR_NONE;
     fake_pre_push_pending = 0u;
     fake_sync_pending = 0u;
+    fake_push_boundary_ready = 0u;
+    fake_push_boundary_requested = 0u;
+}
+uint8 executor_request_stop_after_current_push(void)
+{
+    if((EXEC_STATE_RUNNING != fake_executor_state) ||
+       (0u != fake_pre_push_pending) || (0u != fake_sync_pending))
+    {
+        return 0u;
+    }
+    push_boundary_request_count++;
+    fake_push_boundary_requested = 1u;
+    return 1u;
+}
+uint8 executor_stop_after_current_push_ready(void)
+{
+    return fake_push_boundary_ready;
+}
+uint8 executor_force_current_push_stop(void)
+{
+    if(0u == fake_push_boundary_requested) return 0u;
+    force_push_stop_count++;
+    fake_push_boundary_ready = 1u;
+    return 1u;
+}
+uint8 executor_resume_after_current_push_stop(void)
+{
+    if(0u == fake_push_boundary_ready) return 0u;
+    resume_push_stop_count++;
+    fake_push_boundary_ready = 0u;
+    fake_push_boundary_requested = 0u;
+    fake_executor_state = EXEC_STATE_RUNNING;
+    return 1u;
 }
 uint8 executor_start_position_correction(float target_x, float target_y)
 {
@@ -217,6 +271,11 @@ executor_art_center_result_enum executor_commit_art_player_center(uint8 row, uin
     return fake_center_result;
 }
 uint8 executor_art_pre_push_pending(void) { return fake_pre_push_pending; }
+uint8 executor_get_pre_push_wait_cell(uint8 *row, uint8 *col)
+{
+    if((0u == fake_pre_push_pending) || (0 == row) || (0 == col)) return 0u;
+    return map_find_car(&live_source, row, col, 0);
+}
 uint8 executor_get_pre_push_box_request(uint8 *box_row, uint8 *box_col)
 {
     if((0u == fake_pre_push_pending) || (0u == fake_pre_push_box_request)) return 0u;
@@ -296,9 +355,12 @@ uint8 executor_start_pre_push_alignment(uint8 row, uint8 col)
 void openart_request_player_center(void)
 {
     center_request_count++;
-    center_count = 0u;
-    center_read = 0u;
-    paired_center_valid = 0u;
+    if((0u == center_count) || (0u != center_read))
+    {
+        center_count = 0u;
+        center_read = 0u;
+        paired_center_valid = 0u;
+    }
 }
 uint8 openart_get_requested_center_sample(uint16 *col_q, uint16 *row_q,
                                           uint16 *yaw_q, uint8 *yaw_valid)
@@ -331,6 +393,13 @@ uint8 openart_get_observation_sample(openart_observation_sample_struct *sample)
 const map_source_struct *openart_map_get(void) { return &live_source; }
 uint32 openart_get_player_center(uint16 *col_q, uint16 *row_q, uint8 *valid)
 {
+    if((0u != periodic_center_auto_invalid_frame) &&
+       (0u == periodic_center_valid) &&
+       (0u != periodic_center_read_count))
+    {
+        fake_frame_count++;
+    }
+    periodic_center_read_count++;
     if(0 != col_q) *col_q = periodic_center_col_q;
     if(0 != row_q) *row_q = periodic_center_row_q;
     if(0 != valid) *valid = periodic_center_valid;
@@ -387,9 +456,16 @@ static void build_map(void)
     uint8 col;
 
     subject2_cancel();
+    competition_flow_start(COMPETITION_MODE_SUBJECT2_DEBUG);
+    (void)competition_flow_take_action();
     fake_time_ms = 0u;
     fake_executor_state = EXEC_STATE_IDLE;
     fake_executor_error = EXEC_ERROR_NONE;
+    fake_push_boundary_ready = 0u;
+    fake_push_boundary_requested = 0u;
+    push_boundary_request_count = 0u;
+    force_push_stop_count = 0u;
+    resume_push_stop_count = 0u;
     memset(&fake_pose, 0, sizeof(fake_pose));
     memset(&fake_control_status, 0, sizeof(fake_control_status));
     set_motion_count = 0u;
@@ -450,6 +526,8 @@ static void build_map(void)
     periodic_center_col_q = 0u;
     periodic_center_row_q = 0u;
     periodic_center_valid = 0u;
+    periodic_center_auto_invalid_frame = 0u;
+    periodic_center_read_count = 0u;
     for(row = 0u; row < MAP_ROWS; row++)
     {
         for(col = 0u; col < MAP_COLS; col++)
@@ -507,6 +585,10 @@ static void feed_center(uint16 col_q, uint16 row_q)
     }
     center_count = ART_CENTER_SAMPLE_COUNT;
     center_read = 0u;
+    periodic_center_col_q = (uint16)(center_col * 100u + 70u);
+    periodic_center_row_q = (uint16)(center_row * 100u + 50u);
+    periodic_center_valid = 1u;
+    fake_frame_count++;
     map_source_snapshot(&paired_center_source, paired_center_rows, &live_source);
     if((0u != map_find_car(&paired_center_source, &old_row, &old_col, 0)) &&
        (center_row < MAP_ROWS) && (center_col < MAP_COLS) &&
@@ -618,7 +700,7 @@ static uint8 scan_to_heading_restore(subject2_context_struct *context,
     subject2_tick(context, update);
     subject2_tick(context, update);
     if((SUBJECT2_SCAN_BOX_CENTER != subject2_get_state()) ||
-       (1u != center_request_count) ||
+       (0u != center_request_count) ||
        (0u != set_target_yaw_count)) return 0u;
 
     feed_center(550u, 550u);
@@ -654,7 +736,7 @@ static uint8 scan_to_heading_restore(subject2_context_struct *context,
     fake_executor_state = EXEC_STATE_DONE;
     subject2_tick(context, update);
     if((SUBJECT2_SCAN_TARGET_CENTER != subject2_get_state()) ||
-       (2u != center_request_count)) return 0u;
+       (1u != center_request_count)) return 0u;
 
     feed_center((uint16)(executor_target_col * 100u + 60u),
                 (uint16)(executor_target_row * 100u + 50u));
@@ -773,9 +855,17 @@ static uint8 host_completion_before_task_end_enters_confirm(void)
     live_rows[5][9] = '.';
     fake_frame_count++;
     subject2_tick(&context, &update);
+    if((SUBJECT2_EXECUTE_PUSH != subject2_get_state()) ||
+       (EXEC_STATE_RUNNING != fake_executor_state) ||
+       (0u == push_boundary_request_count) ||
+       (0 != strcmp(update.run_state, "Host Pend"))) return 0u;
+
+    fake_push_boundary_ready = 1u;
+    subject2_tick(&context, &update);
     if((SUBJECT2_CONFIRM_MAP != subject2_get_state()) ||
-       (EXEC_STATE_IDLE != fake_executor_state) ||
-       (0 != strcmp(update.run_state, "ART Wait"))) return 0u;
+       (EXEC_STATE_RUNNING != fake_executor_state) ||
+       (0u != force_push_stop_count) ||
+       (0 != strcmp(update.run_state, "Host Sync"))) return 0u;
 
     fake_frame_count++;
     subject2_tick(&context, &update);
@@ -785,7 +875,139 @@ static uint8 host_completion_before_task_end_enters_confirm(void)
             ('.' == snapshot.rows[5][9])) ? 1u : 0u;
 }
 
-static uint8 confirm_map_without_new_frame_times_out(void)
+static uint8 host_completion_timeout_resumes_preserved_path(void)
+{
+    subject2_context_struct context;
+    subject2_update_struct update;
+    uint16 request_count_after_resume;
+
+    build_map();
+    init_context(&context);
+    if(0u == scan_to_select_push(&context, &update)) return 0u;
+    subject2_tick(&context, &update);
+    if(SUBJECT2_EXECUTE_PUSH != subject2_get_state()) return 0u;
+
+    live_rows[5][6] = '.';
+    live_rows[5][9] = '.';
+    fake_frame_count++;
+    subject2_tick(&context, &update);
+    if((SUBJECT2_EXECUTE_PUSH != subject2_get_state()) ||
+       (0 != strcmp(update.run_state, "Host Pend"))) return 0u;
+
+    fake_time_ms += RECOVERY_RESYNC_TIMEOUT_MS;
+    subject2_tick(&context, &update);
+    if((SUBJECT2_CONFIRM_MAP != subject2_get_state()) ||
+       (1u != force_push_stop_count) ||
+       (0 != strcmp(update.run_state, "Host Sync"))) return 0u;
+
+    fake_time_ms += RECOVERY_RESYNC_TIMEOUT_MS;
+    subject2_tick(&context, &update);
+    if((SUBJECT2_CONFIRM_MAP != subject2_get_state()) ||
+       (0 != strcmp(update.run_state, "ART Retry"))) return 0u;
+
+    fake_time_ms += RECOVERY_RESYNC_TIMEOUT_MS;
+    subject2_tick(&context, &update);
+    if((SUBJECT2_EXECUTE_PUSH != subject2_get_state()) ||
+       (1u != resume_push_stop_count) ||
+       (EXEC_STATE_RUNNING != fake_executor_state) ||
+       (0 != strcmp(update.run_state, "MCU Go"))) return 0u;
+
+    request_count_after_resume = push_boundary_request_count;
+    subject2_tick(&context, &update);
+    return ((SUBJECT2_EXECUTE_PUSH == subject2_get_state()) &&
+            (request_count_after_resume == push_boundary_request_count) &&
+            (0 == strcmp(update.run_state, "S2Push"))) ? 1u : 0u;
+}
+
+static uint8 task_end_timeout_completes_last_box_locally(void)
+{
+    subject2_context_struct context;
+    subject2_update_struct update;
+    const waypoint_struct *last_waypoint;
+
+    build_map();
+    init_context(&context);
+    if(0u == scan_to_select_push(&context, &update)) return 0u;
+    subject2_tick(&context, &update);
+    if((SUBJECT2_EXECUTE_PUSH != subject2_get_state()) ||
+       (0u == result.waypoint_count)) return 0u;
+    last_waypoint = &result.waypoints[result.waypoint_count - 1u];
+
+    fake_sync_pending = 1u;
+    subject2_tick(&context, &update);
+    if(SUBJECT2_CONFIRM_MAP != subject2_get_state()) return 0u;
+
+    fake_time_ms += RECOVERY_RESYNC_TIMEOUT_MS;
+    subject2_tick(&context, &update);
+    if((SUBJECT2_CONFIRM_MAP != subject2_get_state()) ||
+       (0 != strcmp(update.run_state, "ART Retry"))) return 0u;
+
+    fake_time_ms += RECOVERY_RESYNC_TIMEOUT_MS;
+    subject2_tick(&context, &update);
+    return ((SUBJECT2_RETURN_REQUESTED == subject2_get_state()) &&
+            (0u != update.return_requested) &&
+            ('.' == snapshot.rows[5][9]) &&
+            (('C' == snapshot.rows[last_waypoint->row][last_waypoint->col]) ||
+             ('+' == snapshot.rows[last_waypoint->row][last_waypoint->col])) &&
+            (0 == strcmp(update.run_state, "MCU Go"))) ? 1u : 0u;
+}
+
+static uint8 task_end_timeout_plans_remaining_box(void)
+{
+    subject2_context_struct context;
+    subject2_update_struct update;
+    map_scan_stats_struct stats;
+
+    build_map();
+    live_rows[7][6] = 'B';
+    live_rows[7][9] = 'T';
+    map_source_snapshot(&snapshot, snapshot_rows, &live_source);
+    init_context(&context);
+    subject2_begin(&context, 0.0f, 0.0f, &update);
+
+    fake_ready_box = 1u;
+    subject2_tick(&context, &update);
+    subject2_tick(&context, &update);
+    if(0u == complete_current_box_observation(&context, &update)) return 0u;
+    feed_class(4u);
+    subject2_tick(&context, &update);
+    subject2_tick(&context, &update);
+    if(0u == complete_current_box_observation(&context, &update)) return 0u;
+    feed_class(4u);
+    subject2_tick(&context, &update);
+
+    fake_ready_target = 1u;
+    subject2_tick(&context, &update);
+    subject2_tick(&context, &update);
+    if(0u == complete_current_target_observation(&context, &update)) return 0u;
+    feed_class(4u);
+    subject2_tick(&context, &update);
+    subject2_tick(&context, &update);
+    if(0u == complete_current_target_observation(&context, &update)) return 0u;
+    feed_class(4u);
+    subject2_tick(&context, &update);
+    subject2_tick(&context, &update);
+    if(0u == complete_heading_restore(&context, &update)) return 0u;
+    subject2_tick(&context, &update);
+    if(SUBJECT2_EXECUTE_PUSH != subject2_get_state()) return 0u;
+
+    fake_sync_pending = 1u;
+    subject2_tick(&context, &update);
+    fake_time_ms += RECOVERY_RESYNC_TIMEOUT_MS;
+    subject2_tick(&context, &update);
+    fake_time_ms += RECOVERY_RESYNC_TIMEOUT_MS;
+    subject2_tick(&context, &update);
+    if((SUBJECT2_SELECT_PUSH != subject2_get_state()) ||
+       (0 != strcmp(update.run_state, "MCU Go"))) return 0u;
+    map_scan_stats(&snapshot, &stats);
+    if((1u != stats.box_count) || (1u != stats.target_count)) return 0u;
+
+    fake_sync_pending = 0u;
+    subject2_tick(&context, &update);
+    return (SUBJECT2_EXECUTE_PUSH == subject2_get_state()) ? 1u : 0u;
+}
+
+static uint8 confirm_new_conflict_disables_mcu_resume(void)
 {
     subject2_context_struct context;
     subject2_update_struct update;
@@ -796,14 +1018,54 @@ static uint8 confirm_map_without_new_frame_times_out(void)
     subject2_tick(&context, &update);
     if(SUBJECT2_EXECUTE_PUSH != subject2_get_state()) return 0u;
 
-    fake_sync_pending = 1u;
+    live_rows[5][6] = '.';
+    live_rows[5][9] = '.';
+    fake_frame_count++;
+    subject2_tick(&context, &update);
+    fake_push_boundary_ready = 1u;
     subject2_tick(&context, &update);
     if(SUBJECT2_CONFIRM_MAP != subject2_get_state()) return 0u;
-    fake_time_ms += EXEC_ART_SYNC_TIMEOUT_MS;
+
+    live_rows[4][4] = 'C';
+    fake_frame_count++;
     subject2_tick(&context, &update);
-    return ((SUBJECT2_ERROR == subject2_get_state()) &&
-            (EXEC_ERROR_ART_TIMEOUT == fake_executor_error) &&
-            (0 == strcmp(update.run_state, "E:ATim"))) ? 1u : 0u;
+    fake_time_ms += RECOVERY_RESYNC_TIMEOUT_MS;
+    subject2_tick(&context, &update);
+    fake_time_ms += RECOVERY_RESYNC_TIMEOUT_MS;
+    subject2_tick(&context, &update);
+
+    return ((SUBJECT2_EXECUTE_PUSH != subject2_get_state()) &&
+            (0u == resume_push_stop_count) &&
+            (0 != strcmp(update.run_state, "MCU Go"))) ? 1u : 0u;
+}
+
+static uint8 subject3_push_block_retries_original_planner(void)
+{
+    subject2_context_struct context;
+    subject2_update_struct update;
+    solve_result_struct recovered;
+    char opened_rows[MAP_ROWS][MAP_COLS + 1];
+    map_source_struct opened;
+
+    build_map();
+    init_context(&context);
+    context.allow_blast_fallback = 1u;
+    if(0u == scan_to_select_push(&context, &update)) return 0u;
+
+    snapshot_rows[4][6] = '#';
+    snapshot_rows[5][7] = '#';
+    snapshot_rows[6][6] = '#';
+    subject2_tick(&context, &update);
+    if((SUBJECT2_WAIT_BLAST != subject2_get_state()) ||
+       (SUBJECT2_BLOCK_PUSH != subject2_get_block_reason()) ||
+       (0u == update.blast_requested))
+    {
+        return 0u;
+    }
+
+    map_source_snapshot(&opened, opened_rows, &snapshot);
+    opened_rows[5][7] = '.';
+    return subject2_retry_blocked_plan(&opened, &recovered);
 }
 
 static uint8 confirm_map_ignores_transient_invalid_frames(void)
@@ -849,7 +1111,7 @@ static uint8 confirm_map_ignores_transient_invalid_frames(void)
             (EXEC_STATE_ERROR != fake_executor_state)) ? 1u : 0u;
 }
 
-static uint8 pre_push_box_observation_timeout_stops(void)
+static uint8 pre_push_box_observation_timeout_uses_fresh_grid(void)
 {
     subject2_context_struct context;
     subject2_update_struct update;
@@ -865,24 +1127,14 @@ static uint8 pre_push_box_observation_timeout_stops(void)
     if((SUBJECT2_PRE_PUSH_CENTER != subject2_get_state()) ||
        (0 != strcmp(update.run_state, "BCtr"))) return 0u;
 
-    fake_time_ms += ART_BOX_OBSERVE_WAIT_MS;
-    subject2_tick(&context, &update);
-    if((SUBJECT2_PRE_PUSH_CENTER != subject2_get_state()) ||
-       (1u != start_pre_push_box_retry_count) ||
-       (0 != strcmp(update.run_state, "BRetry"))) return 0u;
-    fake_pre_push_box_active = 0u;
-    subject2_tick(&context, &update);
-    if(0 != strcmp(update.run_state, "BSet")) return 0u;
-    fake_time_ms += ART_BOX_OBSERVE_RETRY_SETTLE_MS;
-    subject2_tick(&context, &update);
-    if(0 != strcmp(update.run_state, "BCtr")) return 0u;
+    fake_frame_count++;
     fake_time_ms += ART_BOX_OBSERVE_WAIT_MS;
     subject2_tick(&context, &update);
 
-    return ((SUBJECT2_ERROR == subject2_get_state()) &&
-            (0u == continue_pre_push_count) &&
-            (EXEC_ERROR_ART_CENTER == fake_executor_error) &&
-            (0 == strcmp(update.run_state, "E:BObs"))) ? 1u : 0u;
+    return ((SUBJECT2_EXECUTE_PUSH == subject2_get_state()) &&
+            (1u == continue_pre_push_count) &&
+            (EXEC_STATE_ERROR != fake_executor_state) &&
+            (0 == strcmp(update.run_state, "GridPush"))) ? 1u : 0u;
 }
 
 static uint8 pre_push_box_requests_only_after_wait(void)
@@ -940,7 +1192,7 @@ static uint8 turn_center_continues_without_push_alignment(void)
             (0u == start_pre_push_alignment_count)) ? 1u : 0u;
 }
 
-static uint8 invalid_pre_push_box_geometry_continues(void)
+static uint8 invalid_pre_push_box_geometry_resyncs(void)
 {
     subject2_context_struct context;
     subject2_update_struct update;
@@ -959,11 +1211,10 @@ static uint8 invalid_pre_push_box_geometry_continues(void)
     feed_observation(550u, 550u, 650u, 550u);
     subject2_tick(&context, &update);
 
-    return ((SUBJECT2_EXECUTE_PUSH == subject2_get_state()) &&
-            (0 == strcmp(update.run_state, "S2Push")) &&
-            (1u == continue_pre_push_count) &&
-            (EXEC_STATE_RUNNING == fake_executor_state) &&
-            (EXEC_ERROR_NONE == fake_executor_error)) ? 1u : 0u;
+    return ((SUBJECT2_SCAN_MAP_SYNC == subject2_get_state()) &&
+            (0 == strcmp(update.run_state, "VSync")) &&
+            (0u == continue_pre_push_count) &&
+            (EXEC_STATE_ERROR != fake_executor_state)) ? 1u : 0u;
 }
 
 static uint8 pre_push_box_motion_error_has_timeout_reason(void)
@@ -988,9 +1239,8 @@ static uint8 pre_push_box_motion_error_has_timeout_reason(void)
     fake_executor_error = EXEC_ERROR_ART_CENTER;
     fake_executor_state = EXEC_STATE_ERROR;
     subject2_tick(&context, &update);
-    if((SUBJECT2_ERROR != subject2_get_state()) ||
-       (EXEC_ERROR_ART_CENTER != fake_executor_error) ||
-       (0 != strcmp(update.run_state, "E:BTim"))) return 0u;
+    if((SUBJECT2_SCAN_MAP_SYNC != subject2_get_state()) ||
+       (0 != strcmp(update.run_state, "VSync"))) return 0u;
 
     build_map();
     init_context(&context);
@@ -1002,8 +1252,8 @@ static uint8 pre_push_box_motion_error_has_timeout_reason(void)
     subject2_tick(&context, &update);
     fake_error_on_box_active_query = 1u;
     subject2_tick(&context, &update);
-    return ((SUBJECT2_ERROR == subject2_get_state()) &&
-            (0 == strcmp(update.run_state, "E:BTim"))) ? 1u : 0u;
+    return ((SUBJECT2_SCAN_MAP_SYNC == subject2_get_state()) &&
+            (0 == strcmp(update.run_state, "VSync"))) ? 1u : 0u;
 }
 
 static uint8 push_retry_tracks_active_box(void)
@@ -1230,10 +1480,12 @@ static uint8 backoff_motion_error_stops(void)
     if(SUBJECT2_SCAN_BOX_BACKOFF != subject2_get_state()) return 0u;
 
     fake_executor_state = EXEC_STATE_ERROR;
+    fake_executor_error = EXEC_ERROR_MAP;
     subject2_tick(&context, &update);
     return ((SUBJECT2_ERROR == subject2_get_state()) &&
-            (EXEC_ERROR_SUBJECT2_CLASS == fake_executor_error) &&
-            (0 == strcmp(update.run_state, "E:Back"))) ? 1u : 0u;
+            (EXEC_ERROR_MAP == fake_executor_error) &&
+            (COMPETITION_FATAL_PLAN == competition_flow_get_fatal_reason()) &&
+            (0 == strcmp(update.run_state, "F:Plan"))) ? 1u : 0u;
 }
 
 static uint8 backoff_return_timeout_stops(void)
@@ -1254,9 +1506,9 @@ static uint8 backoff_return_timeout_stops(void)
 
     fake_time_ms += EXEC_ART_SYNC_TIMEOUT_MS;
     subject2_tick(&context, &update);
-    return ((SUBJECT2_ERROR == subject2_get_state()) &&
-            (EXEC_ERROR_SUBJECT2_CLASS == fake_executor_error) &&
-            (0 == strcmp(update.run_state, "E:Back"))) ? 1u : 0u;
+    return ((SUBJECT2_SCAN_MAP_SYNC == subject2_get_state()) &&
+            (EXEC_STATE_ERROR != fake_executor_state) &&
+            (0 == strcmp(update.run_state, "VSync"))) ? 1u : 0u;
 }
 
 static uint8 complete_current_box_observation(subject2_context_struct *context,
@@ -1401,6 +1653,256 @@ static uint8 target_classification_uses_same_backoff_flow(void)
     return complete_heading_restore(&context, &update);
 }
 
+static uint8 subject3_observation_block_starts_bomb_path(void)
+{
+    subject2_context_struct context;
+    subject2_update_struct update;
+    uint16 tick;
+
+    build_map();
+    live_rows[5][5] = '.';
+    live_rows[5][6] = '.';
+    live_rows[5][9] = '#';
+    live_rows[5][4] = 'X';
+    live_rows[5][7] = '#';
+    live_rows[4][8] = '#';
+    live_rows[5][8] = 'B';
+    live_rows[6][8] = '#';
+    live_rows[5][10] = 'T';
+    move_live_car(5u, 2u);
+    map_source_snapshot(&snapshot, snapshot_rows, &live_source);
+    init_context(&context);
+
+    subject3_begin(&context, 0.0f, 0.0f, &update);
+    fake_ready_box = 1u;
+    subject3_tick(&context, &update);
+    subject3_tick(&context, &update);
+    if(SUBJECT3_SELECT_BLAST != subject3_get_state()) return 0u;
+
+    for(tick = 0u; (tick < (MAP_CELLS * 2u)) &&
+                    (SUBJECT3_SELECT_BLAST == subject3_get_state()); tick++)
+    {
+        subject3_tick(&context, &update);
+    }
+    if((SUBJECT3_EXECUTE_BOMB != subject3_get_state()) ||
+       (0u == executor_start_count) || (0u == executor_start_art_sync) ||
+       (0u == result.waypoint_count))
+    {
+        subject3_cancel();
+        return 0u;
+    }
+    for(tick = 0u; tick < result.waypoint_count; tick++)
+    {
+        if(0u != result.waypoints[tick].center_correct_before)
+        {
+            subject3_cancel();
+            return 1u;
+        }
+    }
+    subject3_cancel();
+    return 0u;
+}
+
+static uint8 subject3_center_rejects_changed_bomb_map(void)
+{
+    subject2_context_struct context;
+    subject2_update_struct update;
+    uint16 tick;
+
+    build_map();
+    live_rows[5][5] = '.';
+    live_rows[5][6] = '.';
+    live_rows[5][9] = '#';
+    live_rows[5][4] = 'X';
+    live_rows[5][7] = '#';
+    live_rows[4][8] = '#';
+    live_rows[5][8] = 'B';
+    live_rows[6][8] = '#';
+    live_rows[5][10] = 'T';
+    move_live_car(5u, 2u);
+    map_source_snapshot(&snapshot, snapshot_rows, &live_source);
+    init_context(&context);
+
+    subject3_begin(&context, 0.0f, 0.0f, &update);
+    fake_ready_box = 1u;
+    subject3_tick(&context, &update);
+    subject3_tick(&context, &update);
+    for(tick = 0u; (tick < (MAP_CELLS * 2u)) &&
+                    (SUBJECT3_SELECT_BLAST == subject3_get_state()); tick++)
+    {
+        subject3_tick(&context, &update);
+    }
+    if(SUBJECT3_EXECUTE_BOMB != subject3_get_state()) return 0u;
+
+    fake_pre_push_pending = 1u;
+    subject3_tick(&context, &update);
+    live_rows[3][12] = '#';
+    feed_center(250u, 550u);
+    subject3_tick(&context, &update);
+    return ((SUBJECT3_ERROR == subject3_get_state()) &&
+            (COMPETITION_FATAL_ART1 == competition_flow_get_fatal_reason()) &&
+            (0u == continue_pre_push_count)) ? 1u : 0u;
+}
+
+#if SUBJECT2_LAST_TARGET_ELIMINATION_ENABLE
+static void build_three_object_map(void)
+{
+    build_map();
+    live_rows[7][6] = 'B';
+    live_rows[9][6] = 'B';
+    live_rows[7][9] = 'T';
+    live_rows[9][9] = 'T';
+    map_source_snapshot(&snapshot, snapshot_rows, &live_source);
+}
+
+static uint8 scan_three_boxes(subject2_context_struct *context,
+                              subject2_update_struct *update,
+                              const uint8 classes[3])
+{
+    uint8 index;
+
+    subject2_begin(context, 0.0f, 0.0f, update);
+    fake_ready_box = 1u;
+    subject2_tick(context, update);
+    subject2_tick(context, update);
+    for(index = 0u; index < 3u; index++)
+    {
+        if(0u == complete_current_box_observation(context, update)) return 0u;
+        feed_class(classes[index]);
+        subject2_tick(context, update);
+        if(index < 2u)
+        {
+            if(SUBJECT2_SCAN_BOX_PLAN != subject2_get_state()) return 0u;
+            subject2_tick(context, update);
+        }
+    }
+    return (SUBJECT2_SCAN_TARGET_MODE == subject2_get_state()) ? 1u : 0u;
+}
+
+static uint8 scan_two_targets(subject2_context_struct *context,
+                              subject2_update_struct *update,
+                              const uint8 classes[2])
+{
+    uint8 index;
+
+    fake_ready_target = 1u;
+    subject2_tick(context, update);
+    subject2_tick(context, update);
+    for(index = 0u; index < 2u; index++)
+    {
+        if(0u == complete_current_target_observation(context, update)) return 0u;
+        feed_class(classes[index]);
+        subject2_tick(context, update);
+        if(index < 1u)
+        {
+            if(SUBJECT2_SCAN_TARGET_PLAN != subject2_get_state()) return 0u;
+            subject2_tick(context, update);
+        }
+    }
+    return (SUBJECT2_SCAN_TARGET_PLAN == subject2_get_state()) ? 1u : 0u;
+}
+
+static uint8 last_target_elimination_enters_bind_without_observation(void)
+{
+    subject2_context_struct context;
+    subject2_update_struct update;
+    uint16 center_requests_before;
+    uint16 executor_starts_before;
+    uint16 vision_requests_before;
+    uint8 recognition_is_target;
+    uint8 recognition_class;
+
+    if(0u == begin_box_classification(&context, &update)) return 0u;
+    feed_class(4u);
+    subject2_tick(&context, &update);
+    if(SUBJECT2_SCAN_TARGET_MODE != subject2_get_state()) return 0u;
+
+    center_requests_before = center_request_count;
+    executor_starts_before = executor_start_count;
+    vision_requests_before = vision_request_id;
+    fake_ready_target = 1u;
+    subject2_tick(&context, &update);
+    subject2_tick(&context, &update);
+    if((SUBJECT2_VALIDATE_BINDINGS != subject2_get_state()) ||
+       (0 != strcmp(update.run_state, "Bind")) ||
+       (center_requests_before != center_request_count) ||
+       (executor_starts_before != executor_start_count) ||
+       (vision_requests_before != vision_request_id) ||
+       (0u == subject2_get_last_recognition(&recognition_is_target,
+                                            &recognition_class)) ||
+       (0u != recognition_is_target) || (4u != recognition_class))
+    {
+        return 0u;
+    }
+
+    subject2_tick(&context, &update);
+    return ((SUBJECT2_RESTORE_HEADING == subject2_get_state()) &&
+            (0 == strcmp(update.run_state, "HYaw"))) ? 1u : 0u;
+}
+
+static uint8 duplicate_last_target_elimination_enters_bind(void)
+{
+    static const uint8 box_classes[3] = {2u, 2u, 5u};
+    static const uint8 target_classes[2] = {2u, 5u};
+    subject2_context_struct context;
+    subject2_update_struct update;
+    uint16 center_requests_before;
+    uint16 executor_starts_before;
+    uint16 vision_requests_before;
+
+    build_three_object_map();
+    init_context(&context);
+    if((0u == scan_three_boxes(&context, &update, box_classes)) ||
+       (0u == scan_two_targets(&context, &update, target_classes)))
+    {
+        return 0u;
+    }
+    center_requests_before = center_request_count;
+    executor_starts_before = executor_start_count;
+    vision_requests_before = vision_request_id;
+    subject2_tick(&context, &update);
+    if((SUBJECT2_VALIDATE_BINDINGS != subject2_get_state()) ||
+       (center_requests_before != center_request_count) ||
+       (executor_starts_before != executor_start_count) ||
+       (vision_requests_before != vision_request_id))
+    {
+        return 0u;
+    }
+    subject2_tick(&context, &update);
+    return (SUBJECT2_RESTORE_HEADING == subject2_get_state()) ? 1u : 0u;
+}
+
+static uint8 invalid_target_counts_fall_back_to_rescan(void)
+{
+    static const uint8 box_classes[3] = {2u, 5u, 7u};
+    static const uint8 target_classes[2] = {2u, 2u};
+    subject2_context_struct context;
+    subject2_update_struct update;
+
+    build_three_object_map();
+    init_context(&context);
+    if((0u == scan_three_boxes(&context, &update, box_classes)) ||
+       (0u == scan_two_targets(&context, &update, target_classes)))
+    {
+        return 0u;
+    }
+    subject2_tick(&context, &update);
+    if((SUBJECT2_SCAN_TARGET_MOVE != subject2_get_state()) &&
+       (SUBJECT2_SCAN_TARGET_CENTER != subject2_get_state()))
+    {
+        return 0u;
+    }
+    if(0u == complete_current_target_observation(&context, &update)) return 0u;
+    feed_class(7u);
+    subject2_tick(&context, &update);
+    if(SUBJECT2_VALIDATE_BINDINGS != subject2_get_state()) return 0u;
+    subject2_tick(&context, &update);
+    return ((SUBJECT2_SCAN_BOX_MODE == subject2_get_state()) &&
+            (VISION_MODE_BOX == last_mode) &&
+            (0 == strcmp(update.run_state, "VRetry"))) ? 1u : 0u;
+}
+#endif
+
 static uint8 heading_restore_requires_new_continuous_window(void)
 {
     subject2_context_struct context;
@@ -1426,7 +1928,7 @@ static uint8 heading_restore_requires_new_continuous_window(void)
     return (SUBJECT2_SELECT_PUSH == subject2_get_state()) ? 1u : 0u;
 }
 
-static uint8 heading_restore_timeout_stops(void)
+static uint8 heading_restore_timeout_keeps_current_yaw(void)
 {
     subject2_context_struct context;
     subject2_update_struct update;
@@ -1438,10 +1940,10 @@ static uint8 heading_restore_timeout_stops(void)
     fake_control_status.yaw_error = 2.0f;
     fake_time_ms += SUBJECT2_TURN_TIMEOUT_MS;
     subject2_tick(&context, &update);
-    return ((SUBJECT2_ERROR == subject2_get_state()) &&
-            (EXEC_STATE_ERROR == fake_executor_state) &&
-            (EXEC_ERROR_SUBJECT2_YAW == fake_executor_error) &&
-            (0 == strcmp(update.run_state, "E:HYaw"))) ? 1u : 0u;
+    return ((SUBJECT2_SELECT_PUSH == subject2_get_state()) &&
+            (EXEC_STATE_ERROR != fake_executor_state) &&
+            (1u == yaw_rebase_count) &&
+            (0 == strcmp(update.run_state, "Bind"))) ? 1u : 0u;
 }
 
 static uint8 enter_post_observe_yaw(subject2_context_struct *context,
@@ -1545,7 +2047,7 @@ static uint8 post_observe_yaw_fallbacks(void)
             (0u == yaw_rebase_count)) ? 1u : 0u;
 }
 
-static uint8 post_observe_yaw_fix_timeout_stops(void)
+static uint8 post_observe_yaw_fix_timeout_rebases(void)
 {
     subject2_context_struct context;
     subject2_update_struct update;
@@ -1556,9 +2058,9 @@ static uint8 post_observe_yaw_fix_timeout_stops(void)
     if(SUBJECT2_POST_OBSERVE_YAW_FIX != subject2_get_state()) return 0u;
     fake_time_ms += SUBJECT2_TURN_TIMEOUT_MS;
     subject2_tick(&context, &update);
-    return ((SUBJECT2_ERROR == subject2_get_state()) &&
-            (EXEC_ERROR_SUBJECT2_YAW == fake_executor_error) &&
-            (0 == strcmp(update.run_state, "E:Yaw"))) ? 1u : 0u;
+    return ((SUBJECT2_SELECT_PUSH == subject2_get_state()) &&
+            (1u == yaw_rebase_count) &&
+            (0 == strcmp(update.run_state, "Bind"))) ? 1u : 0u;
 }
 
 static uint8 map_change_syncs_scan(void)
@@ -1630,12 +2132,27 @@ static uint8 scan_map_sync_wait_map_times_out(void)
     subject2_tick(&context, &update);
     if(SUBJECT2_SCAN_MAP_SYNC != subject2_get_state()) return 0u;
 
-    fake_time_ms += EXEC_ART_SYNC_TIMEOUT_MS;
-    fake_frame_count++;
+    fake_time_ms += RECOVERY_RESYNC_TIMEOUT_MS;
     subject2_tick(&context, &update);
-    return ((SUBJECT2_ERROR == subject2_get_state()) &&
-            (EXEC_ERROR_SUBJECT2_CLASS == fake_executor_error) &&
-            (0 == strcmp(update.run_state, "E:Map"))) ? 1u : 0u;
+    if((SUBJECT2_SCAN_MAP_SYNC != subject2_get_state()) ||
+       (EXEC_STATE_ERROR == fake_executor_state)) return 0u;
+    fake_time_ms += RECOVERY_RESYNC_TIMEOUT_MS;
+    subject2_tick(&context, &update);
+    if((SUBJECT2_SCAN_MAP_SYNC != subject2_get_state()) ||
+       (EXEC_STATE_ERROR == fake_executor_state)) return 0u;
+    fake_time_ms += RECOVERY_RESYNC_TIMEOUT_MS;
+    subject2_tick(&context, &update);
+    if((SUBJECT2_ERROR != subject2_get_state()) ||
+       (0u == competition_flow_is_fatal()) ||
+       (COMPETITION_FATAL_MAP != competition_flow_get_fatal_reason()) ||
+       (0 != strcmp(update.run_state, "F:Map"))) return 0u;
+
+    if(0u == subject2_manual_recover(&update)) return 0u;
+    competition_flow_clear_fatal();
+    if((SUBJECT2_SCAN_MAP_SYNC != subject2_get_state()) ||
+       (0 != strcmp(update.run_state, "VSync"))) return 0u;
+    subject2_tick(&context, &update);
+    return (SUBJECT2_SCAN_MAP_SYNC == subject2_get_state()) ? 1u : 0u;
 }
 
 static uint8 scan_map_sync_recovers_after_invalid_frames(void)
@@ -1687,17 +2204,22 @@ static uint8 scan_center_timeout_follows_policy(void)
     subject2_tick(&context, &update);
     subject2_tick(&context, &update);
     if(SUBJECT2_SCAN_BOX_CENTER != subject2_get_state()) return 0u;
-    fake_time_ms += EXEC_ART_SYNC_TIMEOUT_MS;
+#if ART_CENTER_TIMEOUT_FALLBACK_ENABLE
+    fake_time_ms += SUBJECT2_FAST_CENTER_WAIT_MS;
+    subject2_tick(&context, &update);
+    fake_frame_count++;
+#endif
+    fake_time_ms = EXEC_ART_SYNC_TIMEOUT_MS;
     subject2_tick(&context, &update);
 #if ART_CENTER_TIMEOUT_FALLBACK_ENABLE
     return ((SUBJECT2_SCAN_BOX_TURN == subject2_get_state()) &&
             (EXEC_STATE_ERROR != fake_executor_state) &&
-            (0 == strcmp(update.run_state, "VTurn"))) ? 1u : 0u;
+            (0 == strcmp(update.run_state, "CtrSkip"))) ? 1u : 0u;
 #else
     return ((SUBJECT2_ERROR == subject2_get_state()) &&
             (EXEC_STATE_ERROR == fake_executor_state) &&
             (EXEC_ERROR_ART_CENTER == fake_executor_error) &&
-            (0 == strcmp(update.run_state, "E:CTmo"))) ? 1u : 0u;
+            (0 == strcmp(update.run_state, "F:ART1"))) ? 1u : 0u;
 #endif
 }
 
@@ -1721,6 +2243,10 @@ static uint8 replan_center_timeout_follows_policy(void)
     subject2_tick(&context, &update);
     if(SUBJECT2_REPLAN_CENTER != subject2_get_state()) return 0u;
 
+#if ART_CENTER_TIMEOUT_FALLBACK_ENABLE
+    live_rows[4][4] = 'C';
+    fake_frame_count++;
+#endif
     fake_time_ms += EXEC_ART_SYNC_TIMEOUT_MS;
     subject2_tick(&context, &update);
 #if ART_CENTER_TIMEOUT_FALLBACK_ENABLE
@@ -1730,7 +2256,7 @@ static uint8 replan_center_timeout_follows_policy(void)
             (0.0f == fake_pose.x_cm) && (0.0f == fake_pose.y_cm)) ? 1u : 0u;
 #else
     return ((SUBJECT2_ERROR == subject2_get_state()) &&
-            (0 == strcmp(update.run_state, "E:CRpl"))) ? 1u : 0u;
+            (0 == strcmp(update.run_state, "F:ART1"))) ? 1u : 0u;
 #endif
 }
 
@@ -1775,7 +2301,7 @@ static uint8 turn_requires_continuous_100ms(void)
             (0u == observation_request_count)) ? 1u : 0u;
 }
 
-static uint8 turn_timeout_stops(void)
+static uint8 turn_timeout_changes_observation_direction(void)
 {
     subject2_context_struct context;
     subject2_update_struct update;
@@ -1796,9 +2322,9 @@ static uint8 turn_timeout_stops(void)
     fake_control_status.yaw_error = 5.0f;
     fake_time_ms = SUBJECT2_TURN_TIMEOUT_MS;
     subject2_tick(&context, &update);
-    return ((SUBJECT2_ERROR == subject2_get_state()) &&
-            (EXEC_ERROR_SUBJECT2_YAW == fake_executor_error) &&
-            (0 == strcmp(update.run_state, "E:Yaw"))) ? 1u : 0u;
+    return ((SUBJECT2_SCAN_BOX_PLAN == subject2_get_state()) &&
+            (EXEC_STATE_ERROR != fake_executor_state) &&
+            (0 == strcmp(update.run_state, "VRetry"))) ? 1u : 0u;
 }
 
 static uint8 vision_ready_retries_then_times_out(void)
@@ -1817,9 +2343,43 @@ static uint8 vision_ready_retries_then_times_out(void)
 
     fake_time_ms = SUBJECT2_VISION_READY_TIMEOUT_MS;
     subject2_tick(&context, &update);
-    return ((SUBJECT2_ERROR == subject2_get_state()) &&
-            (EXEC_ERROR_SUBJECT2_CLASS == fake_executor_error) &&
-            (0 == strcmp(update.run_state, "E:VMod"))) ? 1u : 0u;
+    return ((SUBJECT2_SCAN_MAP_SYNC == subject2_get_state()) &&
+            (EXEC_STATE_ERROR != fake_executor_state) &&
+            (0 == strcmp(update.run_state, "VSync"))) ? 1u : 0u;
+}
+
+static uint8 scan_sync_center_timeout_uses_accepted_map(void)
+{
+    subject2_context_struct context;
+    subject2_update_struct update;
+
+    build_map();
+    init_context(&context);
+    subject2_begin(&context, 0.0f, 0.0f, &update);
+    fake_ready_box = 1u;
+    subject2_tick(&context, &update);
+    live_rows[5][6] = '.';
+    live_rows[5][7] = 'B';
+    subject2_tick(&context, &update);
+    if(SUBJECT2_SCAN_MAP_SYNC != subject2_get_state()) return 0u;
+
+    fake_frame_count++;
+    subject2_tick(&context, &update);
+    if(center_request_count != 1u) return 0u;
+
+    live_rows[4][4] = 'C';
+    fake_frame_count++;
+    fake_time_ms += RECOVERY_RESYNC_TIMEOUT_MS;
+    subject2_tick(&context, &update);
+
+#if ART_CENTER_TIMEOUT_FALLBACK_ENABLE
+    return ((SUBJECT2_SCAN_BOX_MODE == subject2_get_state()) &&
+            (EXEC_STATE_ERROR != fake_executor_state) &&
+            (0u == competition_flow_is_fatal()) &&
+            (0 == strcmp(update.run_state, "BScan"))) ? 1u : 0u;
+#else
+    return (SUBJECT2_ERROR == subject2_get_state()) ? 1u : 0u;
+#endif
 }
 
 static uint8 begin_box_center(subject2_context_struct *context,
@@ -1862,6 +2422,29 @@ static uint8 center_offset_adjusts_before_turn_and_classify(void)
     complete_observation_turn(&context, &update);
     return ((SUBJECT2_SCAN_BOX_CLASSIFY == subject2_get_state()) &&
             (1u == vision_request_id)) ? 1u : 0u;
+}
+
+static uint8 scan_center_stale_map_enters_sync(void)
+{
+    subject2_context_struct context;
+    subject2_update_struct update;
+
+    build_map();
+    init_context(&context);
+    subject2_begin(&context, 0.0f, 0.0f, &update);
+    fake_ready_box = 1u;
+    subject2_tick(&context, &update);
+    subject2_tick(&context, &update);
+    if(SUBJECT2_SCAN_BOX_CENTER != subject2_get_state()) return 0u;
+    fake_time_ms += EXEC_ART_SYNC_TIMEOUT_MS;
+    subject2_tick(&context, &update);
+#if ART_CENTER_TIMEOUT_FALLBACK_ENABLE
+    return ((SUBJECT2_SCAN_MAP_SYNC == subject2_get_state()) &&
+            (EXEC_STATE_ERROR != fake_executor_state) &&
+            (0 == strcmp(update.run_state, "VSync"))) ? 1u : 0u;
+#else
+    return (SUBJECT2_ERROR == subject2_get_state()) ? 1u : 0u;
+#endif
 }
 
 static uint8 fresh_periodic_center_within_2cm_skips_batch(void)
@@ -1917,6 +2500,83 @@ static uint8 fresh_periodic_center_over_2cm_uses_batch(void)
             (0u == correction_start_count)) ? 1u : 0u;
 }
 
+static uint8 fresh_periodic_map_matching_c_skips_batch(void)
+{
+    subject2_context_struct context;
+    subject2_update_struct update;
+
+    build_map();
+    init_context(&context);
+    periodic_center_auto_invalid_frame = 0u;
+    periodic_center_valid = 0u;
+    fake_frame_count = 1u;
+    subject2_begin(&context, 0.0f, 0.0f, &update);
+    fake_ready_box = 1u;
+    subject2_tick(&context, &update);
+    subject2_tick(&context, &update);
+    if((SUBJECT2_SCAN_BOX_CENTER != subject2_get_state()) ||
+       (0u != center_request_count)) return 0u;
+
+    fake_frame_count++;
+    subject2_tick(&context, &update);
+    return ((SUBJECT2_SCAN_BOX_ADJUST == subject2_get_state()) &&
+            (0u == center_request_count) &&
+            (1u == correction_start_count) &&
+            (0.0f == correction_target_x) &&
+            (0.0f == correction_target_y)) ? 1u : 0u;
+}
+
+static uint8 fresh_periodic_map_wrong_c_uses_batch(void)
+{
+    subject2_context_struct context;
+    subject2_update_struct update;
+
+    build_map();
+    init_context(&context);
+    periodic_center_auto_invalid_frame = 0u;
+    periodic_center_valid = 0u;
+    fake_frame_count = 1u;
+    subject2_begin(&context, 0.0f, 0.0f, &update);
+    fake_ready_box = 1u;
+    subject2_tick(&context, &update);
+    subject2_tick(&context, &update);
+
+    live_rows[5][5] = '.';
+    live_rows[5][6] = 'C';
+    fake_frame_count++;
+    subject2_tick(&context, &update);
+    return ((SUBJECT2_SCAN_BOX_CENTER == subject2_get_state()) &&
+            (1u == center_request_count) &&
+            (0u == correction_start_count)) ? 1u : 0u;
+}
+
+static uint8 old_invalid_periodic_center_can_recover_fast(void)
+{
+    subject2_context_struct context;
+    subject2_update_struct update;
+
+    build_map();
+    init_context(&context);
+    periodic_center_auto_invalid_frame = 0u;
+    periodic_center_valid = 0u;
+    fake_frame_count = 1u;
+    subject2_begin(&context, 0.0f, 0.0f, &update);
+    fake_ready_box = 1u;
+    subject2_tick(&context, &update);
+    subject2_tick(&context, &update);
+    if((SUBJECT2_SCAN_BOX_CENTER != subject2_get_state()) ||
+       (0u != center_request_count)) return 0u;
+
+    periodic_center_col_q = 560u;
+    periodic_center_row_q = 550u;
+    periodic_center_valid = 1u;
+    fake_frame_count++;
+    subject2_tick(&context, &update);
+    return ((SUBJECT2_SCAN_BOX_ADJUST == subject2_get_state()) &&
+            (0u == center_request_count) &&
+            (1u == correction_start_count)) ? 1u : 0u;
+}
+
 static uint8 periodic_center_old_frame_waits_then_uses_batch(void)
 {
     subject2_context_struct context;
@@ -1961,7 +2621,7 @@ static uint8 small_center_offset_still_enters_adjustment(void)
             (0u == vision_request_id)) ? 1u : 0u;
 }
 
-static uint8 center_adjustment_timeout_stops(void)
+static uint8 center_adjustment_small_timeout_continues(void)
 {
     subject2_context_struct context;
     subject2_update_struct update;
@@ -1970,15 +2630,15 @@ static uint8 center_adjustment_timeout_stops(void)
     init_context(&context);
     if(0u == begin_box_center(&context, &update)) return 0u;
 
-    feed_center(560u, 550u);
+    feed_center(558u, 550u);
     subject2_tick(&context, &update);
     if(SUBJECT2_SCAN_BOX_ADJUST != subject2_get_state()) return 0u;
 
     fake_time_ms += EXEC_ART_SYNC_TIMEOUT_MS;
     subject2_tick(&context, &update);
-    return ((SUBJECT2_ERROR == subject2_get_state()) &&
-            (EXEC_ERROR_ART_CENTER == fake_executor_error) &&
-            (0 == strcmp(update.run_state, "E:CTim"))) ? 1u : 0u;
+    return ((SUBJECT2_SCAN_BOX_TURN == subject2_get_state()) &&
+            (EXEC_STATE_ERROR != fake_executor_state) &&
+            (0 == strcmp(update.run_state, "VTurn"))) ? 1u : 0u;
 }
 
 static uint8 center_adjustment_busy_has_reason(void)
@@ -1993,8 +2653,9 @@ static uint8 center_adjustment_busy_has_reason(void)
     correction_start_allowed = 0u;
     feed_center(550u, 550u);
     subject2_tick(&context, &update);
-    return ((SUBJECT2_ERROR == subject2_get_state()) &&
-            (0 == strcmp(update.run_state, "E:CBsy"))) ? 1u : 0u;
+    return ((SUBJECT2_SCAN_MAP_SYNC == subject2_get_state()) &&
+            (EXEC_STATE_ERROR != fake_executor_state) &&
+            (0 == strcmp(update.run_state, "VSync"))) ? 1u : 0u;
 }
 
 static uint8 center_adjustment_executor_error_has_reason(void)
@@ -2010,9 +2671,11 @@ static uint8 center_adjustment_executor_error_has_reason(void)
     subject2_tick(&context, &update);
     if(SUBJECT2_SCAN_BOX_ADJUST != subject2_get_state()) return 0u;
     fake_executor_state = EXEC_STATE_ERROR;
+    fake_executor_error = EXEC_ERROR_MAP;
     subject2_tick(&context, &update);
     return ((SUBJECT2_ERROR == subject2_get_state()) &&
-            (0 == strcmp(update.run_state, "E:CExe"))) ? 1u : 0u;
+            (EXEC_ERROR_MAP == fake_executor_error) &&
+            (0 == strcmp(update.run_state, "F:Plan"))) ? 1u : 0u;
 }
 
 static uint8 center_adjacent_map_uses_median(void)
@@ -2105,19 +2768,19 @@ static uint8 center_cross_cell_retries_until_total_timeout(void)
     feed_center(1550u, 550u);
     subject2_tick(&context, &update);
     if((SUBJECT2_SCAN_BOX_CENTER != subject2_get_state()) ||
-       (request_before + 1u != center_request_count) ||
+       (request_before + 2u != center_request_count) ||
        (0u != correction_start_count) ||
        (0 != strcmp(update.run_state, "VCtr"))) return 0u;
 
     fake_time_ms += EXEC_ART_SYNC_TIMEOUT_MS;
     subject2_tick(&context, &update);
 #if ART_CENTER_TIMEOUT_FALLBACK_ENABLE
-    return ((SUBJECT2_SCAN_BOX_TURN == subject2_get_state()) &&
-            (0 == strcmp(update.run_state, "VTurn"))) ? 1u : 0u;
+    return ((SUBJECT2_SCAN_MAP_SYNC == subject2_get_state()) &&
+            (0 == strcmp(update.run_state, "VSync"))) ? 1u : 0u;
 #else
     return ((SUBJECT2_ERROR == subject2_get_state()) &&
             (EXEC_ERROR_ART_CENTER == fake_executor_error) &&
-            (0 == strcmp(update.run_state, "E:CTmo"))) ? 1u : 0u;
+            (0 == strcmp(update.run_state, "F:ART1"))) ? 1u : 0u;
 #endif
 }
 
@@ -2183,9 +2846,19 @@ int main(void)
 {
     uint8 passed = 1u;
 
+#if SUBJECT2_SCAN_ELIMINATION_ONLY
+    passed &= last_target_elimination_enters_bind_without_observation();
+    printf("subject2-last-target-elim   %s\n", (0u != passed) ? "PASS" : "FAIL");
+    passed &= duplicate_last_target_elimination_enters_bind();
+    printf("subject2-last-target-dupe   %s\n", (0u != passed) ? "PASS" : "FAIL");
+    passed &= invalid_target_counts_fall_back_to_rescan();
+    printf("subject2-last-target-rescan %s\n", (0u != passed) ? "PASS" : "FAIL");
+#else
     build_map();
     passed &= run_scan();
     printf("subject2-scan-state         %s\n", (0u != passed) ? "PASS" : "FAIL");
+    passed &= subject3_push_block_retries_original_planner();
+    printf("subject3-push-block         %s\n", (0u != passed) ? "PASS" : "FAIL");
     passed &= classification_timeout_retries();
     printf("subject2-scan-timeout       %s\n", (0u != passed) ? "PASS" : "FAIL");
     passed &= classification_backoff_success_returns_to_origin();
@@ -2200,15 +2873,19 @@ int main(void)
     printf("subject2-duplicate-classes  %s\n", (0u != passed) ? "PASS" : "FAIL");
     passed &= target_classification_uses_same_backoff_flow();
     printf("subject2-target-backoff     %s\n", (0u != passed) ? "PASS" : "FAIL");
+    passed &= subject3_observation_block_starts_bomb_path();
+    printf("subject3-observe-bomb       %s\n", (0u != passed) ? "PASS" : "FAIL");
+    passed &= subject3_center_rejects_changed_bomb_map();
+    printf("subject3-center-map-check   %s\n", (0u != passed) ? "PASS" : "FAIL");
     passed &= heading_restore_requires_new_continuous_window();
     printf("subject2-home-yaw-stable    %s\n", (0u != passed) ? "PASS" : "FAIL");
-    passed &= heading_restore_timeout_stops();
+    passed &= heading_restore_timeout_keeps_current_yaw();
     printf("subject2-home-yaw-timeout   %s\n", (0u != passed) ? "PASS" : "FAIL");
     passed &= post_observe_yaw_thresholds_and_bias();
     printf("subject2-post-yaw-threshold %s\n", (0u != passed) ? "PASS" : "FAIL");
     passed &= post_observe_yaw_fallbacks();
     printf("subject2-post-yaw-fallback  %s\n", (0u != passed) ? "PASS" : "FAIL");
-    passed &= post_observe_yaw_fix_timeout_stops();
+    passed &= post_observe_yaw_fix_timeout_rebases();
     printf("subject2-post-yaw-timeout   %s\n", (0u != passed) ? "PASS" : "FAIL");
     passed &= map_change_syncs_scan();
     printf("subject2-scan-map-change    %s\n", (0u != passed) ? "PASS" : "FAIL");
@@ -2218,21 +2895,31 @@ int main(void)
     printf("subject2-scan-map-timeout   %s\n", (0u != passed) ? "PASS" : "FAIL");
     passed &= scan_map_sync_recovers_after_invalid_frames();
     printf("subject2-scan-map-recover   %s\n", (0u != passed) ? "PASS" : "FAIL");
+    passed &= scan_sync_center_timeout_uses_accepted_map();
+    printf("subject2-sync-frozen-map    %s\n", (0u != passed) ? "PASS" : "FAIL");
     passed &= host_completion_before_task_end_enters_confirm();
     printf("subject2-host-completion    %s\n", (0u != passed) ? "PASS" : "FAIL");
-    passed &= confirm_map_without_new_frame_times_out();
-    printf("subject2-confirm-timeout    %s\n", (0u != passed) ? "PASS" : "FAIL");
+    passed &= host_completion_timeout_resumes_preserved_path();
+    printf("subject2-host-timeout-go    %s\n", (0u != passed) ? "PASS" : "FAIL");
+    passed &= task_end_timeout_completes_last_box_locally();
+    printf("subject2-task-timeout-go    %s\n", (0u != passed) ? "PASS" : "FAIL");
+    passed &= task_end_timeout_plans_remaining_box();
+    printf("subject2-task-timeout-next  %s\n", (0u != passed) ? "PASS" : "FAIL");
+    passed &= confirm_new_conflict_disables_mcu_resume();
+    printf("subject2-confirm-conflict   %s\n", (0u != passed) ? "PASS" : "FAIL");
     passed &= confirm_map_ignores_transient_invalid_frames();
     printf("subject2-confirm-transient  %s\n", (0u != passed) ? "PASS" : "FAIL");
     passed &= push_retry_tracks_active_box();
     printf("subject2-push-retry         %s\n", (0u != passed) ? "PASS" : "FAIL");
     passed &= scan_center_timeout_follows_policy();
     printf("subject2-center-timeout     %s\n", (0u != passed) ? "PASS" : "FAIL");
+    passed &= scan_center_stale_map_enters_sync();
+    printf("subject2-center-stale-map   %s\n", (0u != passed) ? "PASS" : "FAIL");
     passed &= replan_center_timeout_follows_policy();
     printf("subject2-replan-timeout     %s\n", (0u != passed) ? "PASS" : "FAIL");
     passed &= turn_requires_continuous_100ms();
     printf("subject2-turn-stable        %s\n", (0u != passed) ? "PASS" : "FAIL");
-    passed &= turn_timeout_stops();
+    passed &= turn_timeout_changes_observation_direction();
     printf("subject2-turn-timeout       %s\n", (0u != passed) ? "PASS" : "FAIL");
     passed &= vision_ready_retries_then_times_out();
     printf("subject2-ready-timeout      %s\n", (0u != passed) ? "PASS" : "FAIL");
@@ -2242,11 +2929,17 @@ int main(void)
     printf("subject2-center-fast-2cm    %s\n", (0u != passed) ? "PASS" : "FAIL");
     passed &= fresh_periodic_center_over_2cm_uses_batch();
     printf("subject2-center-fast-over   %s\n", (0u != passed) ? "PASS" : "FAIL");
+    passed &= fresh_periodic_map_matching_c_skips_batch();
+    printf("subject2-center-fast-grid   %s\n", (0u != passed) ? "PASS" : "FAIL");
+    passed &= fresh_periodic_map_wrong_c_uses_batch();
+    printf("subject2-center-grid-mismatch %s\n", (0u != passed) ? "PASS" : "FAIL");
+    passed &= old_invalid_periodic_center_can_recover_fast();
+    printf("subject2-center-fast-recover %s\n", (0u != passed) ? "PASS" : "FAIL");
     passed &= periodic_center_old_frame_waits_then_uses_batch();
     printf("subject2-center-fast-stale  %s\n", (0u != passed) ? "PASS" : "FAIL");
     passed &= small_center_offset_still_enters_adjustment();
     printf("subject2-center-small       %s\n", (0u != passed) ? "PASS" : "FAIL");
-    passed &= center_adjustment_timeout_stops();
+    passed &= center_adjustment_small_timeout_continues();
     printf("subject2-center-adjust-tmo  %s\n", (0u != passed) ? "PASS" : "FAIL");
     passed &= center_adjustment_busy_has_reason();
     printf("subject2-center-adjust-busy %s\n", (0u != passed) ? "PASS" : "FAIL");
@@ -2266,15 +2959,16 @@ int main(void)
     printf("subject2-request-once       %s\n", (0u != passed) ? "PASS" : "FAIL");
     passed &= step_mode_only_pauses_navigation();
     printf("subject2-step-observe       %s\n", (0u != passed) ? "PASS" : "FAIL");
-    passed &= pre_push_box_observation_timeout_stops();
+    passed &= pre_push_box_observation_timeout_uses_fresh_grid();
     printf("subject2-box-observe-tmo    %s\n", (0u != passed) ? "PASS" : "FAIL");
     passed &= pre_push_box_requests_only_after_wait();
     printf("subject2-box-after-stop     %s\n", (0u != passed) ? "PASS" : "FAIL");
     passed &= turn_center_continues_without_push_alignment();
     printf("subject2-turn-center        %s\n", (0u != passed) ? "PASS" : "FAIL");
-    passed &= invalid_pre_push_box_geometry_continues();
+    passed &= invalid_pre_push_box_geometry_resyncs();
     printf("subject2-box-geometry       %s\n", (0u != passed) ? "PASS" : "FAIL");
     passed &= pre_push_box_motion_error_has_timeout_reason();
     printf("subject2-box-motion-error   %s\n", (0u != passed) ? "PASS" : "FAIL");
+#endif
     return (0u != passed) ? 0 : 1;
 }

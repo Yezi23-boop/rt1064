@@ -182,6 +182,38 @@ static uint8 blocked_extra_gap_is_not_marked(void)
             (0u != blocked_extra_gap_case('B'))) ? 1u : 0u;
 }
 
+static uint8 navigation_blocks_box_on_target(void)
+{
+    navigation_test_map_struct map;
+    solve_result_struct result;
+    uint16 index;
+
+    init_map(&map, 2u, 1u);
+    map.storage[2][2] = MAP_BOX_ON_TARGET;
+    if(0u == solve_navigation_path(&map.source, 2u, 3u, &result))
+    {
+        return 0u;
+    }
+    for(index = 0u; index < result.waypoint_count; index++)
+    {
+        if((2u == result.waypoints[index].row) &&
+           (2u == result.waypoints[index].col))
+        {
+            return 0u;
+        }
+    }
+    return 1u;
+}
+
+static uint8 navigation_accepts_car_on_target(void)
+{
+    navigation_test_map_struct map;
+
+    init_map(&map, 2u, 1u);
+    map.storage[2][1] = '+';
+    return expect_path(&map, 2u, 1u, 1u, 1u);
+}
+
 static uint8 turn_into_push_is_marked(void)
 {
     navigation_test_map_struct map;
@@ -203,7 +235,7 @@ static uint8 turn_into_push_is_marked(void)
             (0u == result.waypoints[1].center_correct_before)) ? 1u : 0u;
 }
 
-static uint8 merged_turn_marks_next_waypoint(void)
+static uint8 merged_turn_marks_center(void)
 {
     navigation_test_map_struct map;
     solve_result_struct result;
@@ -258,7 +290,7 @@ static uint8 merged_push_approach_marks_turn(void)
             ('r' == result.waypoints[1].action) &&
             (1u == result.waypoints[1].center_correct_before) &&
             ('r' == result.waypoints[2].action) &&
-            (1u == result.waypoints[2].center_correct_before) &&
+            (0u == result.waypoints[2].center_correct_before) &&
             ('R' == result.waypoints[3].action) &&
             (0u == result.waypoints[3].center_correct_before)) ? 1u : 0u;
 }
@@ -362,12 +394,14 @@ int main(void)
     passed &= run_case("near-box-split", navigation_splits_near_box_boundary());
     passed &= run_case("blocked-extra-gap", blocked_extra_gap_is_not_marked());
     passed &= run_case("turn-into-push-center", turn_into_push_is_marked());
-    passed &= run_case("merged-turn-center", merged_turn_marks_next_waypoint());
+    passed &= run_case("merged-turn-center", merged_turn_marks_center());
     passed &= run_case("merged-straight-no-center", merged_straight_does_not_mark_center());
     passed &= run_case("merged-push-turn-center", merged_push_approach_marks_turn());
     passed &= run_case("bound-requested-target", bound_box_uses_requested_target());
     passed &= run_case("bound-missing-cells", bound_box_rejects_missing_cells());
     passed &= run_case("car-on-target", car_on_target_is_supported());
+    passed &= run_case("box-on-target-blocked", navigation_blocks_box_on_target());
+    passed &= run_case("navigation-car-on-target", navigation_accepts_car_on_target());
 
     return (0 != passed) ? 0 : 1;
 }

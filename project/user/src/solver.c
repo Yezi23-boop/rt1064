@@ -199,6 +199,14 @@ static uint8 source_cell_is_near_box(const map_source_struct *source, uint16 cel
     return 0u;
 }
 
+static uint8 navigation_cell_blocked(char value)
+{
+    return (('#' == value) ||
+            ('X' == value) ||
+            ('B' == value) ||
+            (MAP_BOX_ON_TARGET == value)) ? 1u : 0u;
+}
+
 static uint8 cell_is_free_for_player(const map_state_struct *map, uint16 cell, uint16 selected_box_cell, uint8 selected_box)
 {
     // 玩家移动时，当前正在求解的箱子和其他箱子都必须视为占用格。
@@ -581,13 +589,17 @@ static uint8 apply_path_to_runtime(map_state_struct *map, uint8 box_index, uint8
             }
         }
 
-        /* 普通转向仍在新段前校正；推箱链则提前到最后一个普通靠近动作前，
-         * 避免车已到箱子相邻格后才做视觉小修。 */
+        /* 普通转折和推箱链首都需要一次视觉准备；同方向动作不重复请求。 */
         center_correct_before = ((0u < i) &&
-                                 (0 != action_changes_direction(path[i - 1u], action))) ? 1u : 0u;
+                                 (0 != action_changes_direction(
+                                     path[i - 1u], action))) ? 1u : 0u;
         if((0 == action_is_push(action)) &&
            ((i + 1u) < path_len) &&
-           (0 != action_is_push(path[i + 1u])))
+           (0 != action_is_push(path[i + 1u])) &&
+           !((0u < i) &&
+             (0 != action_changes_direction(path[i - 1u], action))) &&
+           !((1u < i) &&
+             (0 != action_changes_direction(path[i - 2u], path[i - 1u]))))
         {
             center_correct_before = 1u;
         }
@@ -824,7 +836,8 @@ uint8 solve_navigation_path(const map_source_struct *source,
                 car_count++;
             }
             else if(('#' != value) && ('.' != value) && ('B' != value) &&
-                    ('T' != value) && ('+' != value) && ('X' != value))
+                    ('T' != value) && ('+' != value) && ('X' != value) &&
+                    (MAP_BOX_ON_TARGET != value))
             {
                 set_message(result, "Bad map char");
                 return 0;
@@ -838,7 +851,7 @@ uint8 solve_navigation_path(const map_source_struct *source,
     }
 
     value = source->rows[target_row][target_col];
-    if(('#' == value) || ('X' == value) || ('B' == value))
+    if(0 != navigation_cell_blocked(value))
     {
         set_message(result, "Navigation target blocked");
         return 0;
@@ -870,7 +883,7 @@ uint8 solve_navigation_path(const map_source_struct *source,
                 continue;
             }
             value = source->rows[map_cell_row(next_cell)][map_cell_col(next_cell)];
-            if(('#' == value) || ('X' == value) || ('B' == value) ||
+            if((0 != navigation_cell_blocked(value)) ||
                (0 != bfs_visited[next_cell]))
             {
                 continue;
@@ -919,11 +932,267 @@ uint8 solve_navigation_path(const map_source_struct *source,
             set_message(result, "Navigation output failed");
             return 0;
         }
-        previous_action = action;
         current_cell = next_cell;
+        previous_action = action;
     }
 
     result->solved = 1;
     set_message(result, "Navigation solved");
     return 1;
+}
+
+static uint8 bomb_source_valid(const map_source_struct *source,
+                               uint16 bomb_cell,
+                               uint16 blast_wall_cell,
+                               uint16 *player_cell)
+{
+    uint8 row;
+    uint8 col;
+    uint8 player_count = 0u;
+
+    if((0 == source) || (0 == player_cell) ||
+       (MAP_CELLS <= bomb_cell) || (MAP_CELLS <= blast_wall_cell) ||
+       (0 == source->rows[map_cell_row(bomb_cell)]) ||
+       (0 == source->rows[map_cell_row(blast_wall_cell)]) ||
+       ('X' != source->rows[map_cell_row(bomb_cell)][map_cell_col(bomb_cell)]) ||
+       ('#' != source->rows[map_cell_row(blast_wall_cell)][map_cell_col(blast_wall_cell)]) ||
+       (0u == map_cell_row(blast_wall_cell)) ||
+       ((MAP_ROWS - 1u) == map_cell_row(blast_wall_cell)) ||
+       (0u == map_cell_col(blast_wall_cell)) ||
+       ((MAP_COLS - 1u) == map_cell_col(blast_wall_cell)))
+    {
+        return 0u;
+    }
+
+    for(row = 0u; row < MAP_ROWS; row++)
+    {
+        if((0 == source->rows[row]) ||
+           (MAP_COLS != strlen(source->rows[row])))
+        {
+            return 0u;
+        }
+        for(col = 0u; col < MAP_COLS; col++)
+        {
+            char value = source->rows[row][col];
+
+            if(('C' == value) || ('+' == value))
+            {
+                *player_cell = map_cell_index(row, col);
+                player_count++;
+            }
+            else if(('#' != value) && ('.' != value) &&
+                    ('B' != value) && ('T' != value) &&
+                    ('X' != value) && (MAP_BOX_ON_TARGET != value))
+            {
+                return 0u;
+            }
+        }
+    }
+    return (1u == player_count) ? 1u : 0u;
+}
+
+static uint8 bomb_player_cell_free(const map_source_struct *source,
+                                   uint16 cell,
+                                   uint16 selected_bomb_cell,
+                                   uint16 current_bomb_cell)
+{
+    char value;
+
+    if(cell == current_bomb_cell)
+    {
+        return 0u;
+    }
+    value = source->rows[map_cell_row(cell)][map_cell_col(cell)];
+    if(cell == selected_bomb_cell)
+    {
+        return 1u;
+    }
+    return (('.' == value) || ('T' == value) ||
+            ('C' == value) || ('+' == value)) ? 1u : 0u;
+}
+
+static uint8 bomb_destination_free(const map_source_struct *source,
+                                   uint16 cell,
+                                   uint16 selected_bomb_cell)
+{
+    char value = source->rows[map_cell_row(cell)][map_cell_col(cell)];
+
+    if(cell == selected_bomb_cell)
+    {
+        return 1u;
+    }
+    return (('.' == value) || ('C' == value)) ? 1u : 0u;
+}
+
+uint8 solve_bomb_path(const map_source_struct *source,
+                      uint16 bomb_cell,
+                      uint16 blast_wall_cell,
+                      solve_result_struct *result,
+                      uint16 *push_count,
+                      uint16 *turn_count,
+                      uint16 *final_car_cell)
+{
+    static const int8 dr[4] = {-1, 1, 0, 0};
+    static const int8 dc[4] = {0, 0, -1, 1};
+    static const char move_action[4] = {'u', 'd', 'l', 'r'};
+    static const char push_action[4] = {'U', 'D', 'L', 'R'};
+    char reverse_path[MAX_SINGLE_PATH + 1];
+    uint16 player_cell = INVALID_STATE;
+    uint16 read_index = 0u;
+    uint16 write_index = 0u;
+    uint16 found_state = INVALID_STATE;
+    uint16 state;
+    uint16 player;
+    uint16 bomb;
+    uint16 next_player;
+    uint16 next_bomb;
+    uint16 next_state;
+    uint16 path_len = 0u;
+    uint16 index;
+    uint16 pushes = 0u;
+    uint16 turns = 0u;
+    uint8 direction;
+    char previous_direction = '\0';
+
+    if(0 == result)
+    {
+        return 0u;
+    }
+    clear_result(result);
+    if(0u == bomb_source_valid(source, bomb_cell, blast_wall_cell,
+                               &player_cell))
+    {
+        set_message(result, "Bad bomb map");
+        return 0u;
+    }
+
+    memset(bfs_visited, 0, sizeof(bfs_visited));
+    state = (uint16)(player_cell * MAP_CELLS + bomb_cell);
+    bfs_visited[state] = 1u;
+    bfs_parent[state] = INVALID_STATE;
+    bfs_queue[write_index++] = state;
+
+    while(read_index < write_index)
+    {
+        state = bfs_queue[read_index++];
+        player = (uint16)(state / MAP_CELLS);
+        bomb = (uint16)(state % MAP_CELLS);
+        if(bomb == blast_wall_cell)
+        {
+            found_state = state;
+            break;
+        }
+
+        for(direction = 0u; direction < 4u; direction++)
+        {
+            if(0u == step_cell(player, dr[direction], dc[direction],
+                               &next_player))
+            {
+                continue;
+            }
+            next_bomb = bomb;
+            if(next_player == bomb)
+            {
+                if(0u == step_cell(bomb, dr[direction], dc[direction],
+                                   &next_bomb))
+                {
+                    continue;
+                }
+                if((next_bomb != blast_wall_cell) &&
+                   (0u == bomb_destination_free(source, next_bomb,
+                                                bomb_cell)))
+                {
+                    continue;
+                }
+                next_state = (uint16)(next_player * MAP_CELLS + next_bomb);
+                if(0u == bfs_visited[next_state])
+                {
+                    bfs_visited[next_state] = 1u;
+                    bfs_parent[next_state] = state;
+                    bfs_action[next_state] = push_action[direction];
+                    bfs_queue[write_index++] = next_state;
+                }
+            }
+            else
+            {
+                if(0u == bomb_player_cell_free(source, next_player,
+                                               bomb_cell, bomb))
+                {
+                    continue;
+                }
+                next_state = (uint16)(next_player * MAP_CELLS + bomb);
+                if(0u == bfs_visited[next_state])
+                {
+                    bfs_visited[next_state] = 1u;
+                    bfs_parent[next_state] = state;
+                    bfs_action[next_state] = move_action[direction];
+                    bfs_queue[write_index++] = next_state;
+                }
+            }
+        }
+    }
+
+    if(INVALID_STATE == found_state)
+    {
+        set_message(result, "Bomb path blocked");
+        return 0u;
+    }
+
+    state = found_state;
+    while(INVALID_STATE != bfs_parent[state])
+    {
+        if(MAX_SINGLE_PATH <= path_len)
+        {
+            set_message(result, "Bomb path overflow");
+            return 0u;
+        }
+        reverse_path[path_len++] = bfs_action[state];
+        state = bfs_parent[state];
+    }
+
+    player = player_cell;
+    for(index = 0u; index < path_len; index++)
+    {
+        char search_action = reverse_path[path_len - 1u - index];
+        char output_action = waypoint_action_dir(search_action);
+        int8 row_delta = 0;
+        int8 col_delta = 0;
+        uint8 first_push = 0u;
+
+        if('u' == output_action) row_delta = -1;
+        else if('d' == output_action) row_delta = 1;
+        else if('l' == output_action) col_delta = -1;
+        else if('r' == output_action) col_delta = 1;
+
+        if(0u == step_cell(player, row_delta, col_delta, &next_player))
+        {
+            set_message(result, "Bomb replay failed");
+            return 0u;
+        }
+        if(0u != action_is_push(search_action))
+        {
+            first_push = (0u == pushes) ? 1u : 0u;
+            pushes++;
+        }
+        if(('\0' != previous_direction) &&
+           (previous_direction != output_action))
+        {
+            turns++;
+        }
+        previous_direction = output_action;
+        if((0u == result_append_action(result, output_action)) ||
+           (0u == result_append_waypoint(result, next_player, output_action,
+                                         first_push, 0u, 0u)))
+        {
+            return 0u;
+        }
+        player = next_player;
+    }
+
+    result->solved = 1u;
+    set_message(result, "Solved");
+    if(0 != push_count) *push_count = pushes;
+    if(0 != turn_count) *turn_count = turns;
+    if(0 != final_car_cell) *final_car_cell = (uint16)(found_state / MAP_CELLS);
+    return 1u;
 }

@@ -18,7 +18,12 @@ def assigned_literal(statements, name):
 
 
 mode_if = None
+work_mode_assignment = None
 for node in TREE.body:
+    if (isinstance(node, ast.Assign) and len(node.targets) == 1 and
+            isinstance(node.targets[0], ast.Name) and
+            node.targets[0].id == "WORK_MODE"):
+        work_mode_assignment = node
     if not isinstance(node, ast.If):
         continue
     test = node.test
@@ -28,6 +33,9 @@ for node in TREE.body:
         break
 
 assert mode_if is not None, "WORK_MODE configuration branch is missing"
+assert work_mode_assignment is not None, "WORK_MODE selection is missing"
+assert (isinstance(work_mode_assignment.value, ast.Name) and
+        work_mode_assignment.value.id == "MODE_RUN"), "MODE_RUN is not selected"
 
 run_expected = {
     "DEBUG_ENABLE": False,
@@ -37,17 +45,17 @@ run_expected = {
     "DEBUG_PLAYER_CENTER_ENABLE": False,
     "DEBUG_PLAYER_HEADING_ENABLE": False,
     "DEBUG_OBSERVATION_ENABLE": False,
-    "SHOW_RECTIFIED_VIEW": True,
-    "USE_RECTIFIED_RECOGNITION": True,
+    "SHOW_RECTIFIED_VIEW": False,
+    "USE_RECTIFIED_RECOGNITION": False,
 }
 debug_expected = {
     "DEBUG_ENABLE": True,
     "DEBUG_DRAW_ROI": True,
-    "DEBUG_DRAW_GRID_LINES": True,
-    "DEBUG_DRAW_POINTS": True,
+    "DEBUG_DRAW_GRID_LINES": False,
+    "DEBUG_DRAW_POINTS": False,
     "DEBUG_PLAYER_CENTER_ENABLE": False,
     "DEBUG_PLAYER_HEADING_ENABLE": True,
-    "DEBUG_OBSERVATION_ENABLE": True,
+    "DEBUG_OBSERVATION_ENABLE": False,
     "SHOW_RECTIFIED_VIEW": True,
     "USE_RECTIFIED_RECOGNITION": True,
 }

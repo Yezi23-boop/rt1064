@@ -114,6 +114,28 @@ uint8 executor_start_position_correction_with_pose_reset(
 void executor_stop(void);
 
 /**
+ * @brief 请求当前连续推箱运动在最近的20cm格中心停车。
+ * @return 1 表示请求已锁存；0 表示当前不在包含推箱动作的连续运动段。
+ * @note 请求本身不急停；PIT 位置环到达格中心后才保持停车，且不会推进下一 waypoint。
+ */
+uint8 executor_request_stop_after_current_push(void);
+
+/** 返回1表示边界停车已到点，业务层可以停止 executor 并开始读取新地图。 */
+uint8 executor_stop_after_current_push_ready(void);
+
+/**
+ * @brief 边界到点超时时立即停车，但保留旧 waypoint 供稍后恢复。
+ * @return 1 表示已从 REQUESTED 切换为 REACHED；0 表示当前没有边界停车请求。
+ */
+uint8 executor_force_current_push_stop(void);
+
+/**
+ * @brief 放弃本次边界同步并从保留的旧 waypoint 继续运行。
+ * @return 1 表示已恢复；0 表示当前没有已到点的边界停车。
+ */
+uint8 executor_resume_after_current_push_stop(void);
+
+/**
  * @brief 20ms 中断调用，用于推进当前 waypoint 执行状态。
  *
  * @note 仅由 PIT_CH1 ISR 在反馈相位之后调用，因此读取的是本周期最新 pose。
@@ -137,6 +159,9 @@ uint8 executor_art_sync_pending(void);
  * @return 1 表示底盘已在方向转折点停车，主循环必须完成中心矫正后才能放行。
  */
 uint8 executor_art_pre_push_pending(void);
+
+/** 读取当前视觉等待对应的 waypoint 格；仅等待态有效。 */
+uint8 executor_get_pre_push_wait_cell(uint8 *row, uint8 *col);
 
 /**
  * @brief 当前中心矫正完成后是否还需要执行推箱垂直轴对齐。
@@ -276,6 +301,15 @@ uint16 executor_get_current_step(void);
  * @return `executor_start()` 接收的路径点数量。
  */
 uint16 executor_get_total_steps(void);
+
+/**
+ * @brief 把当前 executor 位姿映射为相对执行起点的地图格和格内偏差。
+ * @return 当前存在有效地图路径且映射结果在地图范围内时返回 1。
+ */
+uint8 executor_get_current_grid_pose(uint8 *row,
+                                     uint8 *col,
+                                     float *offset_x_cm,
+                                     float *offset_y_cm);
 
 /**
  * @brief 获取 VOFA/屏幕调试用执行器状态快照。

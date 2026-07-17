@@ -10,6 +10,34 @@
 static control_status_struct control_status; // 20ms ISR 写入，主循环只读显示；跨字段不保证原子快照。
 static uint32 startup_yaw_wait_ms = 0;        // 上电 yaw 稳定等待时间，同时作为电机非零输出安全门。
 static uint8 startup_yaw_locked = 0;          // 延时结束后只锁定一次 yaw 零点，避免后续重置位姿。
+static volatile drive_health_fault_enum drive_health_fault = DRIVE_HEALTH_NONE;
+
+static uint8 drive_feedback_value_valid(float value)
+{
+    return ((value == value) && (value > -1000000.0f) &&
+            (value < 1000000.0f)) ? 1u : 0u;
+}
+
+static uint8 drive_feedback_is_valid(void)
+{
+    uint8 wheel;
+
+    if((0u == drive_feedback_value_valid(control_status.current_yaw)) ||
+       (0u == drive_feedback_value_valid(control_status.current_roll)) ||
+       (0u == drive_feedback_value_valid(control_status.current_pitch)))
+    {
+        return 0u;
+    }
+    for(wheel = 0u; wheel < WHEEL_COUNT; wheel++)
+    {
+        if(0u == drive_feedback_value_valid(
+                       control_status.wheel_feedback_count[wheel]))
+        {
+            return 0u;
+        }
+    }
+    return 1u;
+}
 
 static uint8 motion_is_translating(void)
 {
@@ -67,6 +95,8 @@ uint8 control_init(void)
     drive_pose_init();
 
     hw_state = io_init();
+    drive_health_fault = (0u == hw_state) ?
+                         DRIVE_HEALTH_NONE : DRIVE_HEALTH_IMU_INIT;
 
     stop_motion();
     startup_yaw_wait_ms = 0;
@@ -82,6 +112,17 @@ uint8 control_feedback_update_20ms(void)
     // 反馈相位先刷新编码器、姿态和 pose；返回 0 时本周期不推进 executor，也不输出闭环。
     read_encoder_counts(control_status.wheel_feedback_count);
     drive_imu_sync_status(&control_status);
+    if((DRIVE_HEALTH_NONE == drive_health_fault) &&
+       (0u == drive_feedback_is_valid()))
+    {
+        drive_health_fault = DRIVE_HEALTH_FEEDBACK_INVALID;
+    }
+    if(DRIVE_HEALTH_NONE != drive_health_fault)
+    {
+        drive_output_clear_motion_outputs(&control_status);
+        drive_output_stop(&control_status);
+        return 0u;
+    }
 
     if (0 != drive_test_manual_pwm_active())
     {
@@ -216,4 +257,14 @@ void stop_motion(void)
 const control_status_struct *get_control_status(void)
 {
     return &control_status;
+}
+
+uint8 drive_control_is_healthy(void)
+{
+    return (DRIVE_HEALTH_NONE == drive_health_fault) ? 1u : 0u;
+}
+
+drive_health_fault_enum drive_control_get_health_fault(void)
+{
+    return drive_health_fault;
 }

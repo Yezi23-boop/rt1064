@@ -58,8 +58,8 @@ static uint8 collect_and_select_nearest(void)
     {
         return 0u;
     }
-    if(0 == subject2_select_observation(&map.source, objects, object_count,
-                                        &plan, &path))
+    if(0 == subject2_select_observation(&map.source, objects, object_count, 0.0f,
+                                         &plan, &path))
     {
         return 0u;
     }
@@ -85,8 +85,8 @@ static uint8 ambiguity_and_retry_mask_work(void)
     {
         return 0u;
     }
-    if(0 == subject2_select_observation(&map.source, objects, object_count,
-                                        &first, &path))
+    if(0 == subject2_select_observation(&map.source, objects, object_count, 0.0f,
+                                         &first, &path))
     {
         return 0u;
     }
@@ -96,8 +96,8 @@ static uint8 ambiguity_and_retry_mask_work(void)
     }
 
     objects[first.object_index].tried_observation_mask |= first.observation_bit;
-    if(0 == subject2_select_observation(&map.source, objects, object_count,
-                                        &second, &path))
+    if(0 == subject2_select_observation(&map.source, objects, object_count, 0.0f,
+                                         &second, &path))
     {
         return 0u;
     }
@@ -129,6 +129,7 @@ static uint8 observation_yaw_matches_four_directions(void)
 
         if((0u == subject2_collect_objects(&map.source, 'B', objects, &object_count)) ||
            (0u == subject2_select_observation(&map.source, objects, object_count,
+                                               0.0f,
                                                &plan, &path)) ||
            (expected_yaw[index] != plan.target_yaw_deg))
         {
@@ -166,6 +167,80 @@ static uint8 classifier_requires_consecutive_confident_samples(void)
     }
     return ((0 != subject2_classifier_push(&filter, 4u, 920u, 750u, 3u, &confirmed)) &&
             (4u == confirmed)) ? 1u : 0u;
+}
+
+static uint8 equal_distance_prefers_smaller_turn(void)
+{
+    test_map_struct map;
+    subject2_object_struct objects[MAX_BOXES];
+    subject2_observation_plan_struct plan;
+    solve_result_struct path;
+    uint8 object_count = 0u;
+
+    init_map(&map, 4u, 4u);
+    map.rows[5][5] = 'B';
+    if((0u == subject2_collect_objects(&map.source, 'B', objects, &object_count)) ||
+       (0u == subject2_select_observation(&map.source, objects, object_count,
+                                           90.0f, &plan, &path)))
+    {
+        return 0u;
+    }
+    return ((1u == path.action_count) &&
+            (5u == plan.row) && (4u == plan.col) &&
+            (SUBJECT2_OBSERVE_LEFT == plan.observation_bit) &&
+            (90.0f == plan.target_yaw_deg)) ? 1u : 0u;
+}
+
+static uint8 equal_distance_handles_yaw_wrap_and_stable_tie(void)
+{
+    test_map_struct map;
+    subject2_object_struct objects[MAX_BOXES];
+    subject2_observation_plan_struct plan;
+    solve_result_struct path;
+    uint8 object_count = 0u;
+
+    init_map(&map, 4u, 4u);
+    map.rows[5][5] = 'B';
+    if(0u == subject2_collect_objects(&map.source, 'B', objects, &object_count))
+    {
+        return 0u;
+    }
+    if((0u == subject2_select_observation(&map.source, objects, object_count,
+                                           359.0f, &plan, &path)) ||
+       (SUBJECT2_OBSERVE_UP != plan.observation_bit) ||
+       (0.0f != plan.target_yaw_deg))
+    {
+        return 0u;
+    }
+    if((0u == subject2_select_observation(&map.source, objects, object_count,
+                                           45.0f, &plan, &path)) ||
+       (SUBJECT2_OBSERVE_UP != plan.observation_bit))
+    {
+        return 0u;
+    }
+    return 1u;
+}
+
+static uint8 shorter_path_beats_zero_turn(void)
+{
+    test_map_struct map;
+    subject2_object_struct objects[MAX_BOXES];
+    subject2_observation_plan_struct plan;
+    solve_result_struct path;
+    uint8 object_count = 0u;
+
+    init_map(&map, 4u, 4u);
+    map.rows[5][5] = 'B';
+    if((0u == subject2_collect_objects(&map.source, 'B', objects, &object_count)) ||
+       (0u == subject2_select_observation(&map.source, objects, object_count,
+                                           180.0f, &plan, &path)))
+    {
+        return 0u;
+    }
+    /* LEFT 只走1格但需转90度；DOWN 不需转向但要走3格。 */
+    return ((SUBJECT2_OBSERVE_LEFT == plan.observation_bit) &&
+            (1u == path.action_count) &&
+            (90.0f == plan.target_yaw_deg)) ? 1u : 0u;
 }
 
 static uint8 car_on_target_is_collected(void)
@@ -317,6 +392,83 @@ static void recognize_object(subject2_object_struct *object, uint8 class_id)
 {
     object->recognized = 1u;
     object->class_id = class_id;
+}
+
+static uint8 last_target_elimination_handles_duplicates(void)
+{
+    subject2_object_struct boxes[3] = {0};
+    subject2_object_struct targets[3] = {0};
+    uint8 target_index = 0xFFu;
+    uint8 class_id = SUBJECT2_INVALID_CLASS;
+
+    recognize_object(&boxes[0], 2u);
+    recognize_object(&boxes[1], 2u);
+    recognize_object(&boxes[2], 5u);
+    recognize_object(&targets[0], 2u);
+    recognize_object(&targets[1], 5u);
+    targets[2].class_id = SUBJECT2_INVALID_CLASS;
+    return ((0u != subject2_infer_last_target_class(boxes, 3u, targets, 3u,
+                                                     &target_index, &class_id)) &&
+            (2u == target_index) && (2u == class_id) &&
+            (0u == targets[2].recognized) &&
+            (SUBJECT2_INVALID_CLASS == targets[2].class_id)) ? 1u : 0u;
+}
+
+static uint8 last_target_elimination_handles_single_pair(void)
+{
+    subject2_object_struct box = {0};
+    subject2_object_struct target = {0};
+    uint8 target_index = 0xFFu;
+    uint8 class_id = SUBJECT2_INVALID_CLASS;
+
+    recognize_object(&box, 7u);
+    target.class_id = SUBJECT2_INVALID_CLASS;
+    return ((0u != subject2_infer_last_target_class(&box, 1u, &target, 1u,
+                                                     &target_index, &class_id)) &&
+            (0u == target_index) && (7u == class_id)) ? 1u : 0u;
+}
+
+static uint8 last_target_elimination_rejects_unsafe_counts(void)
+{
+    subject2_object_struct boxes[3] = {0};
+    subject2_object_struct targets[3] = {0};
+    uint8 target_index;
+    uint8 class_id;
+
+    recognize_object(&boxes[0], 2u);
+    recognize_object(&boxes[1], 5u);
+    recognize_object(&boxes[2], 7u);
+    recognize_object(&targets[0], 2u);
+    targets[1].class_id = SUBJECT2_INVALID_CLASS;
+    targets[2].class_id = SUBJECT2_INVALID_CLASS;
+    target_index = 0xA5u;
+    class_id = 0x5Au;
+    if((0u != subject2_infer_last_target_class(boxes, 3u, targets, 3u,
+                                               &target_index, &class_id)) ||
+       (0xA5u != target_index) || (0x5Au != class_id))
+    {
+        return 0u;
+    }
+
+    recognize_object(&targets[1], 2u);
+    if(0u != subject2_infer_last_target_class(boxes, 3u, targets, 3u,
+                                              &target_index, &class_id))
+    {
+        return 0u;
+    }
+
+    targets[1].class_id = 5u;
+    boxes[2].recognized = 0u;
+    if(0u != subject2_infer_last_target_class(boxes, 3u, targets, 3u,
+                                              &target_index, &class_id))
+    {
+        return 0u;
+    }
+
+    boxes[2].recognized = 1u;
+    boxes[2].class_id = SUBJECT2_CLASS_COUNT;
+    return (0u == subject2_infer_last_target_class(boxes, 3u, targets, 3u,
+                                                    &target_index, &class_id)) ? 1u : 0u;
 }
 
 static uint8 duplicate_class_counts_match(void)
@@ -839,6 +991,9 @@ int main(void)
     passed &= run_case("collect-select-nearest", collect_and_select_nearest());
     passed &= run_case("ambiguity-retry-mask", ambiguity_and_retry_mask_work());
     passed &= run_case("observation-yaw", observation_yaw_matches_four_directions());
+    passed &= run_case("observation-less-turn", equal_distance_prefers_smaller_turn());
+    passed &= run_case("observation-yaw-wrap", equal_distance_handles_yaw_wrap_and_stable_tie());
+    passed &= run_case("observation-path-first", shorter_path_beats_zero_turn());
     passed &= run_case("classifier-consecutive", classifier_requires_consecutive_confident_samples());
     passed &= run_case("car-on-target", car_on_target_is_collected());
     passed &= run_case("center-map-same-cell", center_map_same_cell_is_preserved());
@@ -849,6 +1004,9 @@ int main(void)
     passed &= run_case("map-stability", stability_tracker_counts_new_equal_frames());
     passed &= run_case("class-count-duplicates", duplicate_class_counts_match());
     passed &= run_case("class-count-invalid", class_count_validation_rejects_invalid_objects());
+    passed &= run_case("last-target-duplicates", last_target_elimination_handles_duplicates());
+    passed &= run_case("last-target-single", last_target_elimination_handles_single_pair());
+    passed &= run_case("last-target-reject", last_target_elimination_rejects_unsafe_counts());
     passed &= run_case("class-count-invalidate", mismatched_classes_are_invalidated_locally());
     passed &= run_case("push-plan-duplicates", duplicate_class_push_plan_selects_shortest());
     passed &= run_case("push-plan-retry", push_retry_keeps_target_and_optional_box());

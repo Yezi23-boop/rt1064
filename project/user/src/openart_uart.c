@@ -828,6 +828,13 @@ uint32 openart_get_player_center(uint16 *col_q, uint16 *row_q, uint8 *valid)
 
 void openart_request_player_center(void)
 {
+    observation_active = 0u;
+    observation_count = 0u;
+    observation_read_index = 0u;
+    observation_request_row = 0u;
+    observation_request_col = 0u;
+    observation_last_map_frame = frame_count;
+    memset(observation_samples, 0, sizeof(observation_samples));
     requested_center_active = 1;
     requested_center_count = 0;
     requested_center_read_index = 0;
@@ -898,6 +905,16 @@ void openart_request_observation(uint8 box_row, uint8 box_col)
     uint8 length = 0u;
     const char *prefix = "OBSERVE_REQ ";
 
+    requested_center_active = 0u;
+    requested_center_count = 0u;
+    requested_center_read_index = 0u;
+    requested_center_map_valid = 0u;
+    requested_center_last_map_frame = frame_count;
+    memset(requested_center_col_q, 0, sizeof(requested_center_col_q));
+    memset(requested_center_row_q, 0, sizeof(requested_center_row_q));
+    memset(requested_center_yaw_q, 0, sizeof(requested_center_yaw_q));
+    memset(requested_center_yaw_valid, 0,
+           sizeof(requested_center_yaw_valid));
     observation_active = 1u;
     observation_count = 0u;
     observation_read_index = 0u;

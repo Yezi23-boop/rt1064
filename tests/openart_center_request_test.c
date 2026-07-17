@@ -257,6 +257,25 @@ int main(void)
     passed &= run_case("observe-new-request-clears",
         pop_observation_equals(0u, 0u, 0u, 0u, 0u));
 
+    openart_request_observation(5u, 8u);
+    feed_observation_sample_with_map(1u, 750u, 550u, 850u, 550u);
+    openart_request_player_center();
+    feed_observation_sample_with_map(1u, 750u, 550u, 850u, 550u);
+    feed_center_sample_with_map(1u, 550u, 550u);
+    passed &= run_case("center-cancels-observe",
+        (0u != pop_sample_equals(1u, 550u, 550u)) &&
+        (0u != pop_observation_equals(0u, 0u, 0u, 0u, 0u)));
+
+    openart_request_player_center();
+    feed_center_sample_with_map(1u, 550u, 550u);
+    openart_request_observation(5u, 8u);
+    feed_center_sample_with_map(1u, 550u, 550u);
+    feed_observation_sample_with_map(1u, 750u, 550u, 850u, 550u);
+    passed &= run_case("observe-cancels-center",
+        (0u != pop_sample_equals(0u, 0u, 0u)) &&
+        (NULL == openart_get_requested_center_map()) &&
+        (0u != pop_observation_equals(1u, 750u, 550u, 850u, 550u)));
+
     feed_map_frame("#....C.........#", 550u, 550u, 1u);
     frame_before = openart_uart_get_frame_count();
     feed_map_frame("#.C..C.........#", 550u, 550u, 1u);

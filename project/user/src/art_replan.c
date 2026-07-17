@@ -1,6 +1,7 @@
 #include "zf_common_headfile.h"
 #include "art_observation.h"
 #include "art_replan.h"
+#include "competition_flow.h"
 #include "drive_control.h"
 #include "drive_config.h"
 #include "drive_pose.h"
@@ -19,7 +20,7 @@ typedef enum
     ART_REPLAN_WAIT_LAUNCH,      /**< 发车前等待态：持续收图，但只计时不求解。 */
     ART_REPLAN_WAIT_CENTER,      /**< 发车区中心等待态：等待 CENTER_REQ 的5个精确中心样本。 */
     ART_REPLAN_YAW_RECHECK,      /**< 发车 yaw 偏差较大，等待第二批样本确认。 */
-    ART_REPLAN_YAW_FIX,          /**< 科目二发车前按视觉差值实际回正。 */
+    ART_REPLAN_YAW_FIX,          /**< 分类科目发车前按视觉差值实际回正。 */
     ART_REPLAN_LAUNCH_MOVE,      /**< 按 ART 中心计算距离，移动到外面第一可走格中心。 */
     ART_REPLAN_INITIAL,          /**< 出发车区后等待真实推箱地图并首次求解。 */
     ART_REPLAN_INITIAL_CENTER,   /**< 初次稳定地图已冻结，等待请求式精确中心后再求解。 */
@@ -33,16 +34,32 @@ typedef enum
     ART_REPLAN_RETURN_VERIFY,    /**< 停车复核是否回到保存的发车中心。 */
 } art_replan_phase_enum;
 
+typedef enum
+{
+    ART_RECOVERY_NONE = 0,
+    ART_RECOVERY_MAP,
+    ART_RECOVERY_CENTER,
+    ART_RECOVERY_OBSERVE,
+    ART_RECOVERY_PLAN,
+    ART_RECOVERY_RETURN
+} art_recovery_reason_enum;
+
 static art_replan_phase_enum art_replan_phase = ART_REPLAN_IDLE; // 主循环写入和读取；决定稳定帧成功后的启动策略。
 static map_stability_tracker_struct art_map_tracker;
 static uint32 art_wait_start_ms = 0;                              // 本轮 ART 等待起点，单位 ms；用于统一初始/段末超时。
-static uint8 art_launch_subject2 = 0;                             // 1 表示发车后把地图交给科目二，不运行任意配对求解。
+static uint32 art_sync_start_ms = 0;                              // 段末恢复总窗口起点，地图和中心共用。
+static uint8 art_launch_classification = 0;                       // 1 表示发车后把地图交给分类科目，不运行科目一求解。
 static uint32 art_launch_delay_start_ms = 0;                      // 5 秒延迟起点。
 static uint8 confirmed_box_count = 0;                             // 上一次被 ART 认定为“同步完成”的箱子数基线。
 static uint8 confirmed_target_count = 0;                          // 上一次被 ART 认定为“同步完成”的目标数基线。
 static uint8 confirmed_counts_valid = 0;                           // 1 表示上面的 B/T 基线有效，可用于判断是否发生了消除。
 static uint32 art_monitor_last_frame = 0;                           // 执行空闲态已检查的最新地图帧号。
 static uint8 art_external_change_pending = 0;                       // 1 表示上位机提前消除 B/T，正在接管旧路径。
+static uint8 art_host_completion_waiting_boundary = 0;              // 1 表示已锁存上位机变化，正完成当前20cm格。
+static uint32 art_host_completion_start_ms = 0u;
+static uint8 art_host_path_preserved = 0u;
+static uint8 art_segment_sync_retry_count = 0u;
+static uint8 art_segment_sync_map_seen = 0u;
 static art_center_batch_struct art_center_batch;
 static uint16 art_requested_center_col_q = 0;                       // 当前请求列中值，单位 1/100 格。
 static uint16 art_requested_center_row_q = 0;                       // 当前请求行中值，单位 1/100 格。
@@ -62,7 +79,8 @@ static float art_launch_yaw_bias_deg = 0.0f;                       // 已知180�
 static uint16 art_launch_yaw_reference_col_q = 0u;
 static uint16 art_launch_yaw_reference_row_q = 0u;
 static uint8 art_launch_subject1_yaw_done = 0u;
-static uint8 art_launch_subject2_yaw_done = 0u;
+static uint8 art_launch_classification_yaw_done = 0u;
+static uint8 art_launch_subject3_yaw_done = 0u;
 static float art_launch_yaw_first_deg = 0.0f;                      // 大偏差复采前第一批圆周平均值。
 static uint32 art_launch_yaw_phase_start_ms = 0u;
 static uint32 art_launch_yaw_stable_start_ms = 0u;
@@ -73,6 +91,29 @@ static uint8 art_home_center_valid = 0;                             // 1 表示�
 static float art_return_pending_x_cm = 0.0f;                       // Y 对齐后待执行的 X 返航距离。
 static uint8 art_return_correction_count = 0;                       // 最终视觉复核失败后的再次校正次数。
 static uint32 art_return_phase_start_ms = 0;                        // 返航采样或单轴移动阶段起点。
+static uint32 art_return_grid_start_ms = 0u;
+static uint32 art_return_grid_timeout_ms = 0u;
+static uint32 art_return_unhealthy_start_ms = 0u;
+static uint8 art_return_unhealthy_started = 0u;
+static uint8 art_return_error_mode = 0u;
+static uint8 art_return_gate_row = ART_RETURN_GATE_ROW_MIN;
+static uint32 art_request_start_frame = 0u;
+static art_recovery_reason_enum art_recovery_reason = ART_RECOVERY_NONE;
+static art_replan_phase_enum art_recovery_phase = ART_REPLAN_IDLE;
+static uint8 art_recovery_count = 0u;
+static uint8 art_recovery_box_row = 0xFFu;
+static uint8 art_recovery_box_col = 0xFFu;
+
+static void art_replan_begin(art_replan_phase_enum phase,
+                             art_replan_update_struct *update);
+static void art_begin_recovery(art_replan_phase_enum target_phase,
+                               art_recovery_reason_enum reason,
+                               executor_error_enum final_error,
+                               art_replan_update_struct *update);
+static void art_replan_begin_return_center(art_replan_phase_enum phase,
+                                           art_replan_update_struct *update);
+static uint8 art_fresh_pre_push_grid_is_usable(uint8 require_box);
+static void art_recovery_reset(void);
 
 static float art_abs_float(float value)
 {
@@ -107,15 +148,22 @@ static uint8 art_requested_center_use_map_cell(const map_source_struct *source)
 #endif
 
 static void art_replan_center_timeout_error(executor_error_enum error,
-                                            const char *state,
-                                            art_replan_update_struct *update)
+                                             const char *state,
+                                             art_replan_update_struct *update)
 {
     stop_motion();
-    executor_set_error(error);
+    if(EXEC_STATE_ERROR != executor_get_state())
+    {
+        executor_set_error(error);
+    }
+    competition_flow_latch_fatal(
+        (EXEC_ERROR_SUBJECT2_YAW == error) ?
+        COMPETITION_FATAL_DRIVE : COMPETITION_FATAL_ART1);
     art_replan_cancel();
     if(0 != update)
     {
-        update->run_state = state;
+        (void)state;
+        update->run_state = competition_flow_fatal_text();
         update->redraw = 1u;
     }
 }
@@ -157,6 +205,7 @@ static void art_replan_retry_center_request(const char *state,
     art_requested_center_clear();
     executor_reset_art_player_center_samples();
     openart_request_player_center();
+    art_request_start_frame = openart_uart_get_frame_count();
     if(0 != update)
     {
         update->run_state = state;
@@ -192,6 +241,7 @@ static void art_replan_begin_center_request(art_replan_phase_enum phase,
     art_wait_start_ms = time_ms();
     art_requested_center_clear();
     openart_request_player_center();
+    art_request_start_frame = openart_uart_get_frame_count();
     if(0 != update)
     {
         update->run_state = state;
@@ -217,6 +267,7 @@ static void art_replan_begin(art_replan_phase_enum phase, art_replan_update_stru
             stop_motion();
             art_replan_phase = phase;
             art_wait_start_ms = time_ms();
+            art_request_start_frame = openart_uart_get_frame_count();
             art_box_observation_session_request(&art_box_session,
                                                 box_row, box_col);
             art_pre_push_box_request_active = 1u;
@@ -236,6 +287,12 @@ static void art_replan_begin(art_replan_phase_enum phase, art_replan_update_stru
     art_replan_phase = phase;
     art_replan_wait_fresh_frame();
     art_wait_start_ms = time_ms();
+    if(ART_REPLAN_SEGMENT == phase)
+    {
+        art_sync_start_ms = art_wait_start_ms;
+        art_segment_sync_retry_count = 0u;
+        art_segment_sync_map_seen = 0u;
+    }
     if(0 != update)
     {
         if(ART_REPLAN_INITIAL == phase)
@@ -369,12 +426,63 @@ static uint8 art_stats_paired_count_decreased(const map_scan_stats_struct *stats
     return (box_reduction == target_reduction) ? 1u : 0u;
 }
 
+static void art_replan_begin_host_sync(art_replan_update_struct *update)
+{
+    art_box_observation_session_reset(&art_box_session);
+    art_pre_push_box_request_active = 0u;
+    art_pre_push_box_preparation_started = 0u;
+    art_pre_push_box_retry_count = 0u;
+    art_pre_push_box_retry_moving = 0u;
+    art_pre_push_box_retry_settling = 0u;
+    art_pre_push_box_retry_settle_start_ms = 0u;
+    art_host_completion_waiting_boundary = 0u;
+    art_host_completion_start_ms = 0u;
+    art_external_change_pending = 1u;
+    art_replan_begin(ART_REPLAN_SEGMENT, update);
+    if(0 != update)
+    {
+        update->run_state = "Host Sync";
+        update->redraw = 1u;
+    }
+}
+
 static uint8 art_replan_handle_host_completion(art_replan_update_struct *update)
 {
     const map_source_struct *source;
     map_scan_stats_struct stats;
     uint32 frame = openart_uart_get_frame_count();
     executor_state_enum state = executor_get_state();
+
+    if(0u != art_host_completion_waiting_boundary)
+    {
+        if(0u != executor_stop_after_current_push_ready())
+        {
+            art_replan_begin_host_sync(update);
+        }
+        else if((time_ms() - art_host_completion_start_ms) >=
+                RECOVERY_RESYNC_TIMEOUT_MS)
+        {
+            if(0u == executor_force_current_push_stop())
+            {
+                executor_stop();
+                art_host_path_preserved = 0u;
+            }
+            art_replan_begin_host_sync(update);
+        }
+        else if(EXEC_STATE_RUNNING != state)
+        {
+            art_host_completion_waiting_boundary = 0u;
+            art_host_completion_start_ms = 0u;
+            art_host_path_preserved = 0u;
+            return 0u;
+        }
+        else if(0 != update)
+        {
+            update->run_state = "Host Pend";
+            update->redraw = 1u;
+        }
+        return 1u;
+    }
 
     if((0u == frame) || (frame == art_monitor_last_frame) ||
        ((EXEC_STATE_RUNNING != state) && (EXEC_STATE_PAUSED != state)))
@@ -395,21 +503,22 @@ static uint8 art_replan_handle_host_completion(art_replan_update_struct *update)
         return 0u;
     }
 
-    executor_stop();
-    art_box_observation_session_reset(&art_box_session);
-    art_pre_push_box_request_active = 0u;
-    art_pre_push_box_preparation_started = 0u;
-    art_pre_push_box_retry_count = 0u;
-    art_pre_push_box_retry_moving = 0u;
-    art_pre_push_box_retry_settling = 0u;
-    art_pre_push_box_retry_settle_start_ms = 0u;
-    art_external_change_pending = 1u;
-    art_replan_begin(ART_REPLAN_SEGMENT, update);
-    if(0 != update)
+    if(0u != executor_request_stop_after_current_push())
     {
-        update->run_state = "Host Sync";
-        update->redraw = 1u;
+        art_host_completion_waiting_boundary = 1u;
+        art_host_completion_start_ms = time_ms();
+        art_host_path_preserved = 1u;
+        if(0 != update)
+        {
+            update->run_state = "Host Pend";
+            update->redraw = 1u;
+        }
+        return 1u;
     }
+
+    executor_stop();
+    art_host_path_preserved = 0u;
+    art_replan_begin_host_sync(update);
     return 1u;
 }
 
@@ -477,25 +586,36 @@ static uint8 art_pre_push_center_succeeded(executor_art_center_result_enum resul
 
 static void art_replan_fail_pre_push_center(art_replan_update_struct *update)
 {
-    executor_set_error(EXEC_ERROR_ART_CENTER);
-    art_replan_cancel();
-    if(0 != update)
+    if(EXEC_STATE_ERROR == executor_get_state())
     {
-        update->run_state = "E:Ctr";
-        update->redraw = 1;
+        if(EXEC_ERROR_ART_CENTER == executor_get_error())
+        {
+            executor_stop();
+            art_begin_recovery(ART_REPLAN_SEGMENT, ART_RECOVERY_CENTER,
+                               EXEC_ERROR_ART_CENTER, update);
+        }
+        else
+        {
+            competition_flow_latch_fatal(
+                (EXEC_ERROR_MAP == executor_get_error()) ?
+                COMPETITION_FATAL_PLAN : COMPETITION_FATAL_DRIVE);
+            art_replan_cancel();
+            if(0 != update)
+            {
+                update->run_state = competition_flow_fatal_text();
+                update->redraw = 1u;
+            }
+        }
+        return;
     }
+    art_begin_recovery(ART_REPLAN_SEGMENT, ART_RECOVERY_CENTER,
+                       EXEC_ERROR_ART_CENTER, update);
 }
 
-static void art_replan_fail_pre_push_box(const char *state,
-                                         art_replan_update_struct *update)
+static void art_replan_fail_pre_push_box(art_replan_update_struct *update)
 {
-    executor_set_error(EXEC_ERROR_ART_CENTER);
-    art_replan_cancel();
-    if(0 != update)
-    {
-        update->run_state = state;
-        update->redraw = 1u;
-    }
+    art_begin_recovery(ART_REPLAN_SEGMENT, ART_RECOVERY_OBSERVE,
+                       EXEC_ERROR_ART_CENTER, update);
 }
 
 static void art_replan_tick_pre_push_box(art_replan_update_struct *update)
@@ -511,12 +631,7 @@ static void art_replan_tick_pre_push_box(art_replan_update_struct *update)
         }
         if(EXEC_STATE_ERROR == executor_get_state())
         {
-            art_replan_cancel();
-            if(0 != update)
-            {
-                update->run_state = "E:BTim";
-                update->redraw = 1u;
-            }
+            art_replan_fail_pre_push_center(update);
             return;
         }
         if(0u == art_pre_push_box_retry_settling)
@@ -557,12 +672,7 @@ static void art_replan_tick_pre_push_box(art_replan_update_struct *update)
         }
         if(EXEC_STATE_ERROR == executor_get_state())
         {
-            art_replan_cancel();
-            if(0 != update)
-            {
-                update->run_state = "E:BTim";
-                update->redraw = 1u;
-            }
+            art_replan_fail_pre_push_center(update);
             return;
         }
 
@@ -579,28 +689,20 @@ static void art_replan_tick_pre_push_box(art_replan_update_struct *update)
     {
         if((time_ms() - art_wait_start_ms) >= ART_BOX_OBSERVE_WAIT_MS)
         {
-            if(art_pre_push_box_retry_count < ART_BOX_OBSERVE_MAX_RETRIES)
+            if((0u != art_fresh_pre_push_grid_is_usable(1u)) &&
+               (0u != executor_continue_after_pre_push_center()))
             {
-                art_box_session.active = 0u;
-                art_box_session.ready = 0u;
-                executor_reset_art_box_observation_samples();
-                if(0 == executor_start_pre_push_box_retry_nudge(
-                             ART_BOX_OBSERVE_RETRY_MOVE_CM))
-                {
-                    art_replan_fail_pre_push_box("E:BTim", update);
-                    return;
-                }
-                art_pre_push_box_retry_count++;
-                art_pre_push_box_retry_moving = 1u;
+                art_box_observation_session_reset(&art_box_session);
+                art_replan_cancel();
                 if(0 != update)
                 {
-                    update->run_state = "BRetry";
+                    update->run_state = "GridPush";
                     update->redraw = 1u;
                 }
             }
             else
             {
-                art_replan_fail_pre_push_box("E:BObs", update);
+                art_replan_fail_pre_push_box(update);
             }
         }
         else if(0 != update)
@@ -611,6 +713,11 @@ static void art_replan_tick_pre_push_box(art_replan_update_struct *update)
     }
 
     prep_result = executor_start_pre_push_box_preparation();
+    if(EXEC_ART_BOX_PREP_GEOMETRY_ERROR == prep_result)
+    {
+        art_replan_fail_pre_push_box(update);
+        return;
+    }
     if(EXEC_ART_BOX_PREP_STARTED != prep_result)
     {
         if(0 == executor_continue_after_pre_push_center())
@@ -652,7 +759,8 @@ static void art_replan_tick_pre_push_center(const art_replan_context_struct *con
         if((time_ms() - art_wait_start_ms) >= EXEC_ART_SYNC_TIMEOUT_MS)
         {
 #if ART_CENTER_TIMEOUT_FALLBACK_ENABLE
-            if(0 == executor_continue_after_pre_push_center())
+            if((0u == art_fresh_pre_push_grid_is_usable(0u)) ||
+               (0 == executor_continue_after_pre_push_center()))
             {
                 art_replan_fail_pre_push_center(update);
                 return;
@@ -660,7 +768,7 @@ static void art_replan_tick_pre_push_center(const art_replan_context_struct *con
             art_replan_cancel();
             if(0 != update)
             {
-                update->run_state = executor_state_name();
+                update->run_state = "CtrSkip";
                 update->redraw = 1;
             }
 #else
@@ -739,6 +847,156 @@ static void art_replan_begin_launch_move(float move_cm, art_replan_update_struct
     }
 }
 
+static void art_recovery_reset(void)
+{
+    art_recovery_reason = ART_RECOVERY_NONE;
+    art_recovery_phase = ART_REPLAN_IDLE;
+    art_recovery_count = 0u;
+    art_recovery_box_row = 0xFFu;
+    art_recovery_box_col = 0xFFu;
+}
+
+static competition_fatal_reason_enum art_recovery_fatal_reason(
+    art_recovery_reason_enum reason)
+{
+    if(ART_RECOVERY_PLAN == reason) return COMPETITION_FATAL_PLAN;
+    if(ART_RECOVERY_RETURN == reason) return COMPETITION_FATAL_RETURN;
+    if(ART_RECOVERY_MAP == reason) return COMPETITION_FATAL_MAP;
+    return COMPETITION_FATAL_ART1;
+}
+
+static void art_begin_recovery(art_replan_phase_enum target_phase,
+                               art_recovery_reason_enum reason,
+                               executor_error_enum final_error,
+                               art_replan_update_struct *update)
+{
+    uint8 box_row = (ART_RECOVERY_OBSERVE == reason) ?
+                    art_box_session.box_row : 0xFFu;
+    uint8 box_col = (ART_RECOVERY_OBSERVE == reason) ?
+                    art_box_session.box_col : 0xFFu;
+
+    if((reason == art_recovery_reason) &&
+       (target_phase == art_recovery_phase) &&
+       (box_row == art_recovery_box_row) &&
+       (box_col == art_recovery_box_col))
+    {
+        art_recovery_count++;
+    }
+    else
+    {
+        art_recovery_reason = reason;
+        art_recovery_phase = target_phase;
+        art_recovery_count = 1u;
+        art_recovery_box_row = box_row;
+        art_recovery_box_col = box_col;
+    }
+
+    if((0u == drive_control_is_healthy()) ||
+       (art_recovery_count > RECOVERY_MAX_RETRIES))
+    {
+        competition_flow_latch_fatal(
+            (0u == drive_control_is_healthy()) ?
+            COMPETITION_FATAL_DRIVE : art_recovery_fatal_reason(reason));
+        if(EXEC_STATE_ERROR != executor_get_state())
+        {
+            executor_set_error(final_error);
+        }
+        art_replan_cancel();
+        if(0 != update)
+        {
+            update->run_state = competition_flow_fatal_text();
+            update->redraw = 1u;
+        }
+        return;
+    }
+
+    executor_stop();
+    if((ART_RECOVERY_RETURN == reason) &&
+       ((ART_REPLAN_RETURN_CENTER == target_phase) ||
+        (ART_REPLAN_RETURN_VERIFY == target_phase)))
+    {
+        art_replan_begin_return_center(target_phase, update);
+    }
+    else
+    {
+        art_replan_begin(target_phase, update);
+    }
+}
+
+static void art_replan_retry_segment_sync(art_replan_update_struct *update)
+{
+    art_segment_sync_retry_count = 1u;
+    art_replan_wait_fresh_frame();
+    art_wait_start_ms = time_ms();
+    art_sync_start_ms = art_wait_start_ms;
+    if(0 != update)
+    {
+        update->run_state = "ART Retry";
+        update->redraw = 1u;
+    }
+}
+
+static uint8 art_replan_continue_mcu_path(art_replan_update_struct *update)
+{
+    uint8 continued;
+
+    if(0u != art_external_change_pending)
+    {
+        continued = ((0u != art_host_path_preserved) &&
+                     (0u != executor_resume_after_current_push_stop())) ? 1u : 0u;
+    }
+    else
+    {
+        continued = executor_continue_after_art_sync();
+    }
+    if(0u == continued)
+    {
+        return 0u;
+    }
+
+    art_replan_cancel();
+    if(0 != update)
+    {
+        update->run_state = "MCU Go";
+        update->redraw = 1u;
+    }
+    return 1u;
+}
+
+static uint8 art_fresh_pre_push_grid_is_usable(uint8 require_box)
+{
+    const map_source_struct *source = openart_map_get();
+    map_scan_stats_struct stats;
+    uint8 wait_row;
+    uint8 wait_col;
+    char box_value;
+
+    if((openart_uart_get_frame_count() <= art_request_start_frame) ||
+       (0 == source) || (0u == drive_control_is_healthy()) ||
+       (EXEC_STATE_ERROR == executor_get_state()))
+    {
+        return 0u;
+    }
+    map_scan_stats(source, &stats);
+    if((1u != stats.car_count) || (stats.box_count != stats.target_count) ||
+       (0u == executor_get_pre_push_wait_cell(&wait_row, &wait_col)) ||
+       (stats.car_row != wait_row) || (stats.car_col != wait_col))
+    {
+        return 0u;
+    }
+    if(0u == require_box)
+    {
+        return 1u;
+    }
+    if((art_box_session.box_row >= MAP_ROWS) ||
+       (art_box_session.box_col >= MAP_COLS))
+    {
+        return 0u;
+    }
+    box_value = source->rows[art_box_session.box_row][art_box_session.box_col];
+    return (('B' == box_value) || (MAP_BOX_ON_TARGET == box_value)) ? 1u : 0u;
+}
+
 static uint8 art_launch_center_is_in_window(uint16 col_q, uint16 row_q)
 {
     uint8 col = (uint8)(col_q / 100u);
@@ -751,9 +1009,13 @@ static uint8 art_launch_center_is_in_window(uint16 col_q, uint16 row_q)
 
 static void art_launch_mark_yaw_done(void)
 {
-    if(0u != art_launch_subject2)
+    if(3u == competition_flow_get_subject())
     {
-        art_launch_subject2_yaw_done = 1u;
+        art_launch_subject3_yaw_done = 1u;
+    }
+    else if(0u != art_launch_classification)
+    {
+        art_launch_classification_yaw_done = 1u;
     }
     else
     {
@@ -763,8 +1025,12 @@ static void art_launch_mark_yaw_done(void)
 
 static uint8 art_launch_yaw_already_done(void)
 {
-    return (0u != art_launch_subject2) ?
-           art_launch_subject2_yaw_done : art_launch_subject1_yaw_done;
+    if(3u == competition_flow_get_subject())
+    {
+        return art_launch_subject3_yaw_done;
+    }
+    return (0u != art_launch_classification) ?
+           art_launch_classification_yaw_done : art_launch_subject1_yaw_done;
 }
 
 static void art_replan_continue_after_launch_yaw(art_replan_update_struct *update)
@@ -840,7 +1106,7 @@ static void art_replan_process_launch_yaw(art_replan_update_struct *update)
         return;
     }
 
-    if((0u == art_launch_subject2) ||
+    if((0u == art_launch_classification) ||
        (art_u16_difference(art_home_center_col_q,
                            art_launch_yaw_reference_col_q) >
         ART_RETURN_HOME_TOLERANCE_Q) ||
@@ -971,8 +1237,15 @@ static void art_replan_tick_launch_yaw_fix(art_replan_update_struct *update)
     if((time_ms() - art_launch_yaw_phase_start_ms) >=
        SUBJECT2_TURN_TIMEOUT_MS)
     {
-        art_replan_center_timeout_error(EXEC_ERROR_SUBJECT2_YAW,
-                                        "E:Yaw", update);
+        if(0u != drive_control_is_healthy())
+        {
+            art_replan_finish_launch_yaw(update);
+        }
+        else
+        {
+            art_replan_center_timeout_error(EXEC_ERROR_SUBJECT2_YAW,
+                                            "E:Yaw", update);
+        }
         return;
     }
 
@@ -1040,11 +1313,15 @@ static void art_replan_return_error(executor_error_enum error,
                                     art_replan_update_struct *update)
 {
     stop_motion();
+    if(EXEC_STATE_ERROR != executor_get_state())
+    {
+        executor_set_error(error);
+    }
+    competition_flow_latch_fatal(COMPETITION_FATAL_RETURN);
     art_replan_cancel();
-    executor_set_error(error);
     if(0 != update)
     {
-        update->run_state = "RetErr";
+        update->run_state = competition_flow_fatal_text();
         update->redraw = 1;
     }
 }
@@ -1168,18 +1445,32 @@ static void art_replan_tick_return_center(art_replan_update_struct *update)
         return;
     }
 
-    if((time_ms() - art_wait_start_ms) >= EXEC_ART_SYNC_TIMEOUT_MS)
+    if((time_ms() - art_wait_start_ms) >= RECOVERY_RESYNC_TIMEOUT_MS)
     {
         if(ART_REPLAN_RETURN_VERIFY == phase)
         {
-            art_replan_return_error(EXEC_ERROR_ART_SYNC, update);
+            if(0u != art_return_error_mode)
+            {
+                art_replan_finish_return(update);
+                return;
+            }
+            art_begin_recovery(phase, ART_RECOVERY_RETURN,
+                               EXEC_ERROR_ART_SYNC, update);
             return;
         }
 #if ART_CENTER_TIMEOUT_FALLBACK_ENABLE
-        if(0 == art_requested_center_use_map_cell(openart_map_get()))
+        if(0u != art_return_error_mode)
+        {
+            art_requested_center_col_q =
+                (uint16)(ART_RETURN_GATE_COL * 100u + 50u);
+            art_requested_center_row_q =
+                (uint16)(art_return_gate_row * 100u + 50u);
+            art_requested_center_valid = 1u;
+        }
+        else if(0 == art_requested_center_use_map_cell(openart_map_get()))
         {
             art_requested_center_col_q = (uint16)(ART_RETURN_GATE_COL * 100u + 50u);
-            art_requested_center_row_q = (uint16)(ART_RETURN_GATE_ROW_MIN * 100u + 50u);
+            art_requested_center_row_q = (uint16)(art_return_gate_row * 100u + 50u);
             art_requested_center_valid = 1u;
         }
         art_replan_start_return_correction(art_requested_center_col_q,
@@ -1222,7 +1513,8 @@ static void art_replan_tick_return_axis(art_replan_update_struct *update)
     }
 }
 
-static uint8 art_replan_solve_return_gate(const art_replan_context_struct *context)
+static uint8 art_replan_solve_return_gate(const map_source_struct *source,
+                                          solve_result_struct *result)
 {
     uint8 preferred_row = (uint8)(art_home_center_row_q / 100u);
     uint8 alternate_row;
@@ -1236,34 +1528,39 @@ static uint8 art_replan_solve_return_gate(const art_replan_context_struct *conte
         preferred_row = ART_RETURN_GATE_ROW_MAX;
     }
 
-    if(0 != solve_navigation_path(context->snapshot,
+    if(0 != solve_navigation_path(source,
                                   preferred_row,
                                   ART_RETURN_GATE_COL,
-                                  context->result))
+                                  result))
     {
+        art_return_gate_row = preferred_row;
         return 1;
     }
 
     alternate_row = (ART_RETURN_GATE_ROW_MIN == preferred_row) ?
                     ART_RETURN_GATE_ROW_MAX : ART_RETURN_GATE_ROW_MIN;
     if((alternate_row != preferred_row) &&
-       (0 != solve_navigation_path(context->snapshot,
+       (0 != solve_navigation_path(source,
                                    alternate_row,
                                    ART_RETURN_GATE_COL,
-                                   context->result)))
+                                   result)))
     {
+        art_return_gate_row = alternate_row;
         return 1;
     }
     return 0;
 }
 
 static void art_replan_start_return(const art_replan_context_struct *context,
-                                     const map_scan_stats_struct *stats,
+                                     const map_source_struct *source,
+                                     uint8 start_row,
+                                     uint8 start_col,
                                      float initial_pose_x_cm,
                                      float initial_pose_y_cm,
                                      art_replan_update_struct *update)
 {
-    uint8 single_step = (RUN_MODE_STEP == context->run_mode) ? 1u : 0u;
+    uint8 single_step = ((0u == art_return_error_mode) &&
+                         (RUN_MODE_STEP == context->run_mode)) ? 1u : 0u;
     uint32 start_ms;
 
     if(0 == art_home_center_valid)
@@ -1274,15 +1571,15 @@ static void art_replan_start_return(const art_replan_context_struct *context,
 
     executor_stop();
     start_ms = time_ms();
-    if(0 == art_replan_solve_return_gate(context))
+    if(0 == art_replan_solve_return_gate(source, context->result))
     {
         *context->elapsed_ms = time_ms() - start_ms;
         art_replan_return_error(EXEC_ERROR_ART_PLAN, update);
         return;
     }
     *context->elapsed_ms = time_ms() - start_ms;
-    *context->start_row = stats->car_row;
-    *context->start_col = stats->car_col;
+    *context->start_row = start_row;
+    *context->start_col = start_col;
     art_return_correction_count = 0;
     if(0 != update)
     {
@@ -1302,6 +1599,16 @@ static void art_replan_start_return(const art_replan_context_struct *context,
                    *context->start_row, *context->start_col,
                    initial_pose_x_cm, initial_pose_y_cm,
                    single_step, 0u);
+    if(EXEC_STATE_ERROR == executor_get_state())
+    {
+        art_replan_return_error(executor_get_error(), update);
+        return;
+    }
+    art_return_grid_start_ms = time_ms();
+    art_return_grid_timeout_ms = EXEC_ART_SYNC_TIMEOUT_MS *
+                                 ((uint32)context->result->waypoint_count + 1u);
+    art_return_unhealthy_start_ms = 0u;
+    art_return_unhealthy_started = 0u;
     art_replan_phase = ART_REPLAN_RETURN_GRID;
     if(0 != update)
     {
@@ -1437,7 +1744,7 @@ static void art_replan_solve_snapshot_after_center(
     }
     art_replan_save_snapshot(context, paired_source);
 
-    if((ART_REPLAN_INITIAL == map_phase) && (0u != art_launch_subject2))
+    if((ART_REPLAN_INITIAL == map_phase) && (0u != art_launch_classification))
     {
         *context->start_row = stats.car_row;
         *context->start_col = stats.car_col;
@@ -1446,7 +1753,7 @@ static void art_replan_solve_snapshot_after_center(
         art_replan_cancel();
         if(0 != update)
         {
-            update->subject2_map_ready = 1u;
+            update->classification_map_ready = 1u;
             update->initial_pose_x_cm = initial_pose_x_cm;
             update->initial_pose_y_cm = initial_pose_y_cm;
             update->run_state = "BScan";
@@ -1460,8 +1767,11 @@ static void art_replan_solve_snapshot_after_center(
     {
         if(0 != ART_RETURN_HOME_ENABLE)
         {
+            art_return_error_mode = 0u;
             art_replan_start_return(context,
-                                    &stats,
+                                    context->snapshot,
+                                    stats.car_row,
+                                    stats.car_col,
                                     initial_pose_x_cm,
                                     initial_pose_y_cm,
                                     update);
@@ -1535,7 +1845,8 @@ static void art_replan_solve_snapshot_after_center(
     else
     {
         *context->elapsed_ms = time_ms() - start_ms;
-        art_replan_begin(map_phase, update);
+        art_begin_recovery(map_phase, ART_RECOVERY_PLAN,
+                           EXEC_ERROR_ART_PLAN, update);
         if(0 != update)
         {
             update->run_state = "ART Retry";
@@ -1549,7 +1860,8 @@ void art_replan_cancel(void)
     art_replan_phase = ART_REPLAN_IDLE;
     map_stability_tracker_reset(&art_map_tracker, 0u);
     art_wait_start_ms = 0;
-    art_launch_subject2 = 0u;
+    art_sync_start_ms = 0u;
+    art_launch_classification = 0u;
     art_launch_delay_start_ms = 0;
     art_launch_move_start_ms = 0;
     art_launch_pending_move_cm = 0.0f;
@@ -1559,8 +1871,19 @@ void art_replan_cancel(void)
     art_return_pending_x_cm = 0.0f;
     art_return_correction_count = 0;
     art_return_phase_start_ms = 0;
+    art_return_grid_start_ms = 0u;
+    art_return_grid_timeout_ms = 0u;
+    art_return_unhealthy_start_ms = 0u;
+    art_return_unhealthy_started = 0u;
+    art_return_error_mode = 0u;
+    art_return_gate_row = ART_RETURN_GATE_ROW_MIN;
     art_monitor_last_frame = 0;
     art_external_change_pending = 0;
+    art_host_completion_waiting_boundary = 0u;
+    art_host_completion_start_ms = 0u;
+    art_host_path_preserved = 0u;
+    art_segment_sync_retry_count = 0u;
+    art_segment_sync_map_seen = 0u;
     art_requested_center_clear();
     art_pre_push_box_request_active = 0u;
     art_pre_push_box_preparation_started = 0u;
@@ -1569,6 +1892,42 @@ void art_replan_cancel(void)
     art_pre_push_box_retry_moving = 0u;
     art_pre_push_box_retry_settling = 0u;
     art_pre_push_box_retry_settle_start_ms = 0u;
+    art_request_start_frame = 0u;
+    art_recovery_reset();
+}
+
+uint8 art_replan_manual_recover(art_replan_update_struct *update)
+{
+    art_replan_phase_enum phase;
+
+    art_replan_update_reset(update);
+    if(0u == competition_flow_is_active())
+    {
+        return 0u;
+    }
+    executor_stop();
+    art_recovery_reset();
+    art_launch_classification =
+        (competition_flow_get_subject() >= 2u) ? 1u : 0u;
+    phase = ((0u != confirmed_counts_valid) &&
+             (0u == art_launch_classification)) ?
+            ART_REPLAN_SEGMENT : ART_REPLAN_INITIAL;
+    art_replan_begin(phase, update);
+    return 1u;
+}
+
+uint8 art_replan_is_active(void)
+{
+    return (ART_REPLAN_IDLE != art_replan_phase) ? 1u : 0u;
+}
+
+uint8 art_replan_is_returning(void)
+{
+    return ((ART_REPLAN_RETURN_GRID == art_replan_phase) ||
+            (ART_REPLAN_RETURN_CENTER == art_replan_phase) ||
+            (ART_REPLAN_RETURN_ALIGN_Y == art_replan_phase) ||
+            (ART_REPLAN_RETURN_MOVE_X == art_replan_phase) ||
+            (ART_REPLAN_RETURN_VERIFY == art_replan_phase)) ? 1u : 0u;
 }
 
 void art_replan_reset_competition_yaw(void)
@@ -1578,7 +1937,8 @@ void art_replan_reset_competition_yaw(void)
     art_launch_yaw_reference_col_q = 0u;
     art_launch_yaw_reference_row_q = 0u;
     art_launch_subject1_yaw_done = 0u;
-    art_launch_subject2_yaw_done = 0u;
+    art_launch_classification_yaw_done = 0u;
+    art_launch_subject3_yaw_done = 0u;
     art_launch_yaw_first_deg = 0.0f;
     art_launch_yaw_phase_start_ms = 0u;
     art_launch_yaw_stable_start_ms = 0u;
@@ -1606,13 +1966,18 @@ void art_replan_begin_initial(art_replan_update_struct *update)
 {
     art_replan_update_reset(update);
     art_replan_phase = ART_REPLAN_WAIT_LAUNCH;
-    art_launch_subject2 = 0u;
+    art_launch_classification = 0u;
     art_launch_delay_start_ms = time_ms();
     confirmed_box_count = 0;
     confirmed_target_count = 0;
     confirmed_counts_valid = 0;
     art_monitor_last_frame = 0;
     art_external_change_pending = 0;
+    art_host_completion_waiting_boundary = 0u;
+    art_host_completion_start_ms = 0u;
+    art_host_path_preserved = 0u;
+    art_segment_sync_retry_count = 0u;
+    art_segment_sync_map_seen = 0u;
     art_home_center_col_q = 0;
     art_home_center_row_q = 0;
     art_home_center_valid = 0;
@@ -1626,10 +1991,10 @@ void art_replan_begin_initial(art_replan_update_struct *update)
     }
 }
 
-void art_replan_begin_subject2(art_replan_update_struct *update)
+void art_replan_begin_classification(art_replan_update_struct *update)
 {
     art_replan_begin_initial(update);
-    art_launch_subject2 = 1u;
+    art_launch_classification = 1u;
 }
 
 uint8 art_replan_begin_return_home(const art_replan_context_struct *context,
@@ -1651,9 +2016,143 @@ uint8 art_replan_begin_return_home(const art_replan_context_struct *context,
     {
         return 0u;
     }
-    art_replan_start_return(context, &stats,
+    art_return_error_mode = 0u;
+    art_replan_start_return(context, context->snapshot,
+                            stats.car_row, stats.car_col,
                             initial_pose_x_cm, initial_pose_y_cm, update);
     return (ART_REPLAN_IDLE != art_replan_phase) ? 1u : 0u;
+}
+
+static uint8 art_replan_error_return_char_valid(char value)
+{
+    return (('#' == value) || ('.' == value) || ('B' == value) ||
+            ('T' == value) || ('C' == value) || ('+' == value) ||
+            ('X' == value) || (MAP_BOX_ON_TARGET == value)) ? 1u : 0u;
+}
+
+static uint8 art_replan_build_error_return_map(
+    const art_replan_context_struct *context,
+    uint8 *current_row,
+    uint8 *current_col,
+    uint8 current_pose_valid)
+{
+    map_scan_stats_struct stats;
+    uint8 row;
+    uint8 col;
+    char current_value;
+
+    if((0 == context) || (0 == context->snapshot) ||
+       (0 == context->snapshot_valid) || (0u == *context->snapshot_valid) ||
+       (0 == context->error_return_snapshot) ||
+       (0 == context->error_return_snapshot_rows) ||
+       (0 == context->error_return_snapshot_valid) ||
+       (0 == current_row) || (0 == current_col))
+    {
+        return 0u;
+    }
+    *context->error_return_snapshot_valid = 0u;
+    for(row = 0u; row < MAP_ROWS; row++)
+    {
+        if((0 == context->snapshot->rows[row]) ||
+           (MAP_COLS != strlen(context->snapshot->rows[row])))
+        {
+            return 0u;
+        }
+        for(col = 0u; col < MAP_COLS; col++)
+        {
+            if(0u == art_replan_error_return_char_valid(
+                          context->snapshot->rows[row][col]))
+            {
+                return 0u;
+            }
+        }
+    }
+    map_scan_stats(context->snapshot, &stats);
+    if(1u != stats.car_count)
+    {
+        return 0u;
+    }
+    if(0u == current_pose_valid)
+    {
+        *current_row = stats.car_row;
+        *current_col = stats.car_col;
+    }
+    if((*current_row >= MAP_ROWS) || (*current_col >= MAP_COLS))
+    {
+        return 0u;
+    }
+    current_value = context->snapshot->rows[*current_row][*current_col];
+    if(('#' == current_value) || ('X' == current_value) ||
+       ('B' == current_value) || (MAP_BOX_ON_TARGET == current_value))
+    {
+        return 0u;
+    }
+
+    map_source_snapshot(context->error_return_snapshot,
+                        context->error_return_snapshot_rows,
+                        context->snapshot);
+    context->error_return_snapshot->name = "ErrRet";
+    for(row = 0u; row < MAP_ROWS; row++)
+    {
+        for(col = 0u; col < MAP_COLS; col++)
+        {
+            if('C' == context->error_return_snapshot_rows[row][col])
+            {
+                context->error_return_snapshot_rows[row][col] = '.';
+            }
+            else if('+' == context->error_return_snapshot_rows[row][col])
+            {
+                context->error_return_snapshot_rows[row][col] = 'T';
+            }
+        }
+    }
+    context->error_return_snapshot_rows[*current_row][*current_col] =
+        (('T' == current_value) || ('+' == current_value)) ? '+' : 'C';
+    map_scan_stats(context->error_return_snapshot, &stats);
+    if(1u != stats.car_count)
+    {
+        return 0u;
+    }
+    *context->error_return_snapshot_valid = 1u;
+    return 1u;
+}
+
+uint8 art_replan_begin_error_return(const art_replan_context_struct *context,
+                                    uint8 current_row,
+                                    uint8 current_col,
+                                    float initial_pose_x_cm,
+                                    float initial_pose_y_cm,
+                                    uint8 current_pose_valid,
+                                    art_replan_update_struct *update)
+{
+    art_replan_update_reset(update);
+    art_replan_cancel();
+    if((0 == context) || (0 == context->result) ||
+       (0 == context->elapsed_ms) || (0 == context->start_row) ||
+       (0 == context->start_col) || (0u == art_home_center_valid) ||
+       (0u == art_replan_build_error_return_map(context,
+                                                 &current_row,
+                                                 &current_col,
+                                                 current_pose_valid)))
+    {
+        return 0u;
+    }
+    if(0u == current_pose_valid)
+    {
+        initial_pose_x_cm = 0.0f;
+        initial_pose_y_cm = 0.0f;
+    }
+    art_return_error_mode = 1u;
+    if(0 != update)
+    {
+        update->run_state = "ErrRet";
+        update->redraw = 1u;
+    }
+    art_replan_start_return(context, context->error_return_snapshot,
+                            current_row, current_col,
+                            initial_pose_x_cm, initial_pose_y_cm, update);
+    return ((ART_REPLAN_IDLE != art_replan_phase) &&
+            (0u != art_return_error_mode)) ? 1u : 0u;
 }
 
 void art_replan_tick(const art_replan_context_struct *context,
@@ -1709,16 +2208,25 @@ void art_replan_tick(const art_replan_context_struct *context,
        (ART_REPLAN_SEGMENT_CENTER == art_replan_phase))
     {
         art_replan_phase_enum center_phase = art_replan_phase;
+        uint32 center_wait_start_ms =
+            (ART_REPLAN_SEGMENT_CENTER == center_phase) ?
+            art_sync_start_ms : art_wait_start_ms;
+        uint32 center_timeout_ms =
+            (ART_REPLAN_SEGMENT_CENTER == center_phase) ?
+            RECOVERY_RESYNC_TIMEOUT_MS : EXEC_ART_SYNC_TIMEOUT_MS;
 
         if(0 == art_replan_collect_requested_center())
         {
-            if((time_ms() - art_wait_start_ms) >= EXEC_ART_SYNC_TIMEOUT_MS)
+            if((time_ms() - center_wait_start_ms) >= center_timeout_ms)
             {
 #if ART_CENTER_TIMEOUT_FALLBACK_ENABLE
                 if(0 == art_requested_center_use_map_cell(context->snapshot))
                 {
-                    art_replan_center_timeout_error(EXEC_ERROR_ART_CENTER,
-                                                    "E:Ctr", update);
+                    art_begin_recovery(
+                        (ART_REPLAN_INITIAL_CENTER == center_phase) ?
+                        ART_REPLAN_INITIAL : ART_REPLAN_SEGMENT,
+                        ART_RECOVERY_CENTER,
+                        EXEC_ERROR_ART_CENTER, update);
                     return;
                 }
                 art_replan_solve_snapshot_after_center(context, center_phase, update);
@@ -1780,18 +2288,39 @@ void art_replan_tick(const art_replan_context_struct *context,
 
     if(ART_REPLAN_RETURN_GRID == art_replan_phase)
     {
+        if((0u != art_return_grid_timeout_ms) &&
+           ((time_ms() - art_return_grid_start_ms) >= art_return_grid_timeout_ms))
+        {
+            art_replan_return_error(EXEC_ERROR_ART_TIMEOUT, update);
+            return;
+        }
+        if((0u != art_return_error_mode) &&
+           (0u == drive_control_is_healthy()))
+        {
+            if(0u == art_return_unhealthy_started)
+            {
+                art_return_unhealthy_started = 1u;
+                art_return_unhealthy_start_ms = time_ms();
+            }
+            else if((time_ms() - art_return_unhealthy_start_ms) >=
+                    EXEC_ART_SYNC_TIMEOUT_MS)
+            {
+                art_replan_return_error(EXEC_ERROR_ART_TIMEOUT, update);
+                return;
+            }
+        }
+        else
+        {
+            art_return_unhealthy_started = 0u;
+            art_return_unhealthy_start_ms = 0u;
+        }
         if(EXEC_STATE_DONE == executor_get_state())
         {
             art_replan_begin_return_center(ART_REPLAN_RETURN_CENTER, update);
         }
         else if(EXEC_STATE_ERROR == executor_get_state())
         {
-            art_replan_cancel();
-            if(0 != update)
-            {
-                update->run_state = "RetErr";
-                update->redraw = 1;
-            }
+            art_replan_return_error(executor_get_error(), update);
         }
         else if(0 != update)
         {
@@ -1814,21 +2343,33 @@ void art_replan_tick(const art_replan_context_struct *context,
         return;
     }
 
-    if((time_ms() - art_wait_start_ms) >= EXEC_ART_SYNC_TIMEOUT_MS)
+    if((time_ms() - art_wait_start_ms) >= RECOVERY_RESYNC_TIMEOUT_MS)
     {
-        // ART 超时不停车，重启等待继续获取最新地图。
-        art_replan_begin(art_replan_phase, update);
-        if(0 != update)
+        if((ART_REPLAN_SEGMENT == art_replan_phase) &&
+           (0u == art_segment_sync_map_seen))
         {
-            update->run_state = (ART_REPLAN_INITIAL == art_replan_phase) ? "WMAP" : "ART Retry";
-            update->redraw = 1;
+            if(0u == art_segment_sync_retry_count)
+            {
+                art_replan_retry_segment_sync(update);
+                return;
+            }
+            if(0u != art_replan_continue_mcu_path(update))
+            {
+                return;
+            }
         }
+        art_begin_recovery(art_replan_phase, ART_RECOVERY_MAP,
+                           EXEC_ERROR_ART_SYNC, update);
         return;
     }
 
     stable_source = 0;
     if(0 != art_get_stable_map(&stable_source))
     {
+        if(ART_REPLAN_SEGMENT == art_replan_phase)
+        {
+            art_segment_sync_map_seen = 1u;
+        }
         art_handle_stable_map(context, stable_source, update);
     }
 }

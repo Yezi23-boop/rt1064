@@ -515,6 +515,16 @@
               <FilePath>..\user\src\subject2.c</FilePath>
             </File>
             <File>
+              <FileName>subject3_logic.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>..\user\src\subject3_logic.c</FilePath>
+            </File>
+            <File>
+              <FileName>subject3.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>..\user\src\subject3.c</FilePath>
+            </File>
+            <File>
               <FileName>competition_flow.c</FileName>
               <FileType>1</FileType>
               <FilePath>..\user\src\competition_flow.c</FilePath>

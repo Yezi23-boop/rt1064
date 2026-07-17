@@ -7,6 +7,7 @@
 #include "motion_math.h"
 #include "openart_uart.h"
 #include "solver.h"
+#include "competition_flow.h"
 #include <math.h>
 #include <stdio.h>
 #include <string.h>
@@ -54,6 +55,11 @@ static uint8 last_commit_col;
 static char fake_sync_action;
 static executor_state_enum fake_executor_state;
 static executor_error_enum fake_executor_error;
+static uint8 fake_push_boundary_ready;
+static uint16 push_boundary_request_count;
+static uint16 push_boundary_force_count;
+static uint16 push_boundary_resume_count;
+static uint16 continue_art_sync_count;
 static drive_pose_struct fake_pose;
 static control_status_struct fake_control_status;
 static uint16 yaw_correction_start_count;
@@ -71,6 +77,13 @@ static uint8 snapshot_valid;
 static uint32 elapsed_ms;
 static uint8 start_row;
 static uint8 start_col;
+static char error_return_rows[MAP_ROWS][MAP_COLS + 1];
+static map_source_struct error_return_source;
+static uint8 error_return_source_valid;
+
+static void feed_center(uint16 col0, uint16 row0,
+                        uint16 col1, uint16 row1,
+                        uint16 col2, uint16 row2);
 
 uint32 time_ms(void) { return fake_time_ms; }
 const drive_pose_struct *drive_pose_get(void) { return &fake_pose; }
@@ -84,6 +97,11 @@ void stop_motion(void) { }
 void reset_motion_segment(void) { }
 void set_motion(float vx, float vy) { (void)vx; (void)vy; }
 const control_status_struct *get_control_status(void) { return &fake_control_status; }
+uint8 drive_control_is_healthy(void) { return 1u; }
+drive_health_fault_enum drive_control_get_health_fault(void)
+{
+    return DRIVE_HEALTH_NONE;
+}
 void drive_control_start_relative_yaw_correction(float delta_deg)
 {
     yaw_correction_start_count++;
@@ -176,7 +194,40 @@ void executor_start(const waypoint_struct *waypoints, uint16 count,
     executor_initial_y_cm = y;
     fake_executor_state = EXEC_STATE_RUNNING;
 }
-void executor_stop(void) { fake_executor_state = EXEC_STATE_IDLE; }
+void executor_stop(void)
+{
+    fake_executor_state = EXEC_STATE_IDLE;
+    fake_pre_push_pending = 0u;
+    fake_sync_pending = 0u;
+    fake_push_boundary_ready = 0u;
+}
+uint8 executor_request_stop_after_current_push(void)
+{
+    if((EXEC_STATE_RUNNING != fake_executor_state) ||
+       (0u != fake_pre_push_pending) || (0u != fake_sync_pending))
+    {
+        return 0u;
+    }
+    push_boundary_request_count++;
+    return 1u;
+}
+uint8 executor_stop_after_current_push_ready(void)
+{
+    return fake_push_boundary_ready;
+}
+uint8 executor_force_current_push_stop(void)
+{
+    push_boundary_force_count++;
+    fake_push_boundary_ready = 1u;
+    return 1u;
+}
+uint8 executor_resume_after_current_push_stop(void)
+{
+    if(0u == fake_push_boundary_ready) return 0u;
+    fake_push_boundary_ready = 0u;
+    push_boundary_resume_count++;
+    return 1u;
+}
 uint8 executor_start_position_correction(float target_x_cm, float target_y_cm)
 {
     if((EXEC_STATE_RUNNING == fake_executor_state) ||
@@ -205,6 +256,10 @@ void executor_set_error(executor_error_enum error)
 executor_state_enum executor_get_state(void) { return fake_executor_state; }
 executor_error_enum executor_get_error(void) { return fake_executor_error; }
 uint8 executor_art_pre_push_pending(void) { return fake_pre_push_pending; }
+uint8 executor_get_pre_push_wait_cell(uint8 *row, uint8 *col)
+{
+    return map_find_car(&live_source, row, col, 0);
+}
 uint8 executor_get_pre_push_box_request(uint8 *box_row, uint8 *box_col)
 {
     if((0u == fake_pre_push_pending) || (0u == fake_pre_push_box_request)) return 0u;
@@ -263,7 +318,12 @@ uint8 executor_center_requires_push_alignment(void)
 }
 uint8 executor_art_sync_pending(void) { return fake_sync_pending; }
 char executor_get_art_sync_action(void) { return fake_sync_action; }
-uint8 executor_continue_after_art_sync(void) { fake_sync_pending = 0; return 1; }
+uint8 executor_continue_after_art_sync(void)
+{
+    fake_sync_pending = 0;
+    continue_art_sync_count++;
+    return 1;
+}
 uint16 executor_get_current_step(void) { return 0; }
 const char *executor_state_name(void) { return "Running"; }
 uint8 executor_apply_art_player_center(uint16 col, uint16 row, uint32 sample)
@@ -340,6 +400,68 @@ static void feed_center(uint16 col0, uint16 row0,
     paired_center_valid = 1u;
 }
 
+static void init_error_return_context(art_replan_context_struct *context)
+{
+    memset(&result, 0, sizeof(result));
+    memset(&snapshot, 0, sizeof(snapshot));
+    memset(&error_return_source, 0, sizeof(error_return_source));
+    memset(error_return_rows, 0, sizeof(error_return_rows));
+    build_map();
+    map_source_snapshot(&snapshot, snapshot_rows, &live_source);
+    snapshot_valid = 1u;
+    error_return_source_valid = 0u;
+    context->result = &result;
+    context->snapshot = &snapshot;
+    context->snapshot_rows = snapshot_rows;
+    context->snapshot_valid = &snapshot_valid;
+    context->elapsed_ms = &elapsed_ms;
+    context->start_row = &start_row;
+    context->start_col = &start_col;
+    context->error_return_snapshot = &error_return_source;
+    context->error_return_snapshot_rows = error_return_rows;
+    context->error_return_snapshot_valid = &error_return_source_valid;
+    context->run_mode = RUN_MODE_RUN;
+    art_replan_begin_initial(&(art_replan_update_struct){0});
+    fake_time_ms = 5000u;
+    art_replan_tick(context, 1u, &(art_replan_update_struct){0});
+    feed_center(250u, 550u, 250u, 550u, 250u, 550u);
+    art_replan_tick(context, 1u, &(art_replan_update_struct){0});
+}
+
+static uint8 error_return_preserves_obstacles(void)
+{
+    art_replan_context_struct context;
+    art_replan_update_struct update;
+
+    init_error_return_context(&context);
+    live_rows[5][5] = MAP_BOX_ON_TARGET;
+    map_source_snapshot(&snapshot, snapshot_rows, &live_source);
+    snapshot_valid = 1u;
+    if(0u == art_replan_begin_error_return(&context, 5u, 3u,
+                                           1.0f, -1.0f, 1u, &update))
+    {
+        return 0u;
+    }
+    return ((MAP_BOX_ON_TARGET == error_return_rows[5][5]) &&
+            ('C' == error_return_rows[5][3]) &&
+            ('.' == error_return_rows[5][2]) &&
+            (0 == strcmp(update.run_state, "RetGrid"))) ? 1u : 0u;
+}
+
+static uint8 error_return_rejects_box_start(void)
+{
+    art_replan_context_struct context;
+    art_replan_update_struct update;
+
+    init_error_return_context(&context);
+    if(0u != art_replan_begin_error_return(&context, 5u, 5u,
+                                           0.0f, 0.0f, 1u, &update))
+    {
+        return 0u;
+    }
+    return (0u == error_return_source_valid) ? 1u : 0u;
+}
+
 static void feed_center_yaw(uint16 col_q, uint16 row_q, float yaw_deg)
 {
     uint8 index;
@@ -403,6 +525,8 @@ static void feed_observation(uint16 car_col_q, uint16 car_row_q,
 static void init_pre_push_box_test(art_replan_context_struct *context)
 {
     art_replan_cancel();
+    competition_flow_start(COMPETITION_MODE_SUBJECT1_DEBUG);
+    (void)competition_flow_take_action();
     memset(&result, 0, sizeof(result));
     memset(&snapshot, 0, sizeof(snapshot));
     build_map();
@@ -493,21 +617,14 @@ static uint8 pre_push_box_failures_follow_policy(void)
 
     init_pre_push_box_test(&context);
     errors_before = executor_error_count;
+    continues_before = continue_pre_push_count;
     art_replan_tick(&context, 1u, &update);
+    fake_frame_count++;
     fake_time_ms += ART_BOX_OBSERVE_WAIT_MS;
     art_replan_tick(&context, 1u, &update);
     if((errors_before != executor_error_count) ||
-       (0u == start_pre_push_box_retry_count) ||
-       (0 != strcmp(update.run_state, "BRetry"))) return 0u;
-    fake_pre_push_box_active = 0u;
-    art_replan_tick(&context, 1u, &update);
-    fake_time_ms += ART_BOX_OBSERVE_RETRY_SETTLE_MS;
-    art_replan_tick(&context, 1u, &update);
-    if(0 != strcmp(update.run_state, "BCtr")) return 0u;
-    fake_time_ms += ART_BOX_OBSERVE_WAIT_MS;
-    art_replan_tick(&context, 1u, &update);
-    if((errors_before + 1u != executor_error_count) ||
-       (0 != strcmp(update.run_state, "E:BObs"))) return 0u;
+       (continues_before + 1u != continue_pre_push_count) ||
+       (0 != strcmp(update.run_state, "GridPush"))) return 0u;
 
     init_pre_push_box_test(&context);
     errors_before = executor_error_count;
@@ -517,8 +634,8 @@ static uint8 pre_push_box_failures_follow_policy(void)
     feed_observation(450u, 550u, 550u, 550u);
     art_replan_tick(&context, 1u, &update);
     if((errors_before != executor_error_count) ||
-       (continues_before + 1u != continue_pre_push_count) ||
-       (0 != strcmp(update.run_state, "Running"))) return 0u;
+       (continues_before != continue_pre_push_count) ||
+       (0 != strcmp(update.run_state, "ART Sync"))) return 0u;
 
     init_pre_push_box_test(&context);
     errors_before = executor_error_count;
@@ -530,7 +647,7 @@ static uint8 pre_push_box_failures_follow_policy(void)
     fake_executor_state = EXEC_STATE_ERROR;
     art_replan_tick(&context, 1u, &update);
     if((errors_before != executor_error_count) ||
-       (0 != strcmp(update.run_state, "E:BTim"))) return 0u;
+       (0 != strcmp(update.run_state, "ART Sync"))) return 0u;
 
     init_pre_push_box_test(&context);
     art_replan_tick(&context, 1u, &update);
@@ -538,7 +655,7 @@ static uint8 pre_push_box_failures_follow_policy(void)
     art_replan_tick(&context, 1u, &update);
     fake_error_on_box_active_query = 1u;
     art_replan_tick(&context, 1u, &update);
-    return (0 == strcmp(update.run_state, "E:BTim")) ? 1u : 0u;
+    return (0 == strcmp(update.run_state, "ART Sync")) ? 1u : 0u;
 }
 
 static void publish_stable_map(const art_replan_context_struct *context,
@@ -572,7 +689,7 @@ static uint8 run_test(void)
 
     memset(&update, 0xA5, sizeof(update));
     art_replan_begin_initial(&update);
-    if((0u != update.subject2_map_ready) || (0u != update.return_complete) ||
+    if((0u != update.classification_map_ready) || (0u != update.return_complete) ||
        (0.0f != update.initial_pose_x_cm) || (0.0f != update.initial_pose_y_cm)) return 0;
     fake_time_ms = 5000u;
     art_replan_tick(&context, 1u, &update);
@@ -611,7 +728,7 @@ static uint8 run_test(void)
     if((3u != center_request_count) || (0 != strcmp(update.run_state, "RCtr"))) return 0;
 
     solve_before = solve_count;
-    fake_time_ms += EXEC_ART_SYNC_TIMEOUT_MS - 1u;
+    fake_time_ms += RECOVERY_RESYNC_TIMEOUT_MS - 1u;
     art_replan_tick(&context, 1u, &update);
     if((solve_before != solve_count) || (0u != executor_error_count)) return 0;
 
@@ -641,7 +758,7 @@ static uint8 run_test(void)
     art_replan_tick(&context, 1u, &update);
     if((5u != center_request_count) || (0 != strcmp(update.run_state, "RetCtr"))) return 0;
 
-    fake_time_ms += EXEC_ART_SYNC_TIMEOUT_MS - 1u;
+    fake_time_ms += RECOVERY_RESYNC_TIMEOUT_MS - 1u;
     art_replan_tick(&context, 1u, &update);
     if(0u != executor_error_count) return 0;
 
@@ -649,7 +766,7 @@ static uint8 run_test(void)
     art_replan_tick(&context, 1u, &update);
     if((6u != center_request_count) || (0 != strcmp(update.run_state, "RetChk"))) return 0;
 
-    fake_time_ms += EXEC_ART_SYNC_TIMEOUT_MS - 1u;
+    fake_time_ms += RECOVERY_RESYNC_TIMEOUT_MS - 1u;
     art_replan_tick(&context, 1u, &update);
     if(0u != executor_error_count) return 0;
 
@@ -664,7 +781,7 @@ static uint8 run_test(void)
     {
         uint16 starts_before = executor_start_count;
 
-        art_replan_begin_subject2(&update);
+        art_replan_begin_classification(&update);
         fake_time_ms += 5000u;
         art_replan_tick(&context, 1u, &update);
         if(0 != strcmp(update.run_state, "WCTR")) return 0u;
@@ -676,7 +793,7 @@ static uint8 run_test(void)
 
         feed_center(260u, 550u, 259u, 550u, 261u, 550u);
         art_replan_tick(&context, 1u, &update);
-        if((0u == update.subject2_map_ready) ||
+        if((0u == update.classification_map_ready) ||
            (solve_before != solve_count) ||
            (starts_before != executor_start_count) ||
            (fabsf(update.initial_pose_x_cm - 2.0f) > 0.01f) ||
@@ -708,6 +825,7 @@ static uint8 run_test(void)
     if((0 != strcmp(update.run_state, "PCtr")) ||
        (0u != continue_pre_push_count)) return 0u;
 
+    fake_frame_count++;
     fake_time_ms += EXEC_ART_SYNC_TIMEOUT_MS;
     art_replan_tick(&context, 1u, &update);
 #if ART_CENTER_TIMEOUT_FALLBACK_ENABLE
@@ -715,10 +833,10 @@ static uint8 run_test(void)
        (1u != continue_pre_push_count) ||
        (1u != start_pre_push_alignment_count) ||
        (0u != executor_error_count) ||
-       (0 != strcmp(update.run_state, "Running"))) return 0u;
+       (0 != strcmp(update.run_state, "CtrSkip"))) return 0u;
 #else
-    if((1u != executor_error_count) ||
-       (0 != strcmp(update.run_state, "E:Ctr"))) return 0u;
+    if((0u != executor_error_count) ||
+       (0 != strcmp(update.run_state, "ART Sync"))) return 0u;
 #endif
 
     return 1u;
@@ -792,7 +910,7 @@ static uint8 run_timeout_fallback_test(void)
     publish_stable_map(&context, &update);
     TIMEOUT_REQUIRE((request_before + 3u == center_request_count) &&
                     (0 == strcmp(update.run_state, "RCtr")), 6u);
-    fake_time_ms += EXEC_ART_SYNC_TIMEOUT_MS;
+    fake_time_ms += RECOVERY_RESYNC_TIMEOUT_MS;
     art_replan_tick(&context, 1u, &update);
     TIMEOUT_REQUIRE((solve_before + 2u == solve_count) &&
                     (start_before + 2u == executor_start_count), 7u);
@@ -805,7 +923,7 @@ static uint8 run_timeout_fallback_test(void)
     publish_stable_map(&context, &update);
     TIMEOUT_REQUIRE((request_before + 4u == center_request_count) &&
                     (0 == strcmp(update.run_state, "RCtr")), 8u);
-    fake_time_ms += EXEC_ART_SYNC_TIMEOUT_MS;
+    fake_time_ms += RECOVERY_RESYNC_TIMEOUT_MS;
     art_replan_tick(&context, 1u, &update);
     fake_executor_state = EXEC_STATE_DONE;
     art_replan_tick(&context, 1u, &update);
@@ -813,7 +931,7 @@ static uint8 run_timeout_fallback_test(void)
                     (0 == strcmp(update.run_state, "RetCtr")), 9u);
 
     live_rows[5][2] = '.';
-    fake_time_ms += EXEC_ART_SYNC_TIMEOUT_MS;
+    fake_time_ms += RECOVERY_RESYNC_TIMEOUT_MS;
     art_replan_tick(&context, 1u, &update);
     TIMEOUT_REQUIRE((correction_before + 2u == position_correction_start_count) &&
                     (fabsf(position_correction_target_x_cm +
@@ -823,16 +941,26 @@ static uint8 run_timeout_fallback_test(void)
     art_replan_tick(&context, 1u, &update);
     TIMEOUT_REQUIRE((request_before + 6u == center_request_count) &&
                     (0 == strcmp(update.run_state, "RetChk")), 11u);
-    fake_time_ms += EXEC_ART_SYNC_TIMEOUT_MS;
+    fake_time_ms += RECOVERY_RESYNC_TIMEOUT_MS;
+    art_replan_tick(&context, 1u, &update);
+    TIMEOUT_REQUIRE((request_before + 7u == center_request_count) &&
+                    (EXEC_STATE_ERROR != fake_executor_state) &&
+                    (0 == strcmp(update.run_state, "RetChk")), 12u);
+    fake_time_ms += RECOVERY_RESYNC_TIMEOUT_MS;
+    art_replan_tick(&context, 1u, &update);
+    TIMEOUT_REQUIRE((request_before + 8u == center_request_count) &&
+                    (EXEC_STATE_ERROR != fake_executor_state) &&
+                    (0 == strcmp(update.run_state, "RetChk")), 13u);
+    fake_time_ms += RECOVERY_RESYNC_TIMEOUT_MS;
     art_replan_tick(&context, 1u, &update);
     TIMEOUT_REQUIRE((EXEC_STATE_ERROR == fake_executor_state) &&
                     (0u == update.return_complete) &&
                     (error_before + 1u == executor_error_count) &&
-                    (0 == strcmp(update.run_state, "RetErr")), 12u);
+                    (0 == strcmp(update.run_state, "F:Return")), 14u);
     return 1u;
 #else
     return ((error_before + 1u == executor_error_count) &&
-            (0 == strcmp(update.run_state, "E:LCtr"))) ? 1u : 0u;
+            (0 == strcmp(update.run_state, "F:ART1"))) ? 1u : 0u;
 #endif
 
 #undef TIMEOUT_REQUIRE
@@ -853,6 +981,11 @@ static uint8 host_completion_before_task_end_replans(void)
     solve_count = 0u;
     executor_start_count = 0u;
     executor_error_count = 0u;
+    push_boundary_request_count = 0u;
+    push_boundary_force_count = 0u;
+    push_boundary_resume_count = 0u;
+    continue_art_sync_count = 0u;
+    fake_push_boundary_ready = 0u;
     fake_sync_pending = 0u;
     fake_pre_push_pending = 0u;
     fake_executor_state = EXEC_STATE_IDLE;
@@ -887,7 +1020,13 @@ static uint8 host_completion_before_task_end_replans(void)
     live_rows[4][6] = '.';
     fake_frame_count++;
     art_replan_tick(&context, 1u, &update);
-    if((EXEC_STATE_IDLE != fake_executor_state) ||
+    if((EXEC_STATE_RUNNING != fake_executor_state) ||
+       (1u != push_boundary_request_count) ||
+       (0 != strcmp(update.run_state, "Host Pend"))) return 0u;
+
+    fake_push_boundary_ready = 1u;
+    art_replan_tick(&context, 1u, &update);
+    if((EXEC_STATE_RUNNING != fake_executor_state) ||
        (0 != strcmp(update.run_state, "Host Sync"))) return 0u;
 
     publish_stable_map(&context, &update);
@@ -918,6 +1057,112 @@ static uint8 host_completion_before_task_end_replans(void)
     art_replan_tick(&context, 1u, &update);
     return ((EXEC_STATE_IDLE == fake_executor_state) &&
             (0 == strcmp(update.run_state, "Host Sync"))) ? 1u : 0u;
+}
+
+static uint8 start_two_box_art_path(art_replan_context_struct *context,
+                                    art_replan_update_struct *update)
+{
+    art_replan_cancel();
+    fake_time_ms = 0u;
+    fake_frame_count = 0u;
+    center_count = 0u;
+    center_read = 0u;
+    center_request_count = 0u;
+    solve_count = 0u;
+    executor_start_count = 0u;
+    executor_error_count = 0u;
+    push_boundary_request_count = 0u;
+    push_boundary_force_count = 0u;
+    push_boundary_resume_count = 0u;
+    continue_art_sync_count = 0u;
+    fake_push_boundary_ready = 0u;
+    fake_sync_pending = 0u;
+    fake_pre_push_pending = 0u;
+    fake_executor_state = EXEC_STATE_IDLE;
+    memset(&fake_pose, 0, sizeof(fake_pose));
+    memset(&result, 0, sizeof(result));
+    memset(&snapshot, 0, sizeof(snapshot));
+    build_map();
+    live_rows[4][5] = 'B';
+    live_rows[4][6] = 'T';
+
+    context->result = &result;
+    context->snapshot = &snapshot;
+    context->snapshot_rows = snapshot_rows;
+    context->snapshot_valid = &snapshot_valid;
+    context->elapsed_ms = &elapsed_ms;
+    context->start_row = &start_row;
+    context->start_col = &start_col;
+    context->run_mode = RUN_MODE_RUN;
+
+    art_replan_begin_initial(update);
+    fake_time_ms = 5000u;
+    art_replan_tick(context, 1u, update);
+    feed_center(250u, 550u, 251u, 550u, 249u, 550u);
+    art_replan_tick(context, 1u, update);
+    publish_stable_map(context, update);
+    feed_center(250u, 550u, 251u, 550u, 249u, 550u);
+    art_replan_tick(context, 1u, update);
+    return ((1u == executor_start_count) &&
+            (EXEC_STATE_RUNNING == fake_executor_state)) ? 1u : 0u;
+}
+
+static uint8 host_sync_timeout_resumes_old_path(void)
+{
+    art_replan_context_struct context;
+    art_replan_update_struct update;
+    uint8 passed;
+
+    if(0u == start_two_box_art_path(&context, &update)) return 0u;
+    live_rows[4][5] = '.';
+    live_rows[4][6] = '.';
+    fake_frame_count++;
+    art_replan_tick(&context, 1u, &update);
+    if(0 != strcmp(update.run_state, "Host Pend")) return 0u;
+
+    fake_time_ms += RECOVERY_RESYNC_TIMEOUT_MS;
+    art_replan_tick(&context, 1u, &update);
+    if((1u != push_boundary_force_count) ||
+       (0 != strcmp(update.run_state, "Host Sync"))) return 0u;
+
+    fake_time_ms += RECOVERY_RESYNC_TIMEOUT_MS;
+    art_replan_tick(&context, 1u, &update);
+    if((0u != push_boundary_resume_count) ||
+       (0 != strcmp(update.run_state, "ART Retry"))) return 0u;
+
+    fake_time_ms += RECOVERY_RESYNC_TIMEOUT_MS;
+    art_replan_tick(&context, 1u, &update);
+    passed = ((1u == push_boundary_resume_count) &&
+              (EXEC_STATE_RUNNING == fake_executor_state) &&
+              (0 == strcmp(update.run_state, "MCU Go"))) ? 1u : 0u;
+    art_replan_begin_initial(&update);
+    art_replan_cancel();
+    return passed;
+}
+
+static uint8 normal_art_sync_timeout_continues_old_path(void)
+{
+    art_replan_context_struct context;
+    art_replan_update_struct update;
+    uint8 passed;
+
+    if(0u == start_two_box_art_path(&context, &update)) return 0u;
+    fake_sync_pending = 1u;
+    fake_sync_action = 'R';
+    art_replan_tick(&context, 1u, &update);
+
+    fake_time_ms += RECOVERY_RESYNC_TIMEOUT_MS;
+    art_replan_tick(&context, 1u, &update);
+    if((0u != continue_art_sync_count) ||
+       (0 != strcmp(update.run_state, "ART Retry"))) return 0u;
+
+    fake_time_ms += RECOVERY_RESYNC_TIMEOUT_MS;
+    art_replan_tick(&context, 1u, &update);
+    passed = ((1u == continue_art_sync_count) &&
+              (0 == strcmp(update.run_state, "MCU Go"))) ? 1u : 0u;
+    art_replan_begin_initial(&update);
+    art_replan_cancel();
+    return passed;
 }
 
 static uint8 cross_cell_center_retries_without_resetting_timeout(void)
@@ -952,12 +1197,12 @@ static uint8 cross_cell_center_retries_without_resetting_timeout(void)
     fake_time_ms += EXEC_ART_SYNC_TIMEOUT_MS;
     art_replan_tick(&context, 1u, &update);
 #if ART_CENTER_TIMEOUT_FALLBACK_ENABLE
-    return ((continue_before + 1u == continue_pre_push_count) &&
+    return ((continue_before == continue_pre_push_count) &&
             (error_before == executor_error_count) &&
-            (0 == strcmp(update.run_state, "Running"))) ? 1u : 0u;
+            (0 == strcmp(update.run_state, "ART Sync"))) ? 1u : 0u;
 #else
-    return ((error_before + 1u == executor_error_count) &&
-            (0 == strcmp(update.run_state, "E:Ctr"))) ? 1u : 0u;
+    return ((error_before == executor_error_count) &&
+            (0 == strcmp(update.run_state, "ART Sync"))) ? 1u : 0u;
 #endif
 }
 
@@ -1010,7 +1255,7 @@ static uint8 per_subject_launch_yaw_flow(void)
        (0u == art_replan_get_launch_yaw_bias(&launch_yaw_bias_deg)) ||
        (fabsf(launch_yaw_bias_deg - 3.0f) > 0.01f)) return 0u;
 
-    art_replan_begin_subject2(&update);
+    art_replan_begin_classification(&update);
     fake_time_ms += 5000u;
     art_replan_tick(&context, 1u, &update);
     feed_center_yaw(85u, 525u, 184.0f);
@@ -1041,7 +1286,7 @@ static uint8 large_launch_yaw_requires_matching_recheck(void)
     feed_center_yaw(85u, 525u, 180.0f);
     art_replan_tick(&context, 1u, &update);
 
-    art_replan_begin_subject2(&update);
+    art_replan_begin_classification(&update);
     fake_time_ms += 5000u;
     art_replan_tick(&context, 1u, &update);
     request_before = center_request_count;
@@ -1069,7 +1314,7 @@ static uint8 launch_yaw_fallbacks_and_turn_timeout(void)
     art_replan_tick(&context, 1u, &update);
     feed_center_yaw(85u, 525u, 180.0f);
     art_replan_tick(&context, 1u, &update);
-    art_replan_begin_subject2(&update);
+    art_replan_begin_classification(&update);
     fake_time_ms += 5000u;
     art_replan_tick(&context, 1u, &update);
     feed_center_yaw(95u, 525u, 190.0f);
@@ -1095,16 +1340,58 @@ static uint8 launch_yaw_fallbacks_and_turn_timeout(void)
     art_replan_tick(&context, 1u, &update);
     feed_center_yaw(85u, 525u, 180.0f);
     art_replan_tick(&context, 1u, &update);
-    art_replan_begin_subject2(&update);
+    art_replan_begin_classification(&update);
     fake_time_ms += 5000u;
     art_replan_tick(&context, 1u, &update);
     feed_center_yaw(85u, 525u, 187.0f);
     art_replan_tick(&context, 1u, &update);
     fake_time_ms += SUBJECT2_TURN_TIMEOUT_MS;
     art_replan_tick(&context, 1u, &update);
-    return ((EXEC_STATE_ERROR == fake_executor_state) &&
-            (EXEC_ERROR_SUBJECT2_YAW == fake_executor_error) &&
-            (0 == strcmp(update.run_state, "E:Yaw"))) ? 1u : 0u;
+    return ((EXEC_STATE_ERROR != fake_executor_state) &&
+            (0u != yaw_rebase_count) &&
+            (0 == strcmp(update.run_state, "LCH"))) ? 1u : 0u;
+}
+
+static uint8 map_recovery_escalates_and_manual_restart_waits(void)
+{
+    art_replan_context_struct context;
+    art_replan_update_struct update;
+    uint8 retry;
+
+    art_replan_cancel();
+    competition_flow_start(COMPETITION_MODE_SUBJECT1_DEBUG);
+    (void)competition_flow_take_action();
+    memset(&result, 0, sizeof(result));
+    context.result = &result;
+    context.snapshot = &snapshot;
+    context.snapshot_rows = snapshot_rows;
+    context.snapshot_valid = &snapshot_valid;
+    context.elapsed_ms = &elapsed_ms;
+    context.start_row = &start_row;
+    context.start_col = &start_col;
+    context.run_mode = RUN_MODE_RUN;
+    fake_time_ms = 0u;
+    fake_frame_count = 0u;
+    fake_executor_state = EXEC_STATE_IDLE;
+    fake_executor_error = EXEC_ERROR_NONE;
+
+    if(0u == art_replan_manual_recover(&update)) return 0u;
+    for(retry = 0u; retry <= RECOVERY_MAX_RETRIES; retry++)
+    {
+        fake_time_ms += RECOVERY_RESYNC_TIMEOUT_MS;
+        art_replan_tick(&context, 1u, &update);
+    }
+    if((0u == competition_flow_is_fatal()) ||
+       (COMPETITION_FATAL_MAP != competition_flow_get_fatal_reason()) ||
+       (0 != strcmp(update.run_state, "F:Map"))) return 0u;
+
+    if(0u == art_replan_manual_recover(&update)) return 0u;
+    competition_flow_clear_fatal();
+    if((0 != strcmp(update.run_state, "ART Sync")) &&
+       (0 != strcmp(update.run_state, "WMAP"))) return 0u;
+    art_replan_tick(&context, 1u, &update);
+    return ((EXEC_STATE_RUNNING != fake_executor_state) &&
+            (0u == competition_flow_is_fatal())) ? 1u : 0u;
 }
 
 int main(void)
@@ -1124,6 +1411,12 @@ int main(void)
     all_passed &= passed;
     passed = host_completion_before_task_end_replans();
     printf("host-completion-replan        %s\n", (0 != passed) ? "PASS" : "FAIL");
+    all_passed &= passed;
+    passed = host_sync_timeout_resumes_old_path();
+    printf("host-sync-timeout-resume      %s\n", (0 != passed) ? "PASS" : "FAIL");
+    all_passed &= passed;
+    passed = normal_art_sync_timeout_continues_old_path();
+    printf("art-sync-timeout-continue     %s\n", (0 != passed) ? "PASS" : "FAIL");
     all_passed &= passed;
     passed = cross_cell_center_retries_without_resetting_timeout();
     printf("center-cross-cell-retry       %s\n", (0 != passed) ? "PASS" : "FAIL");
@@ -1145,6 +1438,15 @@ int main(void)
     all_passed &= passed;
     passed = launch_yaw_fallbacks_and_turn_timeout();
     printf("launch-yaw-fallbacks         %s\n", (0 != passed) ? "PASS" : "FAIL");
+    all_passed &= passed;
+    passed = map_recovery_escalates_and_manual_restart_waits();
+    printf("map-fatal-manual-recovery     %s\n", (0 != passed) ? "PASS" : "FAIL");
+    all_passed &= passed;
+    passed = error_return_preserves_obstacles();
+    printf("error-return-obstacles        %s\n", (0 != passed) ? "PASS" : "FAIL");
+    all_passed &= passed;
+    passed = error_return_rejects_box_start();
+    printf("error-return-box-start        %s\n", (0 != passed) ? "PASS" : "FAIL");
     all_passed &= passed;
     return (0 != all_passed) ? 0 : 1;
 }
