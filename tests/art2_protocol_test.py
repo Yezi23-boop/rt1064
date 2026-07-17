@@ -122,6 +122,13 @@ namespace["parse_uart_line"]("VISION_REQ 17", uart)
 assert namespace["request_active"] is True
 assert namespace["request_id"] == 17
 assert namespace["sample_id"] == 0
+namespace["classification_candidate"] = 8
+namespace["classification_stable_count"] = 5
+namespace["parse_uart_line"]("VISION_REQ 18", uart)
+assert namespace["request_id"] == 18
+assert namespace["classification_candidate"] == -1
+assert namespace["classification_stable_count"] == 0
+namespace["parse_uart_line"]("VISION_REQ 17", uart)
 
 tx_count = len(uart.tx)
 assert namespace["process_classification"](uart, 4, 749) is False
@@ -191,7 +198,7 @@ assert 'CARTOON_MODEL = "/sd/cartoon_V3.tflite"' in SOURCE
 assert 'NUMBER_MODEL = "/sd/number_V1.tflite"' in SOURCE
 assert 'CARTOON_LABELS = "/sd/cartoon_labels.txt"' in SOURCE
 assert 'NUMBER_LABELS = "/sd/number_labels.txt"' in SOURCE
-assert "DEBUG_CLASSIFY_PRINT = True" in SOURCE
+assert "DEBUG_CLASSIFY_PRINT = False" in SOURCE
 assert "sensor.set_windowing((offset_x, offset_y, crop_w, crop_h))" in SOURCE
 assert SOURCE.index("sensor.set_vflip(True)") < SOURCE.index("set_zoom(ZOOM)")
 assert SOURCE.index("set_zoom(ZOOM)") < SOURCE.index("sensor.set_hmirror(True)")

@@ -1021,6 +1021,10 @@ static uint8 host_completion_before_task_end_replans(void)
     fake_frame_count++;
     art_replan_tick(&context, 1u, &update);
     if((EXEC_STATE_RUNNING != fake_executor_state) ||
+       (0u != push_boundary_request_count)) return 0u;
+    fake_frame_count++;
+    art_replan_tick(&context, 1u, &update);
+    if((EXEC_STATE_RUNNING != fake_executor_state) ||
        (1u != push_boundary_request_count) ||
        (0 != strcmp(update.run_state, "Host Pend"))) return 0u;
 
@@ -1053,6 +1057,9 @@ static uint8 host_completion_before_task_end_replans(void)
     live_rows[4][6] = '.';
     live_rows[5][5] = '.';
     live_rows[5][6] = '.';
+    fake_frame_count++;
+    art_replan_tick(&context, 1u, &update);
+    if(0 != strcmp(update.run_state, "BCtr")) return 0u;
     fake_frame_count++;
     art_replan_tick(&context, 1u, &update);
     return ((EXEC_STATE_IDLE == fake_executor_state) &&
@@ -1118,6 +1125,10 @@ static uint8 host_sync_timeout_resumes_old_path(void)
     live_rows[4][6] = '.';
     fake_frame_count++;
     art_replan_tick(&context, 1u, &update);
+    if((EXEC_STATE_RUNNING != fake_executor_state) ||
+       (0u != push_boundary_request_count)) return 0u;
+    fake_frame_count++;
+    art_replan_tick(&context, 1u, &update);
     if(0 != strcmp(update.run_state, "Host Pend")) return 0u;
 
     fake_time_ms += RECOVERY_RESYNC_TIMEOUT_MS;
@@ -1136,6 +1147,23 @@ static uint8 host_sync_timeout_resumes_old_path(void)
               (EXEC_STATE_RUNNING == fake_executor_state) &&
               (0 == strcmp(update.run_state, "MCU Go"))) ? 1u : 0u;
     art_replan_begin_initial(&update);
+    art_replan_cancel();
+    return passed;
+}
+
+static uint8 invalid_map_does_not_replace_snapshot(void)
+{
+    art_replan_context_struct context;
+    art_replan_update_struct update;
+    uint8 passed;
+
+    if(0u == start_two_box_art_path(&context, &update)) return 0u;
+    fake_sync_pending = 1u;
+    art_replan_tick(&context, 1u, &update);
+    live_rows[4][5] = '.';
+    publish_stable_map(&context, &update);
+    passed = (('B' == snapshot_rows[4][5]) &&
+              ('T' == snapshot_rows[4][6])) ? 1u : 0u;
     art_replan_cancel();
     return passed;
 }
@@ -1414,6 +1442,9 @@ int main(void)
     all_passed &= passed;
     passed = host_sync_timeout_resumes_old_path();
     printf("host-sync-timeout-resume      %s\n", (0 != passed) ? "PASS" : "FAIL");
+    all_passed &= passed;
+    passed = invalid_map_does_not_replace_snapshot();
+    printf("invalid-map-keeps-snapshot    %s\n", (0 != passed) ? "PASS" : "FAIL");
     all_passed &= passed;
     passed = normal_art_sync_timeout_continues_old_path();
     printf("art-sync-timeout-continue     %s\n", (0 != passed) ? "PASS" : "FAIL");

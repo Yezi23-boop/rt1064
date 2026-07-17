@@ -147,6 +147,17 @@ static void feed_center_sample_with_map(uint8 index, uint16 col_q, uint16 row_q)
     feed_line(sample_line);
 }
 
+static void feed_center_sample_with_row(uint8 index, const char *row_five,
+                                        uint16 col_q, uint16 row_q)
+{
+    char sample_line[48];
+
+    feed_map_frame(row_five, col_q, row_q, 1u);
+    snprintf(sample_line, sizeof(sample_line),
+             "CENTER_SAMPLE %u,%u,%u,18000,1", index, col_q, row_q);
+    feed_line(sample_line);
+}
+
 static void feed_observation_sample_with_map(uint8 index,
                                              uint16 car_col_q,
                                              uint16 car_row_q,
@@ -229,6 +240,18 @@ int main(void)
     feed_line("CENTER_SAMPLE 1,600,500,18000,1");
     openart_request_player_center();
     passed &= run_case("new-request-clears-queue", pop_sample_equals(0u, 0u, 0u));
+
+    openart_request_player_center();
+    feed_center_sample_with_row(1u, "#....C.........#", 590u, 550u);
+    feed_center_sample_with_row(2u, "#....C.........#", 595u, 550u);
+    feed_center_sample_with_row(3u, "#....C.........#", 599u, 550u);
+    feed_center_sample_with_row(4u, "#.....C........#", 601u, 550u);
+    feed_center_sample_with_row(5u, "#.....C........#", 605u, 550u);
+    paired_map = openart_get_requested_center_map();
+    map_scan_stats(paired_map, &paired_stats);
+    passed &= run_case("median-cell-paired-map",
+        (1u == paired_stats.car_count) &&
+        (5u == paired_stats.car_row) && (5u == paired_stats.car_col));
 
     memset(tx_text, 0, sizeof(tx_text));
     openart_request_observation(5u, 8u);

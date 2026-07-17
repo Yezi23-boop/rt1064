@@ -94,7 +94,7 @@
 /** waypoint/发车移动到点需要连续满足阈值的 20ms 周期数，用于过滤瞬时越界和惯性抖动。 */
 #define EXEC_ARRIVAL_STABLE_TICKS (3u)
 /** waypoint 切换前的停稳时间，单位 ms；只在拐点/路径点边界停，不拆连续直线段。 */
-#define EXEC_SEGMENT_SETTLE_MS (150u)
+#define EXEC_SEGMENT_SETTLE_MS (500u)
 /** 推箱动作目标点越界补偿开关；只作用于 U/D/L/R，不改变普通移动。 */
 #define EXEC_PUSH_OVERSHOOT_ENABLE (0)
 /** 推箱动作额外前压比例，单位为格；0.20 表示每格 20cm 时多走 4cm。 */
@@ -115,6 +115,8 @@
 #define ART_LAUNCH_FALLBACK_MOVE_CM (30.0f)
 /** ART 来源执行时，完整地图需要连续一致的新帧数量。 */
 #define EXEC_ART_STABLE_FRAMES (1u)
+/** 上位机 B/T 同量减少需要连续一致的新帧数量，避免单帧漏识别触发 Host Sync。 */
+#define ART_HOST_CHANGE_STABLE_FRAMES (2u)
 /** 推箱前车箱观察单次等待时间，单位 ms。 */
 #define ART_BOX_OBSERVE_WAIT_MS (1500u)
 /** 每次 OBSERVE_REQ 需要的有效车箱配对样本数。 */
@@ -124,7 +126,7 @@
 /** 车箱观察失败后沿推箱反方向退开的距离，单位 cm。 */
 #define ART_BOX_OBSERVE_RETRY_MOVE_CM (5.0f)
 /** 观察恢复动作完成后的停稳时间，单位 ms。 */
-#define ART_BOX_OBSERVE_RETRY_SETTLE_MS (300u)
+#define ART_BOX_OBSERVE_RETRY_SETTLE_MS (500u)
 /** 车箱观察最多自动恢复重试次数。 */
 #define ART_BOX_OBSERVE_MAX_RETRIES (1u)
 /** 比赛运行范围：科目一/二/三单项调试或一次 K3 完整连续运行。 */
@@ -132,7 +134,9 @@
 #define COMPETITION_MODE_SUBJECT2_DEBUG (2u)
 #define COMPETITION_MODE_FULL (3u)
 #define COMPETITION_MODE_SUBJECT3_DEBUG (4u)
-#define COMPETITION_MODE (COMPETITION_MODE_SUBJECT2_DEBUG)
+#define COMPETITION_MODE (COMPETITION_MODE_FULL)
+/** ART 比赛首次 K3 后是否继续菜单屏幕渲染；0=关闭，1=保持渲染。 */
+#define SCREEN_RENDER_AFTER_K3_ENABLE (0)
 
 /** 科目三爆炸确认需要连续一致的新 ART 地图数量。 */
 #define SUBJECT3_BLAST_STABLE_FRAMES (2u)

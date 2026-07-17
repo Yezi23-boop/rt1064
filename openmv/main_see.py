@@ -1735,17 +1735,28 @@ def main():
     player_heading_filtered_deg = None
     player_heading_accepted_count = 0
     last_center_request_generation = center_request_generation
+    last_observation_request_generation = observation_request_generation
 
     while True:
         loop_start_us = time.ticks_us()
         clock.tick()
         poll_map_uart_rx(map_uart)
-        if center_request_generation != last_center_request_generation:
+        request_generation_changed = (
+            center_request_generation != last_center_request_generation or
+            observation_request_generation !=
+            last_observation_request_generation)
+        if request_generation_changed:
+            player_center_anchor = None
+            last_precise_player_center = None
+            last_precise_player_grid = None
+            player_center_lost_frames = 0
+            last_player_cell = None
             player_heading_history = []
             player_heading_lost_frames = 0
             player_heading_filtered_deg = None
             player_heading_accepted_count = 0
             last_center_request_generation = center_request_generation
+            last_observation_request_generation = observation_request_generation
         img = sensor.snapshot()
         snapshot_done_us = time.ticks_us()
         now_ms = time.ticks_ms()

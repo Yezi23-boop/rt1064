@@ -47,6 +47,15 @@ assert "resolve_player_center(" in main_body
 assert "PLAYER_CENTER_LOST_FRAME_LIMIT" in OPENMV_SOURCE
 assert "player_center_lost_frames < PLAYER_CENTER_LOST_FRAME_LIMIT" in main_body
 assert "last_precise_player_grid = None" in main_body
+assert "last_observation_request_generation" in main_body
+request_reset_body = main_body[
+    main_body.index("if request_generation_changed:"):
+    main_body.index("img = sensor.snapshot()")
+]
+assert "player_center_anchor = None" in request_reset_body
+assert "last_precise_player_center = None" in request_reset_body
+assert "last_precise_player_grid = None" in request_reset_body
+assert "player_center_lost_frames = 0" in request_reset_body
 
 center_request_body = function_body(
     OPENMV_SOURCE,

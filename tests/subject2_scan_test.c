@@ -856,6 +856,10 @@ static uint8 host_completion_before_task_end_enters_confirm(void)
     fake_frame_count++;
     subject2_tick(&context, &update);
     if((SUBJECT2_EXECUTE_PUSH != subject2_get_state()) ||
+       (0u != push_boundary_request_count)) return 0u;
+    fake_frame_count++;
+    subject2_tick(&context, &update);
+    if((SUBJECT2_EXECUTE_PUSH != subject2_get_state()) ||
        (EXEC_STATE_RUNNING != fake_executor_state) ||
        (0u == push_boundary_request_count) ||
        (0 != strcmp(update.run_state, "Host Pend"))) return 0u;
@@ -889,6 +893,10 @@ static uint8 host_completion_timeout_resumes_preserved_path(void)
 
     live_rows[5][6] = '.';
     live_rows[5][9] = '.';
+    fake_frame_count++;
+    subject2_tick(&context, &update);
+    if((SUBJECT2_EXECUTE_PUSH != subject2_get_state()) ||
+       (0u != push_boundary_request_count)) return 0u;
     fake_frame_count++;
     subject2_tick(&context, &update);
     if((SUBJECT2_EXECUTE_PUSH != subject2_get_state()) ||
@@ -1007,7 +1015,7 @@ static uint8 task_end_timeout_plans_remaining_box(void)
     return (SUBJECT2_EXECUTE_PUSH == subject2_get_state()) ? 1u : 0u;
 }
 
-static uint8 confirm_new_conflict_disables_mcu_resume(void)
+static uint8 confirm_invalid_map_allows_mcu_resume(void)
 {
     subject2_context_struct context;
     subject2_update_struct update;
@@ -1022,6 +1030,8 @@ static uint8 confirm_new_conflict_disables_mcu_resume(void)
     live_rows[5][9] = '.';
     fake_frame_count++;
     subject2_tick(&context, &update);
+    fake_frame_count++;
+    subject2_tick(&context, &update);
     fake_push_boundary_ready = 1u;
     subject2_tick(&context, &update);
     if(SUBJECT2_CONFIRM_MAP != subject2_get_state()) return 0u;
@@ -1034,9 +1044,9 @@ static uint8 confirm_new_conflict_disables_mcu_resume(void)
     fake_time_ms += RECOVERY_RESYNC_TIMEOUT_MS;
     subject2_tick(&context, &update);
 
-    return ((SUBJECT2_EXECUTE_PUSH != subject2_get_state()) &&
-            (0u == resume_push_stop_count) &&
-            (0 != strcmp(update.run_state, "MCU Go"))) ? 1u : 0u;
+    return ((SUBJECT2_EXECUTE_PUSH == subject2_get_state()) &&
+            (1u == resume_push_stop_count) &&
+            (0 == strcmp(update.run_state, "MCU Go"))) ? 1u : 0u;
 }
 
 static uint8 subject3_push_block_retries_original_planner(void)
@@ -2905,7 +2915,7 @@ int main(void)
     printf("subject2-task-timeout-go    %s\n", (0u != passed) ? "PASS" : "FAIL");
     passed &= task_end_timeout_plans_remaining_box();
     printf("subject2-task-timeout-next  %s\n", (0u != passed) ? "PASS" : "FAIL");
-    passed &= confirm_new_conflict_disables_mcu_resume();
+    passed &= confirm_invalid_map_allows_mcu_resume();
     printf("subject2-confirm-conflict   %s\n", (0u != passed) ? "PASS" : "FAIL");
     passed &= confirm_map_ignores_transient_invalid_frames();
     printf("subject2-confirm-transient  %s\n", (0u != passed) ? "PASS" : "FAIL");

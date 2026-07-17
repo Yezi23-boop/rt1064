@@ -132,6 +132,7 @@ static uint8 error_return_start_col = 0u;
 static float error_return_offset_x_cm = 0.0f;
 static float error_return_offset_y_cm = 0.0f;
 static uint8 error_return_pose_valid = 0u;
+static uint8 screen_render_enabled = 1u;
 static uint8 subject2_active = 0;                            // 1 表示科目二接管 executor 和 ART 段末事件。
 static uint8 subject3_active = 0;                            // 1 表示科目三包装科目二并接管炸弹流程。
 
@@ -161,6 +162,9 @@ static void handle_execute_event(menu_key_event_enum event);
 static void execute_current_selection(void);
 static void build_art_replan_context(art_replan_context_struct *context);
 static void apply_art_replan_update(const art_replan_update_struct *update);
+static void menu_enable_screen_render(void);
+static void menu_disable_screen_render_after_k3(void);
+static uint8 menu_screen_render_allowed(void);
 
 static const menu_page_def_struct menu_pages[] =
 {
@@ -285,6 +289,7 @@ static void enter_run_mode_page(void)
 static void go_home(void)
 {
     candidate_mode = run_mode;
+    menu_enable_screen_render();
     enter_page(MENU_PAGE_HOME);
 }
 
@@ -300,6 +305,25 @@ static void reset_error_return_state(void)
     error_return_source_valid = 0u;
 }
 
+static void menu_enable_screen_render(void)
+{
+    screen_render_enabled = 1u;
+    need_redraw = 1u;
+}
+
+static void menu_disable_screen_render_after_k3(void)
+{
+#if !SCREEN_RENDER_AFTER_K3_ENABLE
+    screen_render_enabled = 0u;
+    need_redraw = 0u;
+#endif
+}
+
+static uint8 menu_screen_render_allowed(void)
+{
+    return screen_render_enabled;
+}
+
 static void safe_go_home(void)
 {
     // K4 长按是全局安全出口：无论当前页面在哪，都取消 ART 等待并停止底盘执行。
@@ -310,6 +334,7 @@ static void safe_go_home(void)
     vision_uart_cancel();
     competition_flow_cancel();
     reset_error_return_state();
+    menu_enable_screen_render();
     subject2_active = 0u;
     subject3_active = 0u;
     if(EXEC_STATE_IDLE != executor_get_state())
@@ -339,6 +364,7 @@ static void clear_result_state(void)
     vision_uart_cancel();
     competition_flow_cancel();
     reset_error_return_state();
+    menu_enable_screen_render();
     subject2_active = 0u;
     subject3_active = 0u;
     if(EXEC_STATE_IDLE != executor_get_state())
@@ -665,7 +691,10 @@ static void move_cursor(int8 delta)
     }
 
     save_page_cursor();
-    screen_draw_nav_cursor(previous_cursor_row, cursor_row);
+    if(0u != menu_screen_render_allowed())
+    {
+        screen_draw_nav_cursor(previous_cursor_row, cursor_row);
+    }
 }
 
 static void enter_selected_item(void)
@@ -751,6 +780,7 @@ static void handle_run_event(menu_key_event_enum event)
            EXEC_STATE_DONE == executor_get_state())
         {
             executor_stop();
+            menu_enable_screen_render();
             run_state = "Idle";
         }
         else
@@ -908,6 +938,7 @@ static void execute_current_selection(void)
 #endif
 
     candidate_mode = run_mode;
+    menu_enable_screen_render();
     art_replan_cancel();
     subject3_cancel();
     subject2_cancel();
@@ -928,6 +959,7 @@ static void execute_current_selection(void)
         competition_launch_yaw_deg = get_control_status()->current_yaw;
         art_replan_reset_competition_yaw();
         competition_flow_start(COMPETITION_MODE);
+        menu_disable_screen_render_after_k3();
         action = competition_flow_take_action();
         start_competition_action(action, &update);
         apply_art_replan_update(&update);
@@ -1155,6 +1187,12 @@ static void refresh_current_page_dynamic(void)
     const menu_page_def_struct *page;
     uint32 now_ms;
 
+    if(0u == menu_screen_render_allowed())
+    {
+        need_redraw = 0u;
+        return;
+    }
+
     page = find_page(current_page);
     if((0 == page->refresh_ms) || (0 == page->on_refresh))
     {
@@ -1259,6 +1297,7 @@ static void handle_execute_event(menu_key_event_enum event)
             vision_uart_cancel();
             competition_flow_cancel();
             reset_error_return_state();
+            menu_enable_screen_render();
             subject2_active = 0u;
             subject3_active = 0u;
             executor_stop();
@@ -1273,6 +1312,11 @@ static void handle_execute_event(menu_key_event_enum event)
 static void draw_current_page(void)
 {
     const menu_page_def_struct *page = find_page(current_page);
+
+    if(0u == menu_screen_render_allowed())
+    {
+        return;
+    }
 
     if(page->id != current_page)
     {
@@ -1310,6 +1354,7 @@ void menu_init(void)
     playback_last_ms = 0;
     dynamic_last_ms = time_ms();
     run_state = "Idle";
+    menu_enable_screen_render();
     reset_error_return_state();
     clear_result(&last_result);
     mark_redraw();

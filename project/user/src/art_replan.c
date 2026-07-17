@@ -58,6 +58,9 @@ static uint8 art_external_change_pending = 0;                       // 1 表示�
 static uint8 art_host_completion_waiting_boundary = 0;              // 1 表示已锁存上位机变化，正完成当前20cm格。
 static uint32 art_host_completion_start_ms = 0u;
 static uint8 art_host_path_preserved = 0u;
+static uint8 art_host_change_box_count = 0u;
+static uint8 art_host_change_target_count = 0u;
+static uint8 art_host_change_stable_count = 0u;
 static uint8 art_segment_sync_retry_count = 0u;
 static uint8 art_segment_sync_map_seen = 0u;
 static art_center_batch_struct art_center_batch;
@@ -426,6 +429,36 @@ static uint8 art_stats_paired_count_decreased(const map_scan_stats_struct *stats
     return (box_reduction == target_reduction) ? 1u : 0u;
 }
 
+static void art_host_change_reset(void)
+{
+    art_host_change_box_count = 0u;
+    art_host_change_target_count = 0u;
+    art_host_change_stable_count = 0u;
+}
+
+static uint8 art_host_change_confirm(const map_scan_stats_struct *stats)
+{
+    if((1u != stats->car_count) ||
+       (0u == art_stats_paired_count_decreased(stats)))
+    {
+        art_host_change_reset();
+        return 0u;
+    }
+    if((stats->box_count != art_host_change_box_count) ||
+       (stats->target_count != art_host_change_target_count))
+    {
+        art_host_change_box_count = stats->box_count;
+        art_host_change_target_count = stats->target_count;
+        art_host_change_stable_count = 1u;
+    }
+    else if(art_host_change_stable_count < ART_HOST_CHANGE_STABLE_FRAMES)
+    {
+        art_host_change_stable_count++;
+    }
+    return (art_host_change_stable_count >= ART_HOST_CHANGE_STABLE_FRAMES) ?
+           1u : 0u;
+}
+
 static void art_replan_begin_host_sync(art_replan_update_struct *update)
 {
     art_box_observation_session_reset(&art_box_session);
@@ -497,11 +530,11 @@ static uint8 art_replan_handle_host_completion(art_replan_update_struct *update)
         return 0u;
     }
     map_scan_stats(source, &stats);
-    if((1u != stats.car_count) ||
-       (0 == art_stats_paired_count_decreased(&stats)))
+    if(0u == art_host_change_confirm(&stats))
     {
         return 0u;
     }
+    art_host_change_reset();
 
     if(0u != executor_request_stop_after_current_push())
     {
@@ -1624,13 +1657,14 @@ static void art_handle_stable_map(const art_replan_context_struct *context,
     art_replan_phase_enum phase = art_replan_phase;
     executor_art_center_result_enum center_result = EXEC_ART_CENTER_NONE;
 
-    art_replan_save_snapshot(context, source);
-    map_scan_stats(context->snapshot, &stats);
+    map_scan_stats(source, &stats);
 
     if((ART_REPLAN_SEGMENT == phase) &&
        (1u == stats.car_count) &&
        (0 != art_stats_done(&stats)))
     {
+        art_replan_save_snapshot(context, source);
+        art_segment_sync_map_seen = 1u;
         art_replan_begin_center_request(ART_REPLAN_SEGMENT_CENTER, "RCtr", update);
         return;
     }
@@ -1645,6 +1679,12 @@ static void art_handle_stable_map(const art_replan_context_struct *context,
             update->redraw = 1;
         }
         return;
+    }
+
+    art_replan_save_snapshot(context, source);
+    if(ART_REPLAN_SEGMENT == phase)
+    {
+        art_segment_sync_map_seen = 1u;
     }
 
     if((ART_REPLAN_SEGMENT == phase) && (0u != art_external_change_pending))
@@ -1882,6 +1922,7 @@ void art_replan_cancel(void)
     art_host_completion_waiting_boundary = 0u;
     art_host_completion_start_ms = 0u;
     art_host_path_preserved = 0u;
+    art_host_change_reset();
     art_segment_sync_retry_count = 0u;
     art_segment_sync_map_seen = 0u;
     art_requested_center_clear();
@@ -1976,6 +2017,7 @@ void art_replan_begin_initial(art_replan_update_struct *update)
     art_host_completion_waiting_boundary = 0u;
     art_host_completion_start_ms = 0u;
     art_host_path_preserved = 0u;
+    art_host_change_reset();
     art_segment_sync_retry_count = 0u;
     art_segment_sync_map_seen = 0u;
     art_home_center_col_q = 0;
@@ -2366,10 +2408,6 @@ void art_replan_tick(const art_replan_context_struct *context,
     stable_source = 0;
     if(0 != art_get_stable_map(&stable_source))
     {
-        if(ART_REPLAN_SEGMENT == art_replan_phase)
-        {
-            art_segment_sync_map_seen = 1u;
-        }
         art_handle_stable_map(context, stable_source, update);
     }
 }

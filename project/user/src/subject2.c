@@ -77,6 +77,9 @@ static uint8 host_completion_waiting_boundary;
 static uint32 host_completion_start_ms;
 static uint8 host_path_preserved;
 static uint32 host_monitor_last_frame;
+static uint8 host_change_box_count;
+static uint8 host_change_target_count;
+static uint8 host_change_stable_count;
 static char transit_overlap_rows[MAP_ROWS][MAP_COLS + 1];
 static map_source_struct transit_overlap_source;
 static uint16 transit_overlap_cell = INVALID_STATE;
@@ -2207,6 +2210,7 @@ static uint8 subject2_handle_host_completion(subject2_update_struct *update)
        (stats.box_count >= task_start_box_count) ||
        (stats.target_count >= task_start_target_count))
     {
+        host_change_stable_count = 0u;
         return 0u;
     }
 
@@ -2214,8 +2218,25 @@ static uint8 subject2_handle_host_completion(subject2_update_struct *update)
     target_reduction = (uint8)(task_start_target_count - stats.target_count);
     if(box_reduction != target_reduction)
     {
+        host_change_stable_count = 0u;
         return 0u;
     }
+    if((stats.box_count != host_change_box_count) ||
+       (stats.target_count != host_change_target_count))
+    {
+        host_change_box_count = stats.box_count;
+        host_change_target_count = stats.target_count;
+        host_change_stable_count = 1u;
+    }
+    else if(host_change_stable_count < ART_HOST_CHANGE_STABLE_FRAMES)
+    {
+        host_change_stable_count++;
+    }
+    if(host_change_stable_count < ART_HOST_CHANGE_STABLE_FRAMES)
+    {
+        return 0u;
+    }
+    host_change_stable_count = 0u;
 
     if(0u != executor_request_stop_after_current_push())
     {
@@ -2509,13 +2530,6 @@ static void subject2_tick_confirm_map(const subject2_context_struct *context,
     {
         source = subject2_effective_map(context, source, 1u);
         map_scan_stats(source, &stats);
-        /* 双 C 或数量变化仍是上位机发布了新场景的证据，不能盲续；
-         * 没有任何车证据的空帧则不应阻塞 MCU 路线兜底。 */
-        if((frame_count != confirm_start_frame) &&
-           (0u != stats.car_count))
-        {
-            confirm_map_seen = 1u;
-        }
         if((1u != stats.car_count) ||
            (stats.box_count != stats.target_count) ||
            (stats.box_count > task_start_box_count) ||
@@ -2525,6 +2539,10 @@ static void subject2_tick_confirm_map(const subject2_context_struct *context,
         }
         else
         {
+            if(frame_count != confirm_start_frame)
+            {
+                confirm_map_seen = 1u;
+            }
             stability = map_stability_tracker_push(
                 &confirm_tracker, frame_count, source,
                 EXEC_ART_STABLE_FRAMES);
@@ -3220,6 +3238,9 @@ void subject2_cancel(void)
     host_completion_start_ms = 0u;
     host_path_preserved = 0u;
     host_monitor_last_frame = 0u;
+    host_change_box_count = 0u;
+    host_change_target_count = 0u;
+    host_change_stable_count = 0u;
     box_object_count = 0u;
     target_object_count = 0u;
     current_vision_request_id = 0u;

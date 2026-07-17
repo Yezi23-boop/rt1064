@@ -68,7 +68,7 @@ static void subject3_fail(competition_fatal_reason_enum reason,
                           subject2_update_struct *update)
 {
     subject3_recovery_state = subject3_state;
-    executor_stop();
+    /* 保留当前路径，菜单层需先读取错误瞬间的格点和格内偏移再统一清理。 */
     executor_set_error(error);
     competition_flow_latch_fatal(reason);
     subject3_state = SUBJECT3_ERROR;

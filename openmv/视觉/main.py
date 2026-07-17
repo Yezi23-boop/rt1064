@@ -16,7 +16,7 @@ CARTOON_LABELS = "/sd/cartoon_labels.txt"
 NUMBER_LABELS = "/sd/number_labels.txt"
 CLASS_CONFIDENCE_Q_MIN = 750
 CLASS_STABLE_FRAMES = 5
-DEBUG_CLASSIFY_PRINT = True  # True=IDE串口打印当前模式、类别和置信度
+DEBUG_CLASSIFY_PRINT = False  # True=IDE串口打印当前模式、类别和置信度
 
 MODE_NONE = 0
 MODE_BOX = 1
@@ -98,6 +98,7 @@ def parse_uart_line(line, uart):
             return
         request_id = next_request_id
         sample_id = 0
+        reset_classification_stability()
         request_active = True
         return
     if line.startswith("VISION_ACK "):
